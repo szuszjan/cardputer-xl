@@ -315,9 +315,11 @@ void drawLinuxBoot();
 void header(const char* title);
 void drawHeaderStatus();
 void footer(const char* text);
-void updateLauncherIndicators();
 void drawHomeTile(int tile, bool selected);
+void drawHomeTileColored(int tile, uint16_t fill, uint16_t border);
+uint16_t lerpColor565(uint16_t a, uint16_t b, float t);
 void startHomeFocusAnimation(int oldTile, int newTile);
+void animateHomeTileClick(int tile);
 void drawQuickMenuTile(int tile, bool selected);
 void drawQuickMenuCaption();
 void drawQuickMenu();
@@ -349,7 +351,10 @@ void cLog(const String& line);
 void updateBuiltinDisplay(bool force = false);
 int noteCharacterCount();
 
-void drawLauncherRow(int row); void updateLauncherIndicators(); void updateLauncherSelection(int oldSelected, int oldScroll);
+void drawLauncherTileColored(int listIndex, int gridPos, uint16_t fill, uint16_t border);
+void drawLauncherTile(int listIndex, int gridPos, bool selected);
+void drawLauncherGrid(); void drawLauncherCaption(); void animateLauncherTileClick(int listIndex);
+void updateLauncherSelection(int oldSelected, int oldScroll);
 void drawSystemValue(int rowIndex, const String& value, uint16_t color); void updateSystemValues();
 void handleCLabCursorKeys(); void loadPersistentState(); void savePersistentState(); void markStateDirty();
 void syncLauncherScroll(); void moveCLabCursor(int direction);
@@ -499,6 +504,11 @@ const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR"
 const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt"};
 constexpr int APP_COUNT = 29;
 constexpr int APP_VISIBLE = 5;
+// Abstract two-character glyphs for the APPS grid (see drawLauncherTileColored()
+// below), same punctuation-icon style as Home's homeTileIcons[] - the default
+// GFX font is ASCII-only, so these are stand-ins rather than literal pictograms.
+// Indexed identically to appNames[]/appInfo[] (i.e. by Page - 1).
+const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><"};
 // appNames[] is indexed by (Page - 1) and only covers pages up to GAMEHUB -
 // WIFISETUP/LOCKSCREEN/SCREENSAVER aren't "apps" and have no entry, so a raw
 // appNames[(int)p - 1] lookup on an arbitrary Page is not always safe. This
@@ -1627,33 +1637,109 @@ void header(const char* title) {
 }
 void footer(const char* text) { tft.fillRect(0, H - FOOTER_H, W, FOOTER_H, ILI9341_DARKGREY); tft.setTextSize(1); tft.setTextColor(ILI9341_WHITE, ILI9341_DARKGREY); tft.setCursor(5, H - 12); tft.print(text); }
 
-void drawLauncherRow(int row) {
-  int listIndex = appScroll + row, y = CONTENT_Y + row * 33;
-  tft.fillRect(2, y - 2, 290, 33, ui.bg); if (listIndex >= SECONDARY_APP_COUNT) return;
-  bool sel = listIndex == appSelected; uint16_t fill = sel ? ui.selected : ILI9341_DARKGREY;
-  tft.fillRoundRect(12, y, 276, 29, 4, fill); tft.drawRoundRect(12, y, 276, 29, 4, sel ? ui.accent : ui.dim);
-  tft.setTextSize(1); tft.setTextColor(ui.text, fill); tft.setCursor(20, y + 5);
-  if (listIndex == 0) {
-    tft.print("BACK TO HOME");
-    tft.setTextColor(sel ? ui.text : ui.dim, fill); tft.setCursor(20, y + 16); tft.print("return to tile launcher");
-  } else {
-    int i = secondaryAppIndices[listIndex - 1];
-    tft.print(appNames[i]);
-    tft.setTextColor(sel ? ui.text : ui.dim, fill); tft.setCursor(20, y + 16); tft.print(appInfo[i]);
+// ---- APPS: the full app list, as a small-icon grid (icon + label below,
+// like Home's own tiles) instead of the old scrolling text-row list --------
+constexpr int LAUNCHER_GRID_COLS = 4, LAUNCHER_GRID_ROWS = 3;
+constexpr int LAUNCHER_GRID_VISIBLE = LAUNCHER_GRID_COLS * LAUNCHER_GRID_ROWS;
+constexpr int LAUNCHER_TILE_W = 72, LAUNCHER_TILE_H = 46, LAUNCHER_GAP_X = 6, LAUNCHER_GAP_Y = 6;
+constexpr int LAUNCHER_GRID_LEFT = (W - (LAUNCHER_TILE_W * LAUNCHER_GRID_COLS + LAUNCHER_GAP_X * (LAUNCHER_GRID_COLS - 1))) / 2;
+constexpr int LAUNCHER_GRID_TOP = CONTENT_Y + 2;
+constexpr int LAUNCHER_GRID_BOTTOM = LAUNCHER_GRID_TOP + LAUNCHER_GRID_ROWS * LAUNCHER_TILE_H + (LAUNCHER_GRID_ROWS - 1) * LAUNCHER_GAP_Y;
+// listIndex is the logical 0..SECONDARY_APP_COUNT-1 position (0 = BACK TO
+// HOME, matching drawLauncherCaption()/keyboard()'s ENTER handling below);
+// gridPos is where it currently sits within the visible scroll window
+// (0..LAUNCHER_GRID_VISIBLE-1), used only to place it on screen - the two
+// differ by appScroll and are kept separate so the select-animation below
+// can address "the tile at grid position N" without recomputing anything.
+void drawLauncherTileColored(int listIndex, int gridPos, uint16_t fill, uint16_t border) {
+  int col = gridPos % LAUNCHER_GRID_COLS, row = gridPos / LAUNCHER_GRID_COLS;
+  int x = LAUNCHER_GRID_LEFT + col * (LAUNCHER_TILE_W + LAUNCHER_GAP_X);
+  int y = LAUNCHER_GRID_TOP + row * (LAUNCHER_TILE_H + LAUNCHER_GAP_Y);
+  tft.fillRoundRect(x, y, LAUNCHER_TILE_W, LAUNCHER_TILE_H, 6, fill);
+  tft.drawRoundRect(x, y, LAUNCHER_TILE_W, LAUNCHER_TILE_H, 6, border);
+  tft.setTextSize(2); tft.setTextColor(ui.text, fill);
+  tft.setCursor(x + (LAUNCHER_TILE_W - 24) / 2, y + 4);
+  tft.print(listIndex == 0 ? "<<" : appIcons[secondaryAppIndices[listIndex - 1]]);
+  tft.setTextSize(1); tft.setTextColor(ui.text, fill);
+  String label = listIndex == 0 ? "HOME" : String(appNames[secondaryAppIndices[listIndex - 1]]);
+  constexpr int maxChars = (LAUNCHER_TILE_W - 4) / 6;
+  if ((int)label.length() > maxChars) label = label.substring(0, maxChars);
+  tft.setCursor(x + max(2, (LAUNCHER_TILE_W - (int)label.length() * 6) / 2), y + 26);
+  tft.print(label);
+}
+void drawLauncherTile(int listIndex, int gridPos, bool selected) {
+  drawLauncherTileColored(listIndex, gridPos, selected ? ui.selected : ILI9341_DARKGREY, selected ? ui.accent : ui.dim);
+}
+void drawLauncherGrid() {
+  tft.fillRect(0, CONTENT_Y, W, LAUNCHER_GRID_BOTTOM - CONTENT_Y, ui.bg);
+  for (int gridPos = 0; gridPos < LAUNCHER_GRID_VISIBLE; ++gridPos) {
+    int listIndex = appScroll + gridPos;
+    if (listIndex >= SECONDARY_APP_COUNT) break;
+    drawLauncherTile(listIndex, gridPos, listIndex == appSelected);
   }
 }
-void updateLauncherIndicators() {
-  tft.fillRect(294, CONTENT_Y - 1, 22, APP_VISIBLE * 33, ui.bg);
-  if (appScroll > 0) { tft.setTextColor(ui.accent, ui.bg); tft.setCursor(302, CONTENT_Y); tft.print("^"); }
-  if (appScroll + APP_VISIBLE < SECONDARY_APP_COUNT) { tft.setTextColor(ui.accent, ui.bg); tft.setCursor(302, CONTENT_Y + APP_VISIBLE * 33 - 10); tft.print("v"); }
+// A small two-line caption below the grid names the current selection in
+// full, plus its one-line description - a 72px tile has no room for either.
+void drawLauncherCaption() {
+  int y = LAUNCHER_GRID_BOTTOM + 3;
+  tft.fillRect(0, y, W, H - FOOTER_H - y, ui.bg);
+  tft.setTextSize(1);
+  if (appSelected == 0) {
+    tft.setTextColor(ui.accent, ui.bg); tft.setCursor(8, y + 2); tft.print("BACK TO HOME");
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(8, y + 14); tft.print("return to tile launcher");
+  } else {
+    int i = secondaryAppIndices[appSelected - 1];
+    tft.setTextColor(ui.accent, ui.bg); tft.setCursor(8, y + 2); tft.print(appNames[i]);
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(8, y + 14); tft.print(appInfo[i]);
+  }
 }
 void drawLauncherFocusRail(int y) { (void)y; }
 void startLauncherFocusAnimation(int oldSelected, int oldScroll) { (void)oldSelected; (void)oldScroll; }
 void updateLauncherFocusAnimation() {}
+// Selection change: same colour-fade approach as Home's startHomeFocusAnimation()
+// (see the lerpColor565 comment above it) when the scroll window didn't move;
+// a scroll jump just redraws the whole grid fresh instead, unanimated, the
+// same way the old row-list handled it.
 void updateLauncherSelection(int oldSelected, int oldScroll) {
-  if (oldScroll == appScroll) { drawLauncherRow(oldSelected - appScroll); drawLauncherRow(appSelected - appScroll); }
-  else for (int row = 0; row < APP_VISIBLE; ++row) drawLauncherRow(row);
-  updateLauncherIndicators();
+  if (oldScroll != appScroll) { drawLauncherGrid(); drawLauncherCaption(); return; }
+  int oldGridPos = oldSelected - appScroll, newGridPos = appSelected - appScroll;
+  constexpr int FRAMES = 5;
+  for (int f = 1; f <= FRAMES; ++f) {
+    float t = (float)f / FRAMES;
+    drawLauncherTileColored(oldSelected, oldGridPos, lerpColor565(ui.selected, ILI9341_DARKGREY, t), lerpColor565(ui.accent, ui.dim, t));
+    drawLauncherTileColored(appSelected, newGridPos, lerpColor565(ILI9341_DARKGREY, ui.selected, t), lerpColor565(ui.dim, ui.accent, t));
+    M5Cardputer.update();
+    delay(10);
+  }
+  drawLauncherCaption();
+}
+// Same "pressed" flash as animateHomeTileClick(), played on the tile at its
+// current on-screen grid position right before ENTER navigates away.
+void animateLauncherTileClick(int listIndex) {
+  int gridPos = listIndex - appScroll;
+  int col = gridPos % LAUNCHER_GRID_COLS, row = gridPos / LAUNCHER_GRID_COLS;
+  int x = LAUNCHER_GRID_LEFT + col * (LAUNCHER_TILE_W + LAUNCHER_GAP_X);
+  int y = LAUNCHER_GRID_TOP + row * (LAUNCHER_TILE_H + LAUNCHER_GAP_Y);
+  for (int inset = 0; inset <= 6; inset += 2) {
+    tft.fillRoundRect(x, y, LAUNCHER_TILE_W, LAUNCHER_TILE_H, 6, ui.selected);
+    tft.fillRoundRect(x + inset, y + inset, LAUNCHER_TILE_W - inset * 2, LAUNCHER_TILE_H - inset * 2, 4, ui.accent);
+    M5Cardputer.update();
+    delay(12);
+  }
+}
+// Keeps the current row of the selected tile within the visible 3-row
+// window, scrolling by whole rows (a multiple of LAUNCHER_GRID_COLS) so the
+// grid always stays aligned - the same idea as the old list's one-row-at-a-
+// time scroll, just in row instead of single-item units.
+void syncLauncherScroll() {
+  int selRow = appSelected / LAUNCHER_GRID_COLS;
+  int scrollRow = appScroll / LAUNCHER_GRID_COLS;
+  if (selRow < scrollRow) scrollRow = selRow;
+  if (selRow >= scrollRow + LAUNCHER_GRID_ROWS) scrollRow = selRow - LAUNCHER_GRID_ROWS + 1;
+  int lastRow = (SECONDARY_APP_COUNT - 1) / LAUNCHER_GRID_COLS;
+  int maxScrollRow = max(0, lastRow - LAUNCHER_GRID_ROWS + 1);
+  scrollRow = constrain(scrollRow, 0, maxScrollRow);
+  appScroll = scrollRow * LAUNCHER_GRID_COLS;
 }
 
 const char* homeTileLabel(int tile) {
@@ -1666,31 +1752,72 @@ const char* homeTileIcon(int tile) {
   if (tile < 0 || tile >= 5 || homeAppIndices[tile] < 0) return "--";
   return homeTileIcons[tile];
 }
-void drawHomeTile(int tile, bool selected) {
+// Linear-interpolates two RGB565 colours channel-by-channel (5/6/5 bits).
+// Used for the short colour-fade select/click animations below: since every
+// frame of those redraws a tile at its own fixed position and size (never
+// moving, growing or shrinking outside its own bounds), fading the colour is
+// the one thing that's always safe to animate on this write-only panel -
+// each frame's fill fully overwrites the last one's, so nothing can trail.
+uint16_t lerpColor565(uint16_t a, uint16_t b, float t) {
+  t = constrain(t, 0.0f, 1.0f);
+  int ar = (a >> 11) & 0x1F, ag = (a >> 5) & 0x3F, ab = a & 0x1F;
+  int br = (b >> 11) & 0x1F, bg = (b >> 5) & 0x3F, bb = b & 0x1F;
+  int r = ar + (int)((br - ar) * t), g = ag + (int)((bg - ag) * t), bl = ab + (int)((bb - ab) * t);
+  return (uint16_t)((r << 11) | (g << 5) | bl);
+}
+// The actual paint, taking explicit fill/border colours rather than just a
+// selected flag - drawHomeTile() below is the plain at-rest case, and the
+// select/click animations reuse this directly with in-between colours.
+void drawHomeTileColored(int tile, uint16_t fill, uint16_t border) {
   int col = tile % 2, row = tile / 2;
   int x = HOME_TILE_LEFT + col * (HOME_TILE_W + HOME_TILE_GAP_X);
   int y = HOME_TILE_TOP + row * (HOME_TILE_H + HOME_TILE_GAP_Y);
-  uint16_t fill = selected ? ui.selected : ILI9341_DARKGREY;
   tft.fillRoundRect(x, y, HOME_TILE_W, HOME_TILE_H, 7, fill);
-  tft.drawRoundRect(x, y, HOME_TILE_W, HOME_TILE_H, 7, selected ? ui.accent : ui.dim);
-  // Icons stay neutral. The moving focus marker is the only accent, so it
-  // cannot look as if an icon itself is being redrawn or animated.
+  tft.drawRoundRect(x, y, HOME_TILE_W, HOME_TILE_H, 7, border);
   tft.setTextSize(2); tft.setTextColor(ui.text, fill);
   tft.setCursor(x + 12, y + 8); tft.print(homeTileIcon(tile));
   tft.setTextSize(1); tft.setTextColor(ui.text, fill);
   tft.setCursor(x + 12, y + 36); tft.print(homeTileLabel(tile));
 }
+void drawHomeTile(int tile, bool selected) {
+  drawHomeTileColored(tile, selected ? ui.selected : ILI9341_DARKGREY, selected ? ui.accent : ui.dim);
+}
+// Selection change: a short colour fade rather than an instant swap - the
+// deselected tile eases from its selected colours back down, the newly
+// selected one eases up, both redrawn at their own fixed position/size every
+// frame (see the lerpColor565 comment above for why that's trail-safe).
 void startHomeFocusAnimation(int oldTile, int newTile) {
-  // The external ILI9341 leaves visible trails when an extra focus frame is
-  // drawn over locally refreshed tiles. Keep navigation clean: redraw only
-  // the deselected and selected cards, with no travelling or pulsing marker.
   homeFocusAnimating = false;
-  drawHomeTile(oldTile, false);
-  drawHomeTile(newTile, true);
+  constexpr int FRAMES = 5;
+  for (int f = 1; f <= FRAMES; ++f) {
+    float t = (float)f / FRAMES;
+    drawHomeTileColored(oldTile, lerpColor565(ui.selected, ILI9341_DARKGREY, t), lerpColor565(ui.accent, ui.dim, t));
+    drawHomeTileColored(newTile, lerpColor565(ILI9341_DARKGREY, ui.selected, t), lerpColor565(ui.dim, ui.accent, t));
+    M5Cardputer.update();
+    delay(10);
+  }
 }
 void updateHomeFocusAnimation() {
-  // Intentionally empty: tile selection has no animated overlay because it
-  // produced display trails on the real panel.
+  // Intentionally empty: the selection-change fade above is a one-shot
+  // animation played inline in startHomeFocusAnimation(), not something
+  // that needs a per-frame tick from loop().
+}
+// A quick "pressed" flash played right before actually navigating away on
+// ENTER: the fill insets in briefly then the caller proceeds. Each frame
+// still repaints the tile's full, fixed footprint before drawing the
+// (possibly smaller) inset on top - the same technique
+// closeQuickMenuAnimated() uses for the same reason: a shrinking fill alone
+// would leave the previous, larger frame's outer ring behind.
+void animateHomeTileClick(int tile) {
+  int col = tile % 2, row = tile / 2;
+  int x = HOME_TILE_LEFT + col * (HOME_TILE_W + HOME_TILE_GAP_X);
+  int y = HOME_TILE_TOP + row * (HOME_TILE_H + HOME_TILE_GAP_Y);
+  for (int inset = 0; inset <= 6; inset += 2) {
+    tft.fillRoundRect(x, y, HOME_TILE_W, HOME_TILE_H, 7, ui.selected);
+    tft.fillRoundRect(x + inset, y + inset, HOME_TILE_W - inset * 2, HOME_TILE_H - inset * 2, 5, ui.accent);
+    M5Cardputer.update();
+    delay(12);
+  }
 }
 
 // ---- Floating quick-launch overlay (Opt key, any page) --------------------
@@ -1754,19 +1881,28 @@ void drawQuickMenu() {
 // write-only display: the previous frame's pixels are never left behind,
 // because the whole zone they could possibly be in is always reset first.
 constexpr int QUICKMENU_SLIDE_ZONE_H = H - QUICKMENU_Y;
+// Cubic easing for the slide, instead of a constant speed: fast-start/
+// slow-finish for the rise (it settles into place rather than just
+// stopping), slow-start/fast-finish for the mirror-image dismissal (it
+// accelerates away instead of trailing off flatly) - the classic "spring
+// open, snap closed" motion pairing.
+float easeOutCubic(float t) { t = 1.0f - t; return 1.0f - t * t * t; }
+float easeInCubic(float t) { return t * t * t; }
 // Opening sweeps the panel up from H (invisible, its top edge sitting on the
 // very last screen row) to QUICKMENU_Y - a dock "rising" into view. The
 // icons themselves only appear on the final, full-size frame (drawQuickMenu())
-// once the panel is at rest, rather than being clipped mid-slide.
+// once the panel is at rest, rather than being clipped mid-slide. More,
+// closer-together, eased frames than a first pass at this looked - that's
+// what actually reads as smooth motion rather than a handful of jumps.
 void openQuickMenuAnimated() {
-  constexpr int FRAMES = 8;
+  constexpr int FRAMES = 14;
   for (int f = 1; f <= FRAMES; ++f) {
-    int y = H - (H - QUICKMENU_Y) * f / FRAMES;
+    int y = H - (int)((H - QUICKMENU_Y) * easeOutCubic((float)f / FRAMES));
     tft.fillRect(QUICKMENU_X, QUICKMENU_Y, QUICKMENU_W, QUICKMENU_SLIDE_ZONE_H, ui.bg);
     tft.fillRoundRect(QUICKMENU_X, y, QUICKMENU_W, QUICKMENU_H, 10, ui.panel);
     tft.drawRoundRect(QUICKMENU_X, y, QUICKMENU_W, QUICKMENU_H, 10, ui.accent);
     M5Cardputer.update();
-    delay(16);
+    delay(9);
   }
   drawQuickMenu();
 }
@@ -1776,16 +1912,16 @@ void openQuickMenuAnimated() {
 // after this returns) replaces that flat colour with whatever the real page
 // underneath actually looks like.
 void closeQuickMenuAnimated() {
-  constexpr int FRAMES = 8;
-  for (int f = FRAMES - 1; f >= 0; --f) {
-    int y = H - (H - QUICKMENU_Y) * f / FRAMES;
+  constexpr int FRAMES = 14;
+  for (int f = FRAMES; f >= 0; --f) {
+    int y = H - (int)((H - QUICKMENU_Y) * easeInCubic((float)f / FRAMES));
     tft.fillRect(QUICKMENU_X, QUICKMENU_Y, QUICKMENU_W, QUICKMENU_SLIDE_ZONE_H, ui.bg);
     if (f > 0) {
       tft.fillRoundRect(QUICKMENU_X, y, QUICKMENU_W, QUICKMENU_H, 10, ui.panel);
       tft.drawRoundRect(QUICKMENU_X, y, QUICKMENU_W, QUICKMENU_H, 10, ui.accent);
     }
     M5Cardputer.update();
-    delay(16);
+    delay(9);
   }
 }
 
@@ -1803,9 +1939,9 @@ void drawLauncher() {
   }
   header(launcherHome ? "HOME" : "APPS");
   if (!launcherHome) {
-    for (int row = 0; row < APP_VISIBLE; ++row) drawLauncherRow(row);
-    updateLauncherIndicators();
-    footer(";/. SELECT  ENTER OPEN  FN HOME");
+    drawLauncherGrid();
+    drawLauncherCaption();
+    footer(";/. ROW  ,// COLUMN  ENTER OPEN  FN HOME");
     return;
   }
   homeFocusAnimating = false;
@@ -4119,8 +4255,13 @@ void applyWebAction(const String& action) {
       else if (action == "enter") { playEnterSound(); if (homeSelected == 5) { launcherHome = false; appSelected = appScroll = 0; } else if (homeAppIndices[homeSelected] >= 0) page = static_cast<Page>(homeAppIndices[homeSelected] + 1); }
       if (homeSelected != oldHome) startHomeFocusAnimation(oldHome, homeSelected);
     } else {
-      if (action == "up" || action == "left") { playMenuSound(); appSelected = (appSelected + SECONDARY_APP_COUNT - 1) % SECONDARY_APP_COUNT; syncLauncherScroll(); }
-      else if (action == "down" || action == "right") { playMenuSound(); appSelected = (appSelected + 1) % SECONDARY_APP_COUNT; syncLauncherScroll(); }
+      // Same 4-column grid convention as the physical-keyboard path in
+      // keyboard() above: up/down cross rows, left/right stay in-row.
+      int col = appSelected % LAUNCHER_GRID_COLS;
+      if (action == "up" && appSelected - LAUNCHER_GRID_COLS >= 0) { playMenuSound(); appSelected -= LAUNCHER_GRID_COLS; syncLauncherScroll(); }
+      else if (action == "down" && appSelected + LAUNCHER_GRID_COLS < SECONDARY_APP_COUNT) { playMenuSound(); appSelected += LAUNCHER_GRID_COLS; syncLauncherScroll(); }
+      else if (action == "left" && col > 0) { playMenuSound(); appSelected--; syncLauncherScroll(); }
+      else if (action == "right" && col < LAUNCHER_GRID_COLS - 1 && appSelected + 1 < SECONDARY_APP_COUNT) { playMenuSound(); appSelected++; syncLauncherScroll(); }
       else if (action == "enter") { playEnterSound(); if (appSelected == 0) { launcherHome = true; homeSelected = 5; } else page = static_cast<Page>(secondaryAppIndices[appSelected - 1] + 1); }
     }
   } else if (page == SETTINGS && !pinChangeActive) {
@@ -4330,7 +4471,6 @@ void startScan() {
 void checkScan() { if (!scanRunning) return; int r = WiFi.scanComplete(); if (r >= 0) { networkCount = r; scanRunning = false; scanDone = true; redrawNeeded = true; } else if (millis() - scanStarted > 20000UL) { WiFi.scanDelete(); networkCount = 0; scanRunning = false; scanDone = true; redrawNeeded = true; } }
 void calcResult() { float v = calcInput.toFloat(); if (calcOp == 0) calcTotal = v; else if (calcOp == '+') calcTotal += v; else if (calcOp == '-') calcTotal -= v; else if (calcOp == '*') calcTotal *= v; else if (calcOp == '/') { if (v == 0) { calcStatus = "Error: division by zero"; calcInput = "0"; calcOp = 0; calcNew = true; updateCalcPanel(); return; } calcTotal /= v; } calcInput = String(calcTotal, 4); while (calcInput.endsWith("0")) calcInput.remove(calcInput.length() - 1); if (calcInput.endsWith(".")) calcInput.remove(calcInput.length() - 1); calcStatus = "Result"; calcOp = 0; calcNew = true; updateCalcPanel(); }
 void changeSetting(int d) { if (settingSelected == 0) { themeIndex = (themeIndex + d + THEME_COUNT) % THEME_COUNT; applyTheme(); } else if (settingSelected == 1) { displayRotation = displayRotation == 3 ? 1 : 3; tft.setRotation(displayRotation); } else if (settingSelected == 2) setBacklight(!backlightOn); else if (settingSelected == 3) { brightnessLevel = (brightnessLevel + d + 9) % 10 + 1; applyBacklight(); } else if (settingSelected == 4) sleepIndex = (sleepIndex + d + 5) % 5; else if (settingSelected == 5) lockAfterScreensaverIndex = (lockAfterScreensaverIndex + d + 5) % 5; else if (settingSelected == 6) { volumeLevel = (volumeLevel + d + 11) % 11; applyVolume(); } markStateDirty(); redrawNeeded = true; }
-void syncLauncherScroll() { if (appSelected < appScroll) appScroll = appSelected; if (appSelected >= appScroll + APP_VISIBLE) appScroll = appSelected - APP_VISIBLE + 1; appScroll = constrain(appScroll, 0, max(0, SECONDARY_APP_COUNT - APP_VISIBLE)); }
 void clabBackspace() {
   bool changed = false, merged = false;
   if (cCursorColumn > 0) {
@@ -4698,8 +4838,17 @@ void keyboard() {
   if (page == LAUNCHER) {
     if (k.enter) {
       playEnterSound();
-      if (launcherHome) { if (homeSelected == 5) { launcherHome = false; appSelected = appScroll = 0; } else if (homeAppIndices[homeSelected] >= 0) page = static_cast<Page>(homeAppIndices[homeSelected] + 1); }
-      else { if (appSelected == 0) { launcherHome = true; homeSelected = 5; } else page = static_cast<Page>(secondaryAppIndices[appSelected - 1] + 1); }
+      // A quick "pressed" flash on whatever's selected before actually
+      // navigating away - see animateHomeTileClick()/animateLauncherTileClick().
+      if (launcherHome) {
+        animateHomeTileClick(homeSelected);
+        if (homeSelected == 5) { launcherHome = false; appSelected = appScroll = 0; }
+        else if (homeAppIndices[homeSelected] >= 0) page = static_cast<Page>(homeAppIndices[homeSelected] + 1);
+      } else {
+        animateLauncherTileClick(appSelected);
+        if (appSelected == 0) { launcherHome = true; homeSelected = 5; }
+        else page = static_cast<Page>(secondaryAppIndices[appSelected - 1] + 1);
+      }
       redrawNeeded = true; return;
     }
     if (launcherHome) {
@@ -4719,10 +4868,21 @@ void keyboard() {
       else if (down && homeSelected < 4) homeSelected += 2;
       if (homeSelected != oldHome) { playMenuSound(); startHomeFocusAnimation(oldHome, homeSelected); }
     } else {
-      for (char c : k.word) {
-        if (c == ',' || c == ';') { int oldSelected = appSelected, oldScroll = appScroll; appSelected = (appSelected + SECONDARY_APP_COUNT - 1) % SECONDARY_APP_COUNT; syncLauncherScroll(); playMenuSound(); updateLauncherSelection(oldSelected, oldScroll); }
-        else if (c == '/' || c == '.') { int oldSelected = appSelected, oldScroll = appScroll; appSelected = (appSelected + 1) % SECONDARY_APP_COUNT; syncLauncherScroll(); playMenuSound(); updateLauncherSelection(oldSelected, oldScroll); }
-      }
+      // A 4-column grid: ;/. move a whole row (LAUNCHER_GRID_COLS) at a
+      // time, ,// move one tile within the current row only - the same
+      // "up/down cross rows, left/right stay in-row" convention Home uses
+      // above, just generalized to a variable-length, scrolling grid.
+      int oldSelected = appSelected, oldScroll = appScroll;
+      bool up = wordContains(k.word, ';');
+      bool left = wordContains(k.word, ',');
+      bool right = wordContains(k.word, '/');
+      bool down = wordContains(k.word, '.');
+      int col = appSelected % LAUNCHER_GRID_COLS;
+      if (up && appSelected - LAUNCHER_GRID_COLS >= 0) appSelected -= LAUNCHER_GRID_COLS;
+      else if (down && appSelected + LAUNCHER_GRID_COLS < SECONDARY_APP_COUNT) appSelected += LAUNCHER_GRID_COLS;
+      else if (left && col > 0) appSelected--;
+      else if (right && col < LAUNCHER_GRID_COLS - 1 && appSelected + 1 < SECONDARY_APP_COUNT) appSelected++;
+      if (appSelected != oldSelected) { playMenuSound(); syncLauncherScroll(); updateLauncherSelection(oldSelected, oldScroll); }
     }
     return;
   }
