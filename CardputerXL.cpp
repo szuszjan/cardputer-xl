@@ -94,6 +94,7 @@
 #include <esp_system.h>
 #include <time.h>
 #include <HijelHID_BLEKeyboard.h>
+#include <vector>  // TrikiFrameParser's re-sync buffer, see "---- TRIKI SCOPE"
 #include "cardc_documentation.h"
 #include "lock_wallpaper.h"
 
@@ -117,7 +118,13 @@
 
 struct Theme { uint16_t bg, panel, accent, text, dim, selected; };
 
-enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, WIFISETUP, LOCKSCREEN, SCREENSAVER };
+// TRIKISCOPE is appended right after GAMEHUB (the last of the "real app"
+// pages that appNames[]/appInfo[]/appIcons[]/pageDisplayName() index by
+// Page-1) rather than inserted earlier in the list - inserting in the
+// middle would shift every later page's index into those arrays by one.
+// WIFISETUP/LOCKSCREEN/SCREENSAVER are deliberately last and excluded from
+// that indexing already (see pageDisplayName()).
+enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, TRIKISCOPE, WIFISETUP, LOCKSCREEN, SCREENSAVER };
 
 struct CVar { String name; long value; };
 
@@ -193,6 +200,10 @@ bool tetTryRotate();
 void drawTetrisField();
 void drawTetris();
 void stepTetrisGame();
+
+void buildTrikiCube();
+void drawTrikiScope();
+void stepTrikiScope();
 
 void captureCLabUserApp();
 
@@ -536,15 +547,15 @@ Page previousPage = LAUNCHER;
 Page screensaverReturnPage = LAUNCHER;
 unsigned long screensaverStartedAt = 0;
 unsigned long screensaverLastFrameAt = 0;
-const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES"};
-const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt"};
-constexpr int APP_COUNT = 29;
+const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES", "TRIKI SCOPE"};
+const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt", "Zabka Triki motion controller over BLE"};
+constexpr int APP_COUNT = 30;
 constexpr int APP_VISIBLE = 5;
 // Abstract two-character glyphs for the APPS grid (see drawLauncherTileColored()
 // below), same punctuation-icon style as Home's homeTileIcons[] - the default
 // GFX font is ASCII-only, so these are stand-ins rather than literal pictograms.
 // Indexed identically to appNames[]/appInfo[] (i.e. by Page - 1).
-const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><"};
+const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><", "^y"};
 // appNames[] is indexed by (Page - 1) and only covers pages up to GAMEHUB -
 // WIFISETUP/LOCKSCREEN/SCREENSAVER aren't "apps" and have no entry, so a raw
 // appNames[(int)p - 1] lookup on an arbitrary Page is not always safe. This
@@ -562,8 +573,8 @@ constexpr int HOME_TILE_COUNT = 6;
 int homeAppIndices[5] = {5, 2, 6, 4, 8}; // C LAB, Notes, REPL, Calc, Settings
 const char* homeTileIcons[HOME_TILE_COUNT] = {"{}", "[]", ">_", "+-", "*", "::"};
 // Entry 0 is a navigation action; the remaining entries open secondary apps.
-const int secondaryAppIndices[24] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28};
-constexpr int SECONDARY_APP_COUNT = 25;
+const int secondaryAppIndices[25] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29};
+constexpr int SECONDARY_APP_COUNT = 26;
 bool launcherHome = true;
 int homeSelected = 0;
 int appSelected = 0, appScroll = 0;
@@ -3652,6 +3663,608 @@ void stepTetrisGame() {
   drawTetrisField();
 }
 
+// ============================================================================
+// TRIKI SCOPE: connects to a Zabka Triki BLE motion controller and shows its
+// live IMU data - orientation (wireframe cube + yaw/pitch/roll), G-force,
+// shock detection, and a rolling gyro/accel/G-magnitude graph.
+//
+// Ported near-verbatim from C:\Users\retro\...\Arduino\TrikiStickS3 (BLE
+// protocol/frame parsing from its TrikiProtocol.h, IMU fusion/shock
+// detection from its TrikiEngine.h/Orientation.h, cube projection from its
+// CubeRender.h) - that code is the end result of an extremely long
+// hardware-testing process on real Triki hardware (an axis swap, a yaw
+// sign, a resting-baseline accelerometer sign mismatch, none of them
+// guesses). Every transform choice below is carried over as-is, not
+// re-derived. Types are prefixed Triki* to avoid colliding with this file's
+// own similarly-shaped types (KVec3 for Kart Racer, etc.).
+//
+// Runs as a NimBLE *central* (scanning + connecting out to the Triki),
+// alongside this file's existing BLE *peripheral* role (HijelHID_BLEKeyboard
+// advertises this device itself as a keyboard) - NimBLE-Arduino supports
+// both roles on one stack at once (CONFIG_BT_NIMBLE_ROLE_CENTRAL defaults
+// on), and bleKeyboard.begin() in setup() already calls NimBLEDevice::init()
+// unconditionally, so no separate init is needed here.
+// ============================================================================
+
+// ---- Protocol (TrikiProtocol.h) --------------------------------------------
+static const char* TRIKI_NAME_NEEDLE = "triki";  // case-insensitive substring match
+static const uint32_t TRIKI_SCAN_MS = 8000;
+static const uint32_t TRIKI_CONNECT_TIMEOUT_MS = 8000;
+static const uint32_t TRIKI_SETTLE_MS = 1500;   // pause before sending the start command
+static const uint32_t TRIKI_COOLDOWN_MS = 1500; // pause between reconnect attempts
+
+static const NimBLEUUID TRIKI_NUS_SERVICE_UUID("6e400001-b5a3-f393-e0a9-e50e24dcca9e");
+static const NimBLEUUID TRIKI_NUS_RX_UUID("6e400002-b5a3-f393-e0a9-e50e24dcca9e");
+static const NimBLEUUID TRIKI_NUS_TX_UUID("6e400003-b5a3-f393-e0a9-e50e24dcca9e");
+static const NimBLEUUID TRIKI_NUS_LED_UUID("6e400004-b5a3-f393-e0a9-e50e24dcca9e");
+static const uint8_t TRIKI_START_COMMAND[] = {0x20, 0x10, 0x00, 0xD0, 0x07, 0x68, 0x00, 0x03};
+
+static const float TRIKI_GYRO_SCALE = 131.0f;     // LSB per deg/s
+static const float TRIKI_ACCEL_SCALE = 2048.0f;   // LSB per g
+static const uint32_t TRIKI_STARTUP_DISCARD = 20; // frames to ignore right after connect - device wakes noisy
+
+struct TrikiImuSample {
+  double gyroX, gyroY, gyroZ, accelX, accelY, accelZ;  // deg/s, g
+  bool buttonPressed;
+  double accelMagnitudeG() const { return sqrt(accelX * accelX + accelY * accelY + accelZ * accelZ); }
+};
+
+// Re-assembles 14-byte frames from a stream of BLE notification chunks,
+// re-syncing on the header/status byte pair so a frame split or merged
+// across notification boundaries doesn't desync the whole stream.
+class TrikiFrameParser {
+public:
+  static const size_t FRAME_LEN = 14;
+  void push(const uint8_t* data, size_t len, void (*onFrame)(const TrikiImuSample&)) {
+    buf.insert(buf.end(), data, data + len);
+    while (true) {
+      int idx = findHeader();
+      if (idx < 0) {
+        if (!buf.empty() && buf.back() == 0x22) { uint8_t last = buf.back(); buf.clear(); buf.push_back(last); }
+        else buf.clear();
+        return;
+      }
+      if (idx > 0) buf.erase(buf.begin(), buf.begin() + idx);
+      if (buf.size() < FRAME_LEN) return;
+      rawFrameCount++;
+      if (rawFrameCount > TRIKI_STARTUP_DISCARD) onFrame(decodeFrame(buf.data()));
+      buf.erase(buf.begin(), buf.begin() + FRAME_LEN);
+    }
+  }
+private:
+  std::vector<uint8_t> buf;
+  uint32_t rawFrameCount = 0;
+  int findHeader() {
+    size_t start = 0;
+    while (true) {
+      int idx = -1;
+      for (size_t i = start; i < buf.size(); i++) if (buf[i] == 0x22) { idx = (int)i; break; }
+      if (idx < 0 || (size_t)(idx + 1) >= buf.size()) return -1;
+      uint8_t status = buf[idx + 1];
+      if (status == 0x00 || status == 0x01) return idx;
+      start = idx + 1;
+    }
+  }
+  static TrikiImuSample decodeFrame(const uint8_t* frame) {
+    uint8_t status = frame[1];
+    int16_t gx, gy, gz, ax, ay, az;
+    memcpy(&gx, frame + 2, 2); memcpy(&gy, frame + 4, 2); memcpy(&gz, frame + 6, 2);
+    memcpy(&ax, frame + 8, 2); memcpy(&ay, frame + 10, 2); memcpy(&az, frame + 12, 2);
+    TrikiImuSample s;
+    s.gyroX = gx / TRIKI_GYRO_SCALE; s.gyroY = gy / TRIKI_GYRO_SCALE; s.gyroZ = gz / TRIKI_GYRO_SCALE;
+    s.accelX = ax / TRIKI_ACCEL_SCALE; s.accelY = ay / TRIKI_ACCEL_SCALE; s.accelZ = az / TRIKI_ACCEL_SCALE;
+    s.buttonPressed = status & 0x01;
+    return s;
+  }
+};
+
+// ---- Orientation (Orientation.h): quaternion + Madgwick AHRS filter -------
+static constexpr double TRIKI_GYRO_GAIN = 7.5;
+static constexpr double TRIKI_MADGWICK_BETA = 0.1;
+static constexpr double TRIKI_DEG2RAD = M_PI / 180.0;
+static constexpr double TRIKI_RAD2DEG = 180.0 / M_PI;
+
+struct TrikiQuaternion {
+  double x = 0.0, y = 0.0, z = 0.0, w = 1.0;
+  TrikiQuaternion() {}
+  TrikiQuaternion(double x_, double y_, double z_, double w_) : x(x_), y(y_), z(z_), w(w_) {}
+  static TrikiQuaternion identity() { return TrikiQuaternion(0.0, 0.0, 0.0, 1.0); }
+  TrikiQuaternion operator*(const TrikiQuaternion& o) const {
+    return TrikiQuaternion(
+      w * o.x + x * o.w + y * o.z - z * o.y,
+      w * o.y + y * o.w + z * o.x - x * o.z,
+      w * o.z + z * o.w + x * o.y - y * o.x,
+      w * o.w - x * o.x - y * o.y - z * o.z);
+  }
+  TrikiQuaternion normalized() const {
+    double n = sqrt(x * x + y * y + z * z + w * w);
+    if (n == 0.0) return identity();
+    return TrikiQuaternion(x / n, y / n, z / n, w / n);
+  }
+  TrikiQuaternion inverse() const {
+    double n2 = x * x + y * y + z * z + w * w;
+    if (n2 == 0.0) return identity();
+    return TrikiQuaternion(-x / n2, -y / n2, -z / n2, w / n2);
+  }
+  void rotateVector(double vx, double vy, double vz, double& rx, double& ry, double& rz) const {
+    TrikiQuaternion qv(vx, vy, vz, 0.0);
+    TrikiQuaternion r = (*this) * qv * this->inverse();
+    rx = r.x; ry = r.y; rz = r.z;
+  }
+  void toEulerDegrees(double& yawDeg, double& pitchDeg, double& rollDeg) const {
+    double sinrCosp = 2.0 * (w * x + y * z), cosrCosp = 1.0 - 2.0 * (x * x + y * y);
+    double roll = atan2(sinrCosp, cosrCosp);
+    double sinp = 2.0 * (w * y - z * x);
+    double pitch = (fabs(sinp) >= 1.0) ? copysign(M_PI / 2.0, sinp) : asin(sinp);
+    double sinyCosp = 2.0 * (w * z + x * y), cosyCosp = 1.0 - 2.0 * (y * y + z * z);
+    double yaw = atan2(sinyCosp, cosyCosp);
+    yawDeg = yaw * TRIKI_RAD2DEG; pitchDeg = pitch * TRIKI_RAD2DEG; rollDeg = roll * TRIKI_RAD2DEG;
+  }
+  static TrikiQuaternion fromAxisAngle(double ax, double ay, double az, double angleDegrees) {
+    double length = sqrt(ax * ax + ay * ay + az * az);
+    if (length == 0.0) return identity();
+    double angleRad = angleDegrees * TRIKI_DEG2RAD;
+    double s = sin(0.5 * angleRad) / length;
+    return TrikiQuaternion(ax * s, ay * s, az * s, cos(0.5 * angleRad));
+  }
+};
+inline TrikiQuaternion trikiEulerToQuaternion(double yawDeg, double pitchDeg, double rollDeg) {
+  TrikiQuaternion qz = TrikiQuaternion::fromAxisAngle(0.0, 0.0, 1.0, yawDeg);
+  TrikiQuaternion qy = TrikiQuaternion::fromAxisAngle(0.0, 1.0, 0.0, pitchDeg);
+  TrikiQuaternion qx = TrikiQuaternion::fromAxisAngle(1.0, 0.0, 0.0, rollDeg);
+  return qz * qy * qx;
+}
+class TrikiMadgwickAhrs {
+public:
+  explicit TrikiMadgwickAhrs(double beta = TRIKI_MADGWICK_BETA) : _beta(beta) { q[0] = 1.0; q[1] = 0.0; q[2] = 0.0; q[3] = 0.0; }
+  void update(double gx, double gy, double gz, double axIn, double ayIn, double azIn, double dt) {
+    if (dt <= 0.0) return;
+    double q1 = q[0], q2 = q[1], q3 = q[2], q4 = q[3];
+    double _2q1 = 2.0 * q1, _2q2 = 2.0 * q2, _2q3 = 2.0 * q3, _2q4 = 2.0 * q4;
+    double _4q1 = 4.0 * q1, _4q2 = 4.0 * q2, _4q3 = 4.0 * q3, _8q2 = 8.0 * q2, _8q3 = 8.0 * q3;
+    double q1q1 = q1 * q1, q2q2 = q2 * q2, q3q3 = q3 * q3, q4q4 = q4 * q4;
+    if (axIn == 0.0 && ayIn == 0.0 && azIn == 0.0) return;
+    double norm = sqrt(axIn * axIn + ayIn * ayIn + azIn * azIn);
+    double ax = axIn / norm, ay = ayIn / norm, az = azIn / norm;
+    double s1 = _4q1 * q3q3 + _2q3 * ax + _4q1 * q2q2 - _2q2 * ay;
+    double s2 = _4q2 * q4q4 - _2q4 * ax + 4.0 * q1q1 * q2 - _2q1 * ay - _4q2 + _8q2 * q2q2 + _8q2 * q3q3 + _4q2 * az;
+    double s3 = 4.0 * q1q1 * q3 + _2q1 * ax + _4q3 * q4q4 - _2q4 * ay - _4q3 + _8q3 * q2q2 + _8q3 * q3q3 + _4q3 * az;
+    double s4 = 4.0 * q2q2 * q4 - _2q2 * ax + 4.0 * q3q3 * q4 - _2q3 * ay;
+    norm = sqrt(s1 * s1 + s2 * s2 + s3 * s3 + s4 * s4);
+    if (norm > 0.0) { s1 /= norm; s2 /= norm; s3 /= norm; s4 /= norm; }
+    double qDot1 = 0.5 * (-q2 * gx - q3 * gy - q4 * gz) - _beta * s1;
+    double qDot2 = 0.5 * (q1 * gx + q3 * gz - q4 * gy) - _beta * s2;
+    double qDot3 = 0.5 * (q1 * gy - q2 * gz + q4 * gx) - _beta * s3;
+    double qDot4 = 0.5 * (q1 * gz + q2 * gy - q3 * gx) - _beta * s4;
+    double nq1 = q1 + qDot1 * dt, nq2 = q2 + qDot2 * dt, nq3 = q3 + qDot3 * dt, nq4 = q4 + qDot4 * dt;
+    double qn = sqrt(nq1 * nq1 + nq2 * nq2 + nq3 * nq3 + nq4 * nq4);
+    if (qn == 0.0) return;
+    q[0] = nq1 / qn; q[1] = nq2 / qn; q[2] = nq3 / qn; q[3] = nq4 / qn;
+  }
+  TrikiQuaternion asQuaternion() const { return TrikiQuaternion(q[1], q[2], q[3], q[0]); }
+  void setQuaternion(const TrikiQuaternion& quat) {
+    TrikiQuaternion n = quat.normalized();
+    q[0] = n.w; q[1] = n.x; q[2] = n.y; q[3] = n.z;
+  }
+private:
+  double _beta;
+  double q[4];
+};
+
+// ---- Cube projection (CubeRender.h) ----------------------------------------
+static constexpr double TRIKI_CUBE_SIZE = 22.0;
+static constexpr double TRIKI_PERSPECTIVE_D = 140.0;
+struct TrikiVec3 { double x, y, z; };
+TrikiVec3 trikiCubeVertices[8];
+int trikiCubeEdges[12][2];
+void buildTrikiCube() {
+  int i = 0;
+  for (int xs = -1; xs <= 1; xs += 2) for (int ys = -1; ys <= 1; ys += 2) for (int zs = -1; zs <= 1; zs += 2)
+    trikiCubeVertices[i++] = {xs * TRIKI_CUBE_SIZE, ys * TRIKI_CUBE_SIZE, zs * TRIKI_CUBE_SIZE};
+  int e = 0;
+  for (int a = 0; a < 8; a++) for (int b = a + 1; b < 8; b++) {
+    int diff = (trikiCubeVertices[a].x != trikiCubeVertices[b].x) + (trikiCubeVertices[a].y != trikiCubeVertices[b].y) + (trikiCubeVertices[a].z != trikiCubeVertices[b].z);
+    if (diff == 1) { trikiCubeEdges[e][0] = a; trikiCubeEdges[e][1] = b; e++; }
+  }
+}
+
+// ---- Engine (TrikiEngine.h): fusion + shock detection + calibration -------
+static constexpr double TRIKI_CALIBRATION_SECONDS = 1.5;
+static constexpr int TRIKI_CALIBRATION_MIN_SAMPLES = 20;
+// A real impact is a SPIKE: G rises sharply over a few milliseconds.
+// Triggering on the RATE of rise (jerk, g/s) plus a minimum peak - not a
+// static magnitude alone - targets that specific signature: a magnitude-only
+// threshold both false-positives on desk taps and misses genuinely sharp
+// hits under it.
+static constexpr double TRIKI_SHOCK_JERK_THRESHOLD_G_PER_S = 140.0;
+static constexpr double TRIKI_SHOCK_MIN_MAGNITUDE_G = 2.4;
+// A separate, much higher threshold for freezing orientation integration
+// during a shock (a hard impact rings the gyro with a mechanical vibration
+// spike that isn't real rotation - yaw has no accelerometer correction to
+// self-heal from that, unlike pitch/roll).
+static constexpr double TRIKI_FREEZE_JERK_THRESHOLD_G_PER_S = 300.0;
+static constexpr double TRIKI_FREEZE_MIN_MAGNITUDE_G = 4.0;
+// ~4-5s of history at the Triki's native ~80-100Hz.
+static constexpr int TRIKI_GRAPH_BUFFER_SIZE = 400;
+struct TrikiGraphSample { double gx, gy, gz, ax, ay, az; };
+
+class TrikiEngine {
+public:
+  TrikiEngine() : ahrs(TRIKI_MADGWICK_BETA) {}
+  void setGyroBias(double x, double y, double z) {
+    portENTER_CRITICAL(&mux);
+    gyroBiasX = x; gyroBiasY = y; gyroBiasZ = z;
+    portEXIT_CRITICAL(&mux);
+  }
+  void startCalibration() {
+    portENTER_CRITICAL(&mux);
+    calibrating = true; calibStartMicros = 0;
+    calibSumX = 0.0; calibSumY = 0.0; calibSumZ = 0.0; calibCount = 0;
+    portEXIT_CRITICAL(&mux);
+  }
+  bool isCalibrating() { portENTER_CRITICAL(&mux); bool v = calibrating; portEXIT_CRITICAL(&mux); return v; }
+  void resetYaw() {
+    portENTER_CRITICAL(&mux);
+    TrikiQuaternion cur = ahrs.asQuaternion();
+    double yawDeg, pitchDeg, rollDeg;
+    cur.toEulerDegrees(yawDeg, pitchDeg, rollDeg);
+    ahrs.setQuaternion(trikiEulerToQuaternion(0.0, pitchDeg, rollDeg));
+    portEXIT_CRITICAL(&mux);
+  }
+  // Called from the BLE notify callback (NimBLE host task) once per decoded
+  // frame. nowMicros is deliberately uint32_t, matching micros()'s native
+  // return width - subtracting two uint32_t values wraps correctly across a
+  // micros() overflow, which widening to uint64_t first would break.
+  void onSample(const TrikiImuSample& sample, uint32_t nowMicros) {
+    portENTER_CRITICAL(&mux);
+    double dt = (lastSampleMicros == 0) ? 0.0 : (double)(uint32_t)(nowMicros - lastSampleMicros) / 1e6;
+    lastSampleMicros = nowMicros;
+    if (calibrating) {
+      if (calibStartMicros == 0) calibStartMicros = nowMicros;
+      calibSumX += sample.gyroX; calibSumY += sample.gyroY; calibSumZ += sample.gyroZ;
+      calibCount++;
+      double elapsed = (double)(uint32_t)(nowMicros - calibStartMicros) / 1e6;
+      if (elapsed >= TRIKI_CALIBRATION_SECONDS && calibCount >= TRIKI_CALIBRATION_MIN_SAMPLES) {
+        gyroBiasX = calibSumX / calibCount; gyroBiasY = calibSumY / calibCount; gyroBiasZ = calibSumZ / calibCount;
+        calibrating = false; gyroBiasDirty = true;
+      }
+    }
+    unsigned long nowMs = millis();
+    if (nowMs - sampleRateWindowStartMs >= 1000) { samplesPerSecond = sampleCountThisWindow; sampleCountThisWindow = 0; sampleRateWindowStartMs = nowMs; }
+    sampleCountThisWindow++;
+    if (sample.buttonPressed && !prevButtonPressed) buttonPressEdgePending = true;
+    prevButtonPressed = sample.buttonPressed;
+    currentButtonPressed = sample.buttonPressed;
+    TrikiGraphSample& slot = graphBuf[graphHead];
+    slot.gx = sample.gyroX; slot.gy = sample.gyroY; slot.gz = sample.gyroZ;
+    slot.ax = sample.accelX; slot.ay = sample.accelY; slot.az = sample.accelZ;
+    graphHead = (graphHead + 1) % TRIKI_GRAPH_BUFFER_SIZE;
+    if (graphCount < TRIKI_GRAPH_BUFFER_SIZE) graphCount++;
+    previousG = currentG;
+    currentG = sample.accelMagnitudeG();
+    if (currentG > peakG) peakG = currentG;
+    double jerk = (dt > 0.0) ? (currentG - previousG) / dt : 0.0;
+    bool shockAlertNow = (jerk >= TRIKI_SHOCK_JERK_THRESHOLD_G_PER_S) && (currentG >= TRIKI_SHOCK_MIN_MAGNITUDE_G);
+    bool hardImpact = (jerk >= TRIKI_FREEZE_JERK_THRESHOLD_G_PER_S) && (currentG >= TRIKI_FREEZE_MIN_MAGNITUDE_G);
+    if (dt > 0.0 && !hardImpact) {
+      double dtClamped = (dt > 0.1) ? 0.1 : dt;
+      // X/Y swapped, yaw (Z) gyro raw sign, accel Z negated - the final
+      // transform from the hardware-validated source, ported as-is: gyroX/
+      // accelX <-> gyroY/accelY are swapped (axis-identity fix), gyro Z
+      // keeps its raw sign (yaw has no accelerometer correction, independent
+      // of the accel-consistency concerns below), accel Z is negated (fixes
+      // the resting-baseline mismatch - this filter's correction math
+      // assumes level = (0,0,+1)).
+      double gx = radians((sample.gyroY - gyroBiasY) * TRIKI_GYRO_GAIN);
+      double gy = radians((sample.gyroX - gyroBiasX) * TRIKI_GYRO_GAIN);
+      double gz = radians((sample.gyroZ - gyroBiasZ) * TRIKI_GYRO_GAIN);
+      ahrs.update(gx, gy, gz, sample.accelY, sample.accelX, -sample.accelZ, dtClamped);
+    }
+    if (shockAlertNow) {
+      if (!shockActive) { shockActive = true; shockEventPending = true; lastShockG = currentG; lastShockAtMs = nowMs; haveShock = true; }
+    } else shockActive = false;
+    portEXIT_CRITICAL(&mux);
+  }
+  TrikiQuaternion currentOrientation() { portENTER_CRITICAL(&mux); TrikiQuaternion o = ahrs.asQuaternion(); portEXIT_CRITICAL(&mux); return o; }
+  double getCurrentG() { portENTER_CRITICAL(&mux); double v = currentG; portEXIT_CRITICAL(&mux); return v; }
+  double getPeakG() { portENTER_CRITICAL(&mux); double v = peakG; portEXIT_CRITICAL(&mux); return v; }
+  void resetPeak() { portENTER_CRITICAL(&mux); peakG = currentG; portEXIT_CRITICAL(&mux); }
+  bool consumeShockEvent() { portENTER_CRITICAL(&mux); bool v = shockEventPending; shockEventPending = false; portEXIT_CRITICAL(&mux); return v; }
+  bool consumeGyroBiasDirty(double& x, double& y, double& z) {
+    portENTER_CRITICAL(&mux);
+    bool v = gyroBiasDirty;
+    if (v) { x = gyroBiasX; y = gyroBiasY; z = gyroBiasZ; gyroBiasDirty = false; }
+    portEXIT_CRITICAL(&mux);
+    return v;
+  }
+  bool getLastShock(double& g, unsigned long& ageMs) {
+    portENTER_CRITICAL(&mux);
+    bool have = haveShock;
+    if (have) { g = lastShockG; ageMs = millis() - lastShockAtMs; }
+    portEXIT_CRITICAL(&mux);
+    return have;
+  }
+  int getSamplesPerSecond() { portENTER_CRITICAL(&mux); int v = samplesPerSecond; portEXIT_CRITICAL(&mux); return v; }
+  void getGyroBias(double& x, double& y, double& z) { portENTER_CRITICAL(&mux); x = gyroBiasX; y = gyroBiasY; z = gyroBiasZ; portEXIT_CRITICAL(&mux); }
+  bool consumeButtonPressEdge() { portENTER_CRITICAL(&mux); bool v = buttonPressEdgePending; buttonPressEdgePending = false; portEXIT_CRITICAL(&mux); return v; }
+  // Copies the current rolling buffer into `out` (caller-provided, at least
+  // TRIKI_GRAPH_BUFFER_SIZE long), oldest first.
+  int getGraphSamples(TrikiGraphSample* out) {
+    portENTER_CRITICAL(&mux);
+    int n = graphCount;
+    int start = (graphHead - n + TRIKI_GRAPH_BUFFER_SIZE) % TRIKI_GRAPH_BUFFER_SIZE;
+    for (int i = 0; i < n; i++) out[i] = graphBuf[(start + i) % TRIKI_GRAPH_BUFFER_SIZE];
+    portEXIT_CRITICAL(&mux);
+    return n;
+  }
+private:
+  TrikiGraphSample graphBuf[TRIKI_GRAPH_BUFFER_SIZE];
+  int graphHead = 0, graphCount = 0;
+  portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+  TrikiMadgwickAhrs ahrs;
+  uint32_t lastSampleMicros = 0;
+  double currentG = 1.0, previousG = 1.0, peakG = 1.0;
+  bool shockActive = false, shockEventPending = false;
+  double lastShockG = 0.0;
+  unsigned long lastShockAtMs = 0;
+  bool haveShock = false;
+  unsigned long sampleRateWindowStartMs = 0;
+  int sampleCountThisWindow = 0, samplesPerSecond = 0;
+  bool prevButtonPressed = false, buttonPressEdgePending = false, currentButtonPressed = false;
+  double gyroBiasX = 0.0, gyroBiasY = 0.0, gyroBiasZ = 0.0;
+  bool calibrating = false;
+  uint32_t calibStartMicros = 0;
+  double calibSumX = 0.0, calibSumY = 0.0, calibSumZ = 0.0;
+  int calibCount = 0;
+  bool gyroBiasDirty = false;
+};
+
+// ---- BLE central: scan/connect lifecycle -----------------------------------
+enum class TrikiConnState { IDLE, SCANNING, CONNECTING, CONNECTED, COOLDOWN };
+TrikiConnState trikiConnState = TrikiConnState::IDLE;
+unsigned long trikiStateEnteredAt = 0;
+NimBLEClient* trikiClient = nullptr;
+const NimBLEAdvertisedDevice* trikiFoundDevice = nullptr;
+bool trikiDeviceFound = false;
+NimBLERemoteCharacteristic* trikiLedChar = nullptr;
+TrikiFrameParser trikiParser;
+TrikiEngine trikiEngine;
+TrikiEngine* g_trikiEngineForCallback = nullptr;
+
+class TrikiScanCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* device) override {
+    if (trikiDeviceFound) return;
+    String name = device->haveName() ? String(device->getName().c_str()) : String("");
+    name.toLowerCase();
+    if (name.indexOf(TRIKI_NAME_NEEDLE) >= 0) { trikiFoundDevice = device; trikiDeviceFound = true; NimBLEDevice::getScan()->stop(); }
+  }
+};
+TrikiScanCallbacks trikiScanCallbacks;
+class TrikiClientCallbacks : public NimBLEClientCallbacks {
+  void onDisconnect(NimBLEClient* c, int reason) override { (void)c; (void)reason; trikiLedChar = nullptr; }
+};
+TrikiClientCallbacks trikiClientCallbacks;
+
+void onTrikiFrameDecoded(const TrikiImuSample& sample) { if (g_trikiEngineForCallback != nullptr) g_trikiEngineForCallback->onSample(sample, micros()); }
+void onTrikiTxNotify(NimBLERemoteCharacteristic* chr, uint8_t* data, size_t length, bool isNotify) { (void)chr; (void)isNotify; trikiParser.push(data, length, onTrikiFrameDecoded); }
+
+// Blocking (connect() + a 1.5s settle delay) - kept simple rather than made
+// properly async because this only ever runs while the user is on the TRIKI
+// SCOPE page itself (see stepTrikiScope()'s page-transition tracking below),
+// so the "freeze" is confined to a screen that's already showing
+// "Connecting..." - the same trade-off the original TrikiStickS3 firmware's
+// own single-purpose loop() makes, just deliberately fenced off here so it
+// can never stall the rest of this OS's launcher/keyboard/other apps.
+bool trikiTryConnect() {
+  if (trikiClient == nullptr) {
+    trikiClient = NimBLEDevice::createClient();
+    trikiClient->setClientCallbacks(&trikiClientCallbacks, false);
+    trikiClient->setConnectTimeout(TRIKI_CONNECT_TIMEOUT_MS);
+  }
+  if (!trikiClient->connect(trikiFoundDevice)) return false;
+  NimBLERemoteService* nus = trikiClient->getService(TRIKI_NUS_SERVICE_UUID);
+  if (nus == nullptr) { trikiClient->disconnect(); return false; }
+  NimBLERemoteCharacteristic* tx = nus->getCharacteristic(TRIKI_NUS_TX_UUID);
+  NimBLERemoteCharacteristic* rx = nus->getCharacteristic(TRIKI_NUS_RX_UUID);
+  if (tx == nullptr || rx == nullptr) { trikiClient->disconnect(); return false; }
+  trikiLedChar = nus->getCharacteristic(TRIKI_NUS_LED_UUID);
+  if (!tx->subscribe(true, onTrikiTxNotify, true)) { trikiClient->disconnect(); return false; }
+  delay(TRIKI_SETTLE_MS);
+  rx->writeValue(TRIKI_START_COMMAND, sizeof(TRIKI_START_COMMAND), rx->canWrite());
+  return true;
+}
+void trikiEnterState(TrikiConnState s) { trikiConnState = s; trikiStateEnteredAt = millis(); }
+void trikiStartScan() {
+  trikiDeviceFound = false; trikiFoundDevice = nullptr;
+  NimBLEScan* scan = NimBLEDevice::getScan();
+  scan->setScanCallbacks(&trikiScanCallbacks, false);
+  // Active scan: without this, a device that only puts its name in the scan
+  // response (common, since the primary advertisement payload is tiny)
+  // would never satisfy haveName()/the "triki" substring match below.
+  scan->setActiveScan(true);
+  scan->setInterval(100);
+  scan->setWindow(100);
+  scan->start(TRIKI_SCAN_MS, false);
+  trikiEnterState(TrikiConnState::SCANNING);
+}
+void trikiDisconnectAndIdle() {
+  if (trikiClient != nullptr && trikiClient->isConnected()) trikiClient->disconnect();
+  NimBLEDevice::getScan()->stop();
+  trikiConnState = TrikiConnState::IDLE;
+}
+void trikiUpdateConnection() {
+  switch (trikiConnState) {
+    case TrikiConnState::SCANNING:
+      if (trikiDeviceFound) trikiEnterState(TrikiConnState::CONNECTING);
+      else if (millis() - trikiStateEnteredAt > TRIKI_SCAN_MS + 500) trikiStartScan();
+      break;
+    case TrikiConnState::CONNECTING: {
+      bool ok = trikiTryConnect();
+      trikiEnterState(ok ? TrikiConnState::CONNECTED : TrikiConnState::COOLDOWN);
+      break;
+    }
+    case TrikiConnState::CONNECTED:
+      if (trikiClient == nullptr || !trikiClient->isConnected()) trikiEnterState(TrikiConnState::COOLDOWN);
+      break;
+    case TrikiConnState::COOLDOWN:
+      if (millis() - trikiStateEnteredAt > TRIKI_COOLDOWN_MS) trikiStartScan();
+      break;
+    case TrikiConnState::IDLE:
+      break;
+  }
+}
+const char* trikiConnStateLabel() {
+  switch (trikiConnState) {
+    case TrikiConnState::IDLE: return "Idle";
+    case TrikiConnState::SCANNING: return "Scanning...";
+    case TrikiConnState::CONNECTING: return "Connecting...";
+    case TrikiConnState::CONNECTED: return "Connected";
+    case TrikiConnState::COOLDOWN: return "Reconnecting...";
+  }
+  return "";
+}
+
+// ---- Display ----------------------------------------------------------------
+enum class TrikiView { STATUS, GRAPH };
+TrikiView trikiView = TrikiView::STATUS;
+enum class TrikiGraphView { GYRO, ACCEL, GMAG };
+TrikiGraphView trikiGraphView = TrikiGraphView::GYRO;
+unsigned long trikiShockFlashUntilMs = 0;
+TrikiGraphSample trikiGraphSnapshot[TRIKI_GRAPH_BUFFER_SIZE];
+
+void drawTrikiCube(const TrikiQuaternion& q, int cx, int cy) {
+  int points[8][2];
+  for (int i = 0; i < 8; i++) {
+    double rx, ry, rz;
+    q.rotateVector(trikiCubeVertices[i].x, trikiCubeVertices[i].y, trikiCubeVertices[i].z, rx, ry, rz);
+    double scale = TRIKI_PERSPECTIVE_D / (TRIKI_PERSPECTIVE_D + rz);
+    points[i][0] = cx + (int)(rx * scale);
+    points[i][1] = cy + (int)(ry * scale);
+  }
+  for (int e = 0; e < 12; e++) {
+    int a = trikiCubeEdges[e][0], b = trikiCubeEdges[e][1];
+    tft.drawLine(points[a][0], points[a][1], points[b][0], points[b][1], ILI9341_CYAN);
+  }
+}
+void drawTrikiStatus() {
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
+  tft.setTextSize(1);
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(8, CONTENT_Y + 4); tft.print(trikiConnStateLabel());
+  if (trikiConnState != TrikiConnState::CONNECTED) {
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(8, CONTENT_Y + 24); tft.print("Power on the Triki controller");
+    tft.setCursor(8, CONTENT_Y + 38); tft.print("and hold it near the Cardputer.");
+    return;
+  }
+  drawTrikiCube(trikiEngine.currentOrientation(), 70, CONTENT_Y + 95);
+  double yawDeg, pitchDeg, rollDeg;
+  trikiEngine.currentOrientation().toEulerDegrees(yawDeg, pitchDeg, rollDeg);
+  tft.setTextColor(ui.text, ui.bg);
+  tft.setCursor(150, CONTENT_Y + 20); tft.printf("YAW   %6.1f", yawDeg);
+  tft.setCursor(150, CONTENT_Y + 34); tft.printf("PITCH %6.1f", pitchDeg);
+  tft.setCursor(150, CONTENT_Y + 48); tft.printf("ROLL  %6.1f", rollDeg);
+  tft.setCursor(150, CONTENT_Y + 68); tft.printf("G NOW  %.2f", trikiEngine.getCurrentG());
+  tft.setCursor(150, CONTENT_Y + 82); tft.printf("G PEAK %.2f", trikiEngine.getPeakG());
+  double lastG; unsigned long ageMs;
+  tft.setCursor(150, CONTENT_Y + 96);
+  if (trikiEngine.getLastShock(lastG, ageMs)) tft.printf("SHOCK  %.2fg %lus ago", lastG, ageMs / 1000);
+  else tft.print("SHOCK  none yet");
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(150, CONTENT_Y + 116); tft.printf("RATE %d Hz", trikiEngine.getSamplesPerSecond());
+  if (trikiEngine.isCalibrating()) { tft.setTextColor(ILI9341_YELLOW, ui.bg); tft.setCursor(8, CONTENT_Y + 150); tft.print("Calibrating - hold still..."); }
+}
+void drawTrikiGraph() {
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
+  tft.setTextSize(1);
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(8, CONTENT_Y + 4); tft.print(trikiConnStateLabel());
+  if (trikiConnState != TrikiConnState::CONNECTED) return;
+  int n = trikiEngine.getGraphSamples(trikiGraphSnapshot);
+  if (n < 2) { tft.setTextColor(ui.dim, ui.bg); tft.setCursor(8, CONTENT_Y + 24); tft.print("Gathering data..."); return; }
+  constexpr int gx0 = 8, gy0 = CONTENT_Y + 20, gw = 300, gh = 130;
+  double range = trikiGraphView == TrikiGraphView::ACCEL ? 4.0 : trikiGraphView == TrikiGraphView::GMAG ? 5.0 : 250.0;
+  bool positiveOnly = trikiGraphView == TrikiGraphView::GMAG;
+  auto plotY = [&](double value) -> int {
+    double norm;
+    if (positiveOnly) { double c = value > range ? range : (value < 0.0 ? 0.0 : value); norm = c / range; }
+    else { double c = value > range ? range : (value < -range ? -range : value); norm = (c + range) / (2.0 * range); }
+    return gy0 + gh - (int)(norm * gh);
+  };
+  tft.drawFastHLine(gx0, plotY(positiveOnly ? TRIKI_SHOCK_MIN_MAGNITUDE_G : 0.0), gw, positiveOnly ? 0x7800 : 0x39C7);
+  int prevX = -1, prevYx = 0, prevYy = 0, prevYz = 0;
+  for (int i = 0; i < n; i++) {
+    int x = gx0 + (int)((long)i * (gw - 1) / (n - 1));
+    const TrikiGraphSample& s = trikiGraphSnapshot[i];
+    if (positiveOnly) {
+      double mag = sqrt(s.ax * s.ax + s.ay * s.ay + s.az * s.az);
+      int y = plotY(mag);
+      if (prevX >= 0) tft.drawLine(prevX, prevYx, x, y, ILI9341_YELLOW);
+      prevX = x; prevYx = y;
+    } else {
+      double vx = trikiGraphView == TrikiGraphView::ACCEL ? s.ax : s.gx;
+      double vy = trikiGraphView == TrikiGraphView::ACCEL ? s.ay : s.gy;
+      double vz = trikiGraphView == TrikiGraphView::ACCEL ? s.az : s.gz;
+      int yx = plotY(vx), yy = plotY(vy), yz = plotY(vz);
+      if (prevX >= 0) { tft.drawLine(prevX, prevYx, x, yx, ILI9341_RED); tft.drawLine(prevX, prevYy, x, yy, ILI9341_GREEN); tft.drawLine(prevX, prevYz, x, yz, ILI9341_BLUE); }
+      prevX = x; prevYx = yx; prevYy = yy; prevYz = yz;
+    }
+  }
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(gx0, gy0 + gh + 6);
+  tft.print(trikiGraphView == TrikiGraphView::GYRO ? "X/Y/Z GYRO (dps) - V: cycle view" : trikiGraphView == TrikiGraphView::ACCEL ? "X/Y/Z ACCEL (g) - V: cycle view" : "G-MAGNITUDE (g), line = shock threshold - V: cycle view");
+}
+void drawTrikiScope() {
+  tft.fillScreen(ui.bg);
+  header(trikiView == TrikiView::STATUS ? "TRIKI SCOPE / STATUS" : "TRIKI SCOPE / GRAPH");
+  if (trikiView == TrikiView::STATUS) drawTrikiStatus(); else drawTrikiGraph();
+  footer("G VIEW   V GRAPH TYPE   C CALIBRATE   R RESET YAW   FN BACK");
+}
+// Per-frame: drives the connection state machine (only while this page is
+// open - see the comment on trikiTryConnect()), handles shock alerts, and
+// redraws live data at ~20fps, matching the source firmware's own UI
+// cadence. Content-only redraws bypass redrawNeeded/refreshLocalPage()
+// entirely, the same "continuous update, draw directly" approach
+// stepKartRace()/stepBreakoutGame() use, for the same reason: this needs to
+// update far more often than "once per keypress".
+void stepTrikiScope() {
+  static Page lastTrikiPage = LAUNCHER;
+  if (page != lastTrikiPage) {
+    if (page == TRIKISCOPE) trikiStartScan();
+    else if (lastTrikiPage == TRIKISCOPE) trikiDisconnectAndIdle();
+    lastTrikiPage = page;
+  }
+  if (page != TRIKISCOPE || quickMenuOpen) return;
+  g_trikiEngineForCallback = &trikiEngine;
+  trikiUpdateConnection();
+
+  if (trikiEngine.consumeShockEvent()) {
+    trikiShockFlashUntilMs = millis() + 250;
+    vibrate(45);
+    if (volumeLevel) M5Cardputer.Speaker.tone(2200, 120);
+  }
+  double bx, by, bz;
+  if (trikiEngine.consumeGyroBiasDirty(bx, by, bz)) {
+    preferences.begin("triki", false);
+    preferences.putDouble("biasX", bx); preferences.putDouble("biasY", by); preferences.putDouble("biasZ", bz);
+    preferences.end();
+  }
+
+  static unsigned long lastDrawMs = 0;
+  unsigned long now = millis();
+  if (now - lastDrawMs < 50) return;  // ~20fps
+  lastDrawMs = now;
+
+  static bool wasFlashing = false;
+  if ((long)(now - trikiShockFlashUntilMs) < 0) {
+    tft.fillScreen(ILI9341_RED);
+    tft.setTextSize(2); tft.setTextColor(ILI9341_WHITE, ILI9341_RED);
+    tft.setCursor(70, H / 2 - 8); tft.print("SHOCK!");
+    wasFlashing = true;
+    return;
+  }
+  // The flash covers the whole panel including header/footer - restore them
+  // once, right as the flash ends, rather than leaving them red until the
+  // next full page redraw.
+  if (wasFlashing) { wasFlashing = false; drawTrikiScope(); return; }
+  if (trikiView == TrikiView::STATUS) drawTrikiStatus(); else drawTrikiGraph();
+}
+
 void drawGameHub() {
   lastDrawnGameMode = gameMode;
   if (gameMode == 3) { drawKartHub(); return; }
@@ -5009,7 +5622,7 @@ void draw() {
   // itself (Home/Apps aren't "an app" to splash into) - see
   // playAppIntroAnimation()'s own comment for what this actually plays.
   if (realAppTransition && page != LAUNCHER) playAppIntroAnimation(page);
-  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) drawBleKeyboard(); else if (page == SCREENSAVER) drawScreensaver(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
+  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) drawBleKeyboard(); else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
 
 // Repaint only a changed application's content. Headers and footers are kept
 // intact; full draw() remains reserved for entering a different scene, modal
@@ -5638,6 +6251,19 @@ void keyboard() {
     if (!k.word.empty()) redrawNeeded = true;
     return;
   }
+  if (page == TRIKISCOPE) {
+    // View/graph-type toggles go through the normal redrawNeeded/draw()
+    // dispatch (infrequent, like any other menu selection); calibrate/reset
+    // don't need an immediate redraw - stepTrikiScope()'s own ~20fps tick
+    // will show the result (e.g. "Calibrating...") on its own.
+    for (char c : k.word) {
+      if (c == 'g') { trikiView = trikiView == TrikiView::STATUS ? TrikiView::GRAPH : TrikiView::STATUS; redrawNeeded = true; }
+      else if (c == 'v') { trikiGraphView = trikiGraphView == TrikiGraphView::GYRO ? TrikiGraphView::ACCEL : trikiGraphView == TrikiGraphView::ACCEL ? TrikiGraphView::GMAG : TrikiGraphView::GYRO; redrawNeeded = true; }
+      else if (c == 'c') trikiEngine.startCalibration();
+      else if (c == 'r') trikiEngine.resetYaw();
+    }
+    return;
+  }
   if (page == DEVICECHECK) { for (char c : k.word) { if (c == ';') { deviceCheckSelected = (deviceCheckSelected + 3) % 4; redrawNeeded = true; } else if (c == '.') { deviceCheckSelected = (deviceCheckSelected + 1) % 4; redrawNeeded = true; } } if (k.enter) { playEnterSound(); if (deviceCheckSelected == 0) { tft.fillScreen(ILI9341_RED); delay(180); tft.fillScreen(ILI9341_GREEN); delay(180); tft.fillScreen(ILI9341_BLUE); delay(180); deviceCheckStatus = "Screen colour test shown"; } else if (deviceCheckSelected == 1) { if (volumeLevel) { M5Cardputer.Speaker.tone(1000, 180); deviceCheckStatus = "Speaker tone played"; } else deviceCheckStatus = "Volume is 0%; speaker muted"; } else if (deviceCheckSelected == 2) deviceCheckStatus = "Press any keyboard key to verify input"; else { sendNec(0, 16); deviceCheckStatus = "NEC test frame sent on IR"; } redrawNeeded = true; } return; }
   if (page == QRTOOLSPLUS) { for (char c : k.word) { if (c == ';') { qrPlusSelected = (qrPlusSelected + 3) % 4; redrawNeeded = true; } else if (c == '.') { qrPlusSelected = (qrPlusSelected + 1) % 4; redrawNeeded = true; } } if (k.enter) { if (qrPlusSelected == 0) qrText = String("http://") + WEB_MDNS_HOST + ".local"; else if (qrPlusSelected == 1) qrText = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "Wi-Fi not connected"; else if (qrPlusSelected == 2) qrText = notes[0]; page = QRTEXT; markStateDirty(); redrawNeeded = true; } return; }
   if (page == MINIPAINT) { for (char c : k.word) { if (c == ';' && paintY > 0) paintY--; else if (c == '.' && paintY < 11) paintY++; else if (c == ',' && paintX > 0) paintX--; else if (c == '/' && paintX < 15) paintX++; } if (k.enter) paintPixels[paintY][paintX] = !paintPixels[paintY][paintX]; if (k.del) for (int y = 0; y < 12; ++y) for (int x = 0; x < 16; ++x) paintPixels[y][x] = false; redrawNeeded = true; return; }
@@ -5856,6 +6482,11 @@ void setup() {
   // BLE HID uses NimBLE and is available to pair after the boot/lock sequence.
   bleKeyboard.begin();
   kartMusicInit(); // GAMEHUB / KART RACER speaker channel volumes
+  buildTrikiCube();
+  preferences.begin("triki", true);
+  double trikiBiasX = preferences.getDouble("biasX", 0.0), trikiBiasY = preferences.getDouble("biasY", 0.0), trikiBiasZ = preferences.getDouble("biasZ", 0.0);
+  preferences.end();
+  trikiEngine.setGyroBias(trikiBiasX, trikiBiasY, trikiBiasZ);
   // Rejoin the last Wi-Fi network in the background. BLE stays enabled and
   // modem sleep is left on, as required by ESP32-S3 radio coexistence.
   autoConnectWifi();
@@ -5907,6 +6538,7 @@ void loop() {
   stepKartRace();
   stepBreakoutGame();
   stepTetrisGame();
+  stepTrikiScope();
   // One 16th-note per tick. The grid is refreshed only on the new playhead
   // position rather than continuously redrawing a full screen.
   if (page == MUSICLAB && drumPlaying && !sleeping && !quickMenuOpen && millis() >= drumNextStepAt) {
