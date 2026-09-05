@@ -418,6 +418,21 @@ Adafruit_ILI9341 tft(&SPI, TFT_DC, TFT_CS, TFT_RST);
 // BLE HID is advertised after boot. It only sends keys while the dedicated
 // BLE KEYBOARD app is open, so launcher and application controls stay local.
 HijelHID_BLEKeyboard bleKeyboard;
+// NimBLE init (bleKeyboard.begin()) permanently costs ~55KB of heap from the
+// moment it runs, whether or not BLE is actually used - confirmed via live
+// heap logging (ESP.getFreeHeap() before/after) after this became a real
+// problem: WiFi's own init needs a contiguous block that heap pressure from
+// an always-on NimBLE stack was leaving too little room for, intermittently
+// breaking WiFi (and, indirectly, anything sharing that same tight heap
+// budget, like the I2S speaker's DMA buffer). So BLE now starts lazily, the
+// first time it's actually needed (BLE KEYBOARD or TRIKI SCOPE opened, or
+// the BLE HID Settings toggle turned on) - see ensureBleReady().
+bool bleStackReady = false;
+void ensureBleReady() {
+  if (bleStackReady) return;
+  bleStackReady = true;
+  bleKeyboard.begin();
+}
 Preferences preferences;
 bool stateDirty = false;
 unsigned long stateChangedAt = 0;
@@ -519,11 +534,14 @@ bool soundBtKnown = false, soundBtWasPaired = false;
 bool soundBatteryKnown = false, soundBatteryWasLow = false;
 bool soundChargeKnown = false, soundWasCharging = false;
 // Some ADV battery reports jump upward when USB power is attached before the
-// charging-state flag settles. Keep one short baseline so that jump can act as
-// a fallback charging edge, without treating ordinary slow percentage drift as
-// a charger event.
-int chargeBaselineBattery = -1;
-unsigned long chargeBaselineAt = 0;
+// charging-state flag settles. Track the LOWEST reading seen in the trailing
+// window (not just the immediately preceding sample) - plugging in USB can
+// cause a brief inrush-current dip right before the real rise, and comparing
+// only against the last sample would reset the reference point at exactly
+// the wrong moment, turning detection into a per-tick timing coin flip
+// (this was one confirmed cause of "charging detection is inconsistent").
+int chargeRecentMinBattery = -1;
+unsigned long chargeRecentMinAt = 0;
 unsigned long inferredChargingUntil = 0;
 // Set for one service cycle when the live battery report makes the characteristic
 // USB-insertion jump. It is an event, not a persistent charging state.
@@ -534,6 +552,14 @@ bool chargeRiseJustDetected = false;
 constexpr int CHARGE_RISE_TRIGGER_PERCENT = 8;
 constexpr unsigned long CHARGE_RISE_WINDOW_MS = 90000UL;
 constexpr unsigned long INFERRED_CHARGING_HOLD_MS = 120000UL;
+// M5Cardputer.Power.isCharging() is documented elsewhere in this file as
+// sometimes flickering/misreporting on real ADV units. Once either signal
+// (the raw API or the battery-rise fallback) says "charging", latch that and
+// require a sustained absence of both before clearing it - a single bad
+// isCharging() read can no longer cancel an otherwise-correct detection.
+bool chargingLatched = false;
+unsigned long chargingLastSeenAt = 0;
+constexpr unsigned long CHARGING_LATCH_RELEASE_MS = 20000UL;
 
 Page page = LAUNCHER;
 // Tracks the fully painted scene.  Input inside the same scene is refreshed
@@ -1128,17 +1154,22 @@ bool chargingInferredFromBatteryRise(int battery) {
   chargeRiseJustDetected = false;
   if (battery < 0) return now < inferredChargingUntil;
 
-  // Compare each fresh reading with the previous one. The old baseline was
-  // discarded after 90 seconds, which could discard the pre-plug value before
-  // the Cardputer reported its delayed 10–20% USB jump.
-  if (chargeBaselineBattery >= 0 &&
-      battery >= chargeBaselineBattery + CHARGE_RISE_TRIGGER_PERCENT &&
-      now - chargeBaselineAt <= CHARGE_RISE_WINDOW_MS) {
+  // Re-anchor the tracked minimum whenever it's stale (older than the
+  // detection window), on the very first reading, or when a new, lower
+  // floor appears - but NOT on every call, so a brief dip can't erase the
+  // pre-dip baseline right as a real rise is starting.
+  if (chargeRecentMinBattery < 0 || now - chargeRecentMinAt > CHARGE_RISE_WINDOW_MS || battery < chargeRecentMinBattery) {
+    chargeRecentMinBattery = battery;
+    chargeRecentMinAt = now;
+  }
+  if (battery >= chargeRecentMinBattery + CHARGE_RISE_TRIGGER_PERCENT) {
     inferredChargingUntil = now + INFERRED_CHARGING_HOLD_MS;
     chargeRiseJustDetected = true;
+    // Re-anchor to the new level so this exact rise doesn't keep re-firing
+    // every subsequent call while still within the hold window.
+    chargeRecentMinBattery = battery;
+    chargeRecentMinAt = now;
   }
-  chargeBaselineBattery = battery;
-  chargeBaselineAt = now;
   return now < inferredChargingUntil;
 }
 void serviceStatusSounds() {
@@ -1150,18 +1181,28 @@ void serviceStatusSounds() {
   // armed again until the measured level recovers to 25% or higher.
   const bool batteryLow = battery >= 0 && (soundBatteryKnown && soundBatteryWasLow ? battery < 25 : battery <= 15);
   const bool chargerReported = M5Cardputer.Power.isCharging() == m5::Power_Class::is_charging;
-  const bool charging = chargerReported || chargingInferredFromBatteryRise(battery);
+  const bool rawChargingNow = chargerReported || chargingInferredFromBatteryRise(battery);
+  // Latch + release-delay: isCharging() is documented to flicker/misreport
+  // on some ADV units, so a single bad "not charging" read must not be able
+  // to cancel a detection that was otherwise correct - only a SUSTAINED
+  // absence of both signals clears it. This was a second confirmed cause of
+  // inconsistent charging detection alongside chargingInferredFromBatteryRise()'s
+  // own fix above.
+  const unsigned long now = millis();
+  if (rawChargingNow) { chargingLatched = true; chargingLastSeenAt = now; }
+  else if (chargingLatched && now - chargingLastSeenAt > CHARGING_LATCH_RELEASE_MS) chargingLatched = false;
+  const bool charging = chargingLatched;
 
   if (soundWifiKnown && !soundWifiWasConnected && wifiConnected) playWifiConnectedSound();
   if (soundBtKnown && !soundBtWasPaired && btPaired) playBluetoothConnectedSound();
   if (soundBatteryKnown && !soundBatteryWasLow && batteryLow) playLowBatterySound();
-  // Announce the start once. The fallback catches the characteristic fast
-  // 5%+ level jump that can occur when a USB charger is plugged in.
-  // A physical charging edge is announced once. A fresh 8%+ battery jump is
-  // also an independent event: some Cardputer ADV units keep isCharging()
-  // latched, so relying only on its false-to-true transition misses USB plug-in.
-  if (chargeRiseJustDetected || (!soundChargeKnown && charging) ||
-      (soundChargeKnown && !soundWasCharging && charging)) {
+  // Announce a charging start exactly once per session of being plugged in:
+  // either the first time we've ever checked while already charging, or a
+  // genuine false-to-true transition. (chargeRiseJustDetected no longer
+  // bypasses the !soundWasCharging guard - it used to, which meant a
+  // coincidental battery-rise match while already latched charging could
+  // re-announce "Charging detected from battery rise" as if it were new.)
+  if ((!soundChargeKnown || !soundWasCharging) && charging) {
     playChargingStartedSound();
     queueToast(chargeRiseJustDetected ? "Charging detected from battery rise" :
                (chargerReported ? "Charging started" : "Charging detected"));
@@ -2152,12 +2193,16 @@ void drawTextTools() {
 // ---- FAVOURITES: apps pinned with Ctrl+F (see keyboard()'s ctrlF check) ---
 // appFavourite[] is indexed by (Page - 1); app index 10 (this very page) is
 // excluded so Favourites can never favourite itself.
-void drawFavourites() {
-  tft.fillScreen(ui.bg); header("FAVOURITES"); int y = CONTENT_Y + 8, listed = 0;
+// Bounded (content-only) redraw, reused by refreshLocalPage() so arrow-key
+// navigation here doesn't fillScreen()+header() on every keypress the way
+// falling through to draw() would.
+void updateFavouritesList() {
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
+  int y = CONTENT_Y + 8, listed = 0;
   for (int i = 0; i < APP_COUNT; ++i) if (i != 10 && appFavourite[i]) { bool sel = listed == favouriteSelected; uint16_t bg = sel ? ui.selected : ui.bg; if (sel) tft.fillRoundRect(8, y - 4, 304, 20, 4, bg); tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  "); tft.print(appNames[i]); y += 23; listed++; }
   if (!listed) { tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, y); tft.print("No favourites. Open any app and"); tft.setCursor(12, y + 13); tft.print("press Ctrl+F to pin or unpin it."); }
-  footer(";/. SELECT  ENTER OPEN  DEL UNPIN");
 }
+void drawFavourites() { tft.fillScreen(ui.bg); header("FAVOURITES"); updateFavouritesList(); footer(";/. SELECT  ENTER OPEN  DEL UNPIN"); }
 // ---- WI-FI MONITOR: strongest signal + a 13-channel activity bar chart ----
 // Read-only analysis of the same scan WI-FI SCAN uses; press ENTER to
 // trigger a fresh scan if scanDone is false.
@@ -2173,17 +2218,18 @@ void drawWifiMonitor() {
   footer("FN BACK     ENTER RESCAN");
 }
 // ---- FILE BROWSER: 3 flash-backed text slots (localFiles[]), no SD card ---
-void drawFileBrowser() {
-  tft.fillScreen(ui.bg); header("FILE BROWSER"); tft.setTextColor(ui.dim, ui.bg); tft.setCursor(10, CONTENT_Y + 5); tft.print("LOCAL FLASH DOCUMENTS (no SD card)");
+void updateFileBrowserList() {
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(10, CONTENT_Y + 5); tft.print("LOCAL FLASH DOCUMENTS (no SD card)");
   for (int i = 0; i < 3; ++i) { int y = CONTENT_Y + 24 + i * 35; bool sel = i == fileSelected; uint16_t bg = sel ? ui.selected : ui.bg; if (sel) tft.fillRoundRect(8, y - 5, 304, 28, 4, bg); String preview = localFiles[i]; preview.replace('\n', ' '); if (preview.length() > 38) preview = preview.substring(0, 38); tft.setTextColor(ui.text, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  "); tft.print(localFileNames[i]); tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(25, y + 12); tft.print(preview.isEmpty() ? "(empty)" : preview); }
-  footer(";/. SELECT  ENTER LOAD TO NOTES  DEL CLEAR");
 }
+void drawFileBrowser() { tft.fillScreen(ui.bg); header("FILE BROWSER"); updateFileBrowserList(); footer(";/. SELECT  ENTER LOAD TO NOTES  DEL CLEAR"); }
 // ---- HOME MENU: assigns the 5 configurable Home/quick-launch tile slots ---
 // Edits homeAppIndices[] directly - both the Home screen (drawHomeTile()
 // above) and the floating quick-launch overlay read it live, so a change
 // here shows up in both immediately, with no separate sync step.
-void drawHomeEditor() {
-  tft.fillScreen(ui.bg); header(homeEditorPicking ? "HOME MENU / PICK APP" : "HOME MENU");
+void updateHomeEditorContent() {
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
   tft.setTextSize(1);
   if (homeEditorPicking) {
     tft.setTextColor(ui.dim, ui.bg); tft.setCursor(10, CONTENT_Y + 4); tft.print("SLOT " + String(homeEditorSlot + 1) + "  ENTER SET  FN CANCEL");
@@ -2193,7 +2239,6 @@ void drawHomeEditor() {
       if (sel) tft.fillRoundRect(8, y - 3, 304, 13, 3, bg);
       tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(14, y); tft.print(sel ? "> " : "  "); tft.print(appNames[i]);
     }
-    footer(";/. SELECT     ENTER ADD");
     return;
   }
   tft.setTextColor(ui.dim, ui.bg); tft.setCursor(10, CONTENT_Y + 4); tft.print("Five editable slots; APPS always stays.");
@@ -2204,15 +2249,25 @@ void drawHomeEditor() {
     tft.setTextColor(ui.text, bg); tft.print(homeAppIndices[slot] < 0 ? "(EMPTY)" : appNames[homeAppIndices[slot]]);
   }
   tft.setTextColor(ui.accent, ui.bg); tft.setCursor(10, CONTENT_Y + 154); tft.print("ENTER ADD/CHANGE   ,/ MOVE   DEL REMOVE");
-  footer(";/. SLOT     FN BACK");
 }
+// header()/footer() text both depend on homeEditorPicking, which can change
+// on ENTER/Fn - unlike a fillScreen(), both are already cheap bounded
+// strips, so redrawing them every local refresh (not just on page entry)
+// is the simplest correct way to keep them in sync, without needing to
+// separately track "did the sub-view just change" the way GAMEHUB does.
+void updateHomeEditorScreen() {
+  header(homeEditorPicking ? "HOME MENU / PICK APP" : "HOME MENU");
+  updateHomeEditorContent();
+  footer(homeEditorPicking ? ";/. SELECT     ENTER ADD" : ";/. SLOT     FN BACK");
+}
+void drawHomeEditor() { tft.fillScreen(ui.bg); updateHomeEditorScreen(); }
 // ---- C LAB EXAMPLES: a picker that loads canned source into C LAB --------
 // (C LAB itself - the sketch's tiny scripting language/IDE - starts much
 // further down, see "---- C LAB " below.)
-void drawCLabExamples() {
+void updateCLabExamplesList() {
   static const char* names[C_EXAMPLE_COUNT] = {"HELLO SYSTEM", "NUMBER GUESS", "BATTERY REPORT", "WI-FI SURVEY", "QR GREETING", "IR TEST", "CANVAS UI + KEYS"};
   static const char* details[C_EXAMPLE_COUNT] = {"text, variables and output", "inputint plus simple condition", "read-only device values", "nearby networks only", "make a QR from typed URL", "send one NEC IR command", "Canvas panel and readkey input"};
-  tft.fillScreen(ui.bg); header("C LAB EXAMPLES");
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
   tft.setTextSize(1); tft.setTextColor(ui.dim, ui.bg); tft.setCursor(10, CONTENT_Y + 4); tft.print("ENTER LOADS CODE INTO C LAB");
   for (int i = 0; i < C_EXAMPLE_COUNT; ++i) {
     int y = CONTENT_Y + 24 + i * 23; bool sel = i == cExampleSelected; uint16_t bg = sel ? ui.selected : ui.bg;
@@ -2220,8 +2275,8 @@ void drawCLabExamples() {
     tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(14, y); tft.print(sel ? "> " : "  "); tft.print(names[i]);
     tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(27, y + 10); tft.print(details[i]);
   }
-  footer(";/. SELECT     ENTER LOAD     FN BACK");
 }
+void drawCLabExamples() { tft.fillScreen(ui.bg); header("C LAB EXAMPLES"); updateCLabExamplesList(); footer(";/. SELECT     ENTER LOAD     FN BACK"); }
 
 void loadCLabExample(int example) {
   static const char* hello[] = {"// HELLO SYSTEM", "println(\"Hello from C LAB!\");", "println(device_name);", "println(\"Theme: \" + theme_name);", "println(\"Uptime: \" + uptime_text);"};
@@ -3884,8 +3939,17 @@ static constexpr double TRIKI_SHOCK_MIN_MAGNITUDE_G = 2.4;
 // self-heal from that, unlike pitch/roll).
 static constexpr double TRIKI_FREEZE_JERK_THRESHOLD_G_PER_S = 300.0;
 static constexpr double TRIKI_FREEZE_MIN_MAGNITUDE_G = 4.0;
-// ~4-5s of history at the Triki's native ~80-100Hz.
-static constexpr int TRIKI_GRAPH_BUFFER_SIZE = 400;
+// ~1-1.25s of history at the Triki's native ~80-100Hz. The source firmware
+// (a single-purpose device with nothing else competing for RAM) used 400
+// here; on this shared launcher that was almost 39KB of static RAM just for
+// this one feature's two buffers (this one plus trikiGraphSnapshot[] below),
+// and confirmed via live serial logs (i2s_alloc_dma_desc/wifi task creation
+// failing at boot) to be enough to push the whole device's heap headroom
+// past the point where WiFi and the I2S speaker's DMA buffers could still
+// be allocated - a real regression, not a hypothetical one. 100 samples
+// still reads as a smooth "recent activity" graph on a small screen at a
+// small fraction of the RAM cost.
+static constexpr int TRIKI_GRAPH_BUFFER_SIZE = 100;
 struct TrikiGraphSample { double gx, gy, gz, ax, ay, az; };
 
 class TrikiEngine {
@@ -4225,7 +4289,7 @@ void drawTrikiScope() {
 void stepTrikiScope() {
   static Page lastTrikiPage = LAUNCHER;
   if (page != lastTrikiPage) {
-    if (page == TRIKISCOPE) trikiStartScan();
+    if (page == TRIKISCOPE) { ensureBleReady(); trikiStartScan(); }
     else if (lastTrikiPage == TRIKISCOPE) trikiDisconnectAndIdle();
     lastTrikiPage = page;
   }
@@ -4345,17 +4409,17 @@ void stepSnakeGame() {
   }
 }
 // ---- DEVICE CHECK: manual self-test menu (screen/speaker/keyboard/IR) ----
-void drawDeviceCheck() {
+void updateDeviceCheckContent() {
   static const char* tests[] = {"SCREEN", "SPEAKER", "KEYBOARD", "IR EMITTER"};
-  tft.fillScreen(ui.bg); header("DEVICE CHECK");
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
   tft.setTextSize(1); tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 7); tft.print("SELECT TEST; ENTER RUNS IT");
   for (int i = 0; i < 4; ++i) { int y = CONTENT_Y + 28 + i * 25; bool sel = i == deviceCheckSelected; uint16_t bg = sel ? ui.selected : ui.bg; if (sel) tft.fillRoundRect(8, y - 4, 304, 19, 4, bg); tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  "); tft.print(tests[i]); }
   tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 140); tft.print(deviceCheckStatus);
-  footer(";/. SELECT     ENTER TEST     FN BACK");
 }
+void drawDeviceCheck() { tft.fillScreen(ui.bg); header("DEVICE CHECK"); updateDeviceCheckContent(); footer(";/. SELECT     ENTER TEST     FN BACK"); }
 // ---- QR TOOLS+: shortcuts that build a payload then hand off to QR TEXT ---
-void drawQRToolsPlus() {
-  tft.fillScreen(ui.bg); header("QR TOOLS +");
+void updateQRToolsPlusContent() {
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
   tft.setTextSize(1); tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 7); tft.print("SELECT A SOURCE, THEN ENTER");
   for (int i = 0; i < 4; ++i) {
     int y = CONTENT_Y + 28 + i * 25; bool selected = i == qrPlusSelected; uint16_t bg = selected ? ui.selected : ui.bg;
@@ -4363,8 +4427,8 @@ void drawQRToolsPlus() {
     tft.setTextColor(selected ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(selected ? "> " : "  "); tft.print(qrPlusLabels[i]);
   }
   tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 142); tft.print("Creates an ASCII QR in QR TEXT.");
-  footer(";/. SELECT     ENTER OPEN     FN BACK");
 }
+void drawQRToolsPlus() { tft.fillScreen(ui.bg); header("QR TOOLS +"); updateQRToolsPlusContent(); footer(";/. SELECT     ENTER OPEN     FN BACK"); }
 // ---- MINI PAINT: a 16x12 one-bit pixel grid, ENTER toggles the cell -------
 void drawMiniPaint() {
   constexpr int cell = 14, left = 48, top = 35;
@@ -4545,8 +4609,12 @@ void drawTextBrowser() {
   footer("ENTER FETCH  ;/. SCROLL  DEL ERASE  FN BACK");
 }
 // ---- WI-FI SETUP: pick a network and enter its password to connect -------
-void drawWifiSetup() {
-  tft.fillScreen(ui.bg); header("WI-FI SETUP"); tft.setTextSize(1);
+// Header text ("WI-FI SETUP") never changes across sub-states, but the
+// footer hint does - so this repaints content plus that small fixed-height
+// footer strip on every local refresh, the same trick GAMEHUB's turn-based
+// modes use, rather than a fillScreen()+header() on every keypress.
+void updateWifiSetupContent() {
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg); tft.setTextSize(1);
   if (wifiSetupEditingPassword) {
     tft.setTextColor(ui.accent, ui.bg); tft.setCursor(10, CONTENT_Y + 5); tft.print("PASSWORD FOR: " + wifiSetupSsid.substring(0, 30));
     tft.fillRoundRect(8, CONTENT_Y + 17, 304, 24, 4, ILI9341_DARKGREY);
@@ -4570,6 +4638,7 @@ void drawWifiSetup() {
   }
   footer(";/. SELECT  ENTER PASSWORD  TAB RESCAN  FN BACK");
 }
+void drawWifiSetup() { tft.fillScreen(ui.bg); header("WI-FI SETUP"); updateWifiSetupContent(); }
 // ---- WEB COMPANION: runs a tiny local web server (webServer, WebServer.h) -
 // Lets a phone/laptop on the same Wi-Fi send text or C LAB code to this
 // device from a browser - see webServer.handleClient()/applyWebInput() in
@@ -5622,7 +5691,7 @@ void draw() {
   // itself (Home/Apps aren't "an app" to splash into) - see
   // playAppIntroAnimation()'s own comment for what this actually plays.
   if (realAppTransition && page != LAUNCHER) playAppIntroAnimation(page);
-  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) drawBleKeyboard(); else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
+  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) { ensureBleReady(); drawBleKeyboard(); } else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
 
 // Repaint only a changed application's content. Headers and footers are kept
 // intact; full draw() remains reserved for entering a different scene, modal
@@ -5686,16 +5755,16 @@ void refreshLocalPage() {
     case TEXTBROWSER: drawTextBrowser(); break;
     case INPOSTTRACK: drawInPostTrack(); break;
     case ZABKATOTP: drawZabkaTotp(); break;
-    case WIFISETUP: drawWifiSetup(); break;
+    case WIFISETUP: updateWifiSetupContent(); break;
     case WIFI: drawWifi(); break;
     case WIFIMONITOR: drawWifiMonitor(); break;
     case DASHBOARD: drawDashboard(); break;
-    case DEVICECHECK: drawDeviceCheck(); break;
-    case QRTOOLSPLUS: drawQRToolsPlus(); break;
-    case FAVOURITES: drawFavourites(); break;
-    case FILEBROWSER: drawFileBrowser(); break;
-    case HOMEEDITOR: drawHomeEditor(); break;
-    case CLABEXAMPLES: drawCLabExamples(); break;
+    case DEVICECHECK: updateDeviceCheckContent(); break;
+    case QRTOOLSPLUS: updateQRToolsPlusContent(); break;
+    case FAVOURITES: updateFavouritesList(); break;
+    case FILEBROWSER: updateFileBrowserList(); break;
+    case HOMEEDITOR: updateHomeEditorScreen(); break;
+    case CLABEXAMPLES: updateCLabExamplesList(); break;
     case WEBCOMPANION: drawWebCompanion(); break;
     case BLEKEYBOARD: drawBleKeyboard(); break;
     case CARDCREPL: drawCardCRepl(); break;
@@ -6449,7 +6518,7 @@ void keyboard() {
     }
     if (k.enter && settingSelected == 7) { pinChangeActive = true; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "Choose a new 4-digit PIN"; playEnterSound(); redrawNeeded = true; return; }
     if (k.enter && settingSelected == 8) { wifiSetupEditingPassword = false; wifiSetupSelected = 0; playEnterSound(); page = WIFISETUP; if (!scanDone && !scanRunning) startScan(); redrawNeeded = true; return; }
-    if (k.enter && settingSelected == 9) { bleHidEnabled = !bleHidEnabled; playEnterSound(); markStateDirty(); redrawNeeded = true; return; }
+    if (k.enter && settingSelected == 9) { bleHidEnabled = !bleHidEnabled; if (bleHidEnabled) ensureBleReady(); playEnterSound(); markStateDirty(); redrawNeeded = true; return; }
     if (k.enter && settingSelected == 10) { statusLedEnabled = !statusLedEnabled; updateStatusLed(); playEnterSound(); markStateDirty(); redrawNeeded = true; return; }
     for (char c : k.word) { if (c == ';') { int old = settingSelected; settingSelected = (settingSelected + SETTINGS_COUNT - 1) % SETTINGS_COUNT; playMenuSound(); updateSettingsRow(old); updateSettingsRow(settingSelected); } else if (c == '.') { int old = settingSelected; settingSelected = (settingSelected + 1) % SETTINGS_COUNT; playMenuSound(); updateSettingsRow(old); updateSettingsRow(settingSelected); } else if (c == ',' && settingSelected < 7) { playMenuSound(); changeSetting(-1); } else if (c == '/' && settingSelected < 7) { playMenuSound(); changeSetting(1); } }
   }
@@ -6479,16 +6548,21 @@ void setup() {
   // still the only path that turns them off after boot.
   backlightOn = true;
   applyBacklight();
-  // BLE HID uses NimBLE and is available to pair after the boot/lock sequence.
-  bleKeyboard.begin();
+  // BLE HID (NimBLE) is no longer started here - see ensureBleReady()'s
+  // comment for why: it's deferred until BLE KEYBOARD/TRIKI SCOPE is opened
+  // or the Settings toggle is turned on, so WiFi and everything else get its
+  // ~55KB of heap back during normal use instead of losing it permanently
+  // at every boot.
   kartMusicInit(); // GAMEHUB / KART RACER speaker channel volumes
   buildTrikiCube();
   preferences.begin("triki", true);
   double trikiBiasX = preferences.getDouble("biasX", 0.0), trikiBiasY = preferences.getDouble("biasY", 0.0), trikiBiasZ = preferences.getDouble("biasZ", 0.0);
   preferences.end();
   trikiEngine.setGyroBias(trikiBiasX, trikiBiasY, trikiBiasZ);
-  // Rejoin the last Wi-Fi network in the background. BLE stays enabled and
-  // modem sleep is left on, as required by ESP32-S3 radio coexistence.
+  // Rejoin the last Wi-Fi network in the background. Modem sleep is left on,
+  // as required by ESP32-S3 radio coexistence. BLE no longer starts
+  // unconditionally alongside this - see ensureBleReady() - so WiFi now gets
+  // the heap it needs far more reliably than when both were always-on.
   autoConnectWifi();
   // The ILI9341 is write-only in this project, so MISO is deliberately unused.
   // G4 stays unused; G15 is the display reset line.
