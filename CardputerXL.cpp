@@ -160,6 +160,40 @@ bool chargingInferredFromBatteryRise(int battery);
 void startSnakeGame();
 void stepSnakeGame();
 
+void startG2048Game();
+void spawnG2048Tile();
+bool slideLine2048(uint16_t line[4], int& scoreDelta);
+bool moveG2048(int dir);
+bool g2048HasMoves();
+void drawG2048();
+
+void startMinesweeperGame();
+void msRevealFlood(int startR, int startC);
+void msReveal(int r, int c);
+uint16_t msCountColor(int n);
+void drawMinesweeperCell(int r, int c);
+void drawMinesweeper();
+
+void startBreakoutGame();
+int brkBrickY(int row);
+int brkBrickX(int col);
+void brkServeBall();
+void drawBreakoutBrick(int r, int c);
+void drawBreakoutHud();
+void drawBreakout();
+void stepBreakoutGame();
+
+void computeTetrominoRotations();
+bool tetFits(int type, int rot, int x, int y);
+unsigned long tetDropIntervalMs();
+void tetSpawnPiece();
+void startTetrisGame();
+void tetLockPiece();
+bool tetTryRotate();
+void drawTetrisField();
+void drawTetris();
+void stepTetrisGame();
+
 void captureCLabUserApp();
 
 void paintToast();
@@ -607,11 +641,16 @@ String pendingWebAction = "";
 String calcInput = "0", calcStatus = "Enter numbers, then + - * /"; float calcTotal = 0; char calcOp = 0; bool calcNew = true;
 int diceValue = 1, randomValue = 0;
 bool coinHeads = true;
-// GAMES contains three small, self-contained offline games. Snake/Grid Hunt
-// state stays in RAM, so a reboot always starts a fresh game; Kart Racer's
-// best-lap times persist to flash (see kartLoadBestLap/kartSaveBestLap below).
-int gameMenuSelected = 0; // 0 Snake, 1 Grid Hunt, 2 Kart Racer
-int gameMode = 0;         // 0 menu, 1 Snake, 2 Grid Hunt, 3 Kart Racer
+// GAMES contains seven small, self-contained offline games. Snake/Grid
+// Hunt/2048/Minesweeper/Breakout/Tetris state stays in RAM, so a reboot
+// always starts fresh; Kart Racer's best-lap times and each of the other
+// six's own high score persist to flash (see kartLoadBestLap/kartSaveBestLap
+// and each game's own load/save pair, all sharing the `preferences` object
+// under their own namespace the same way).
+constexpr int GAME_COUNT = 7;
+const char* GAME_NAMES[GAME_COUNT] = {"SNAKE", "GRID HUNT", "KART RACER", "2048", "MINESWEEPER", "BREAKOUT", "TETRIS"};
+int gameMenuSelected = 0; // index into GAME_NAMES
+int gameMode = 0;         // 0 menu, 1 Snake, 2 Grid Hunt, 3 Kart Racer, 4 2048, 5 Minesweeper, 6 Breakout, 7 Tetris
 // Mirrors lastDrawnPage's role, one level down: refreshLocalPage() only calls
 // the full drawGameHub() (fillScreen + header/footer) when the submode itself
 // just changed; staying within a submode uses the bounded per-submode redraw
@@ -3106,17 +3145,16 @@ void stepKartRace() {
 // entirely in stepKartRace()). Called both from drawGameHub() (full entry
 // draw) and directly from refreshLocalPage() once already inside the
 // submode, so a selection change never needs a fillScreen()+header()+footer().
+// A compact one-line-per-game list (matching DEVICE CHECK/QR TOOLS+'s list
+// style) rather than the old two-line card-per-game layout, which stopped
+// fitting once the roster grew past three entries.
 void drawGameMenuList() {
-  const char* games[] = {"SNAKE", "GRID HUNT", "KART RACER"};
-  const char* details[] = {"collect dots; do not hit yourself", "find the highlighted square", "time-trial go-kart racing"};
   tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
   tft.setTextSize(1);
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 8); tft.print("THREE OFFLINE MINI GAMES");
-  for (int i = 0; i < 3; ++i) {
-    int y = CONTENT_Y + 34 + i * 42; bool selected = i == gameMenuSelected; uint16_t bg = selected ? ui.selected : ui.bg;
-    if (selected) tft.fillRoundRect(8, y - 5, 304, 34, 4, bg);
-    tft.setTextColor(selected ? ui.text : ui.dim, bg); tft.setCursor(16, y); tft.print(selected ? "> " : "  "); tft.print(games[i]);
-    tft.setTextColor(selected ? ui.text : ui.dim, bg); tft.setCursor(28, y + 13); tft.print(details[i]);
+  for (int i = 0; i < GAME_COUNT; ++i) {
+    int y = CONTENT_Y + 10 + i * 24; bool selected = i == gameMenuSelected; uint16_t bg = selected ? ui.selected : ui.bg;
+    if (selected) tft.fillRoundRect(8, y - 4, 304, 19, 4, bg);
+    tft.setTextColor(selected ? ui.text : ui.dim, bg); tft.setCursor(16, y); tft.print(selected ? "> " : "  "); tft.print(GAME_NAMES[i]);
   }
 }
 void drawGridHuntGrid() {
@@ -3132,10 +3170,494 @@ void drawGridHuntGrid() {
     tft.drawRoundRect(x, y, cell - 5, cell - 5, 4, i == huntCursor ? ILI9341_WHITE : ui.dim);
   }
 }
+// ---- 2048 (gameMode 4) ------------------------------------------------------
+constexpr int G2048_CELL = 40, G2048_GAP = 4;
+constexpr int G2048_LEFT = (W - (G2048_CELL * 4 + G2048_GAP * 3)) / 2;
+constexpr int G2048_TOP = CONTENT_Y + 24;
+uint16_t g2048Board[4][4];
+int g2048Score = 0, g2048Best = 0;
+bool g2048GameOver = false;
+void startG2048Game() {
+  memset(g2048Board, 0, sizeof(g2048Board));
+  g2048Score = 0; g2048GameOver = false;
+  preferences.begin("g2048", true); g2048Best = preferences.getInt("best", 0); preferences.end();
+  int emptyR[16], emptyC[16], n = 16;
+  for (int i = 0; i < 16; ++i) { emptyR[i] = i / 4; emptyC[i] = i % 4; }
+  for (int k = 0; k < 2; ++k) { int idx = random(0, n); g2048Board[emptyR[idx]][emptyC[idx]] = (random(0, 10) == 0) ? 4 : 2; emptyR[idx] = emptyR[--n]; emptyC[idx] = emptyC[n]; }
+}
+void spawnG2048Tile() {
+  int emptyR[16], emptyC[16], n = 0;
+  for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) if (g2048Board[r][c] == 0) { emptyR[n] = r; emptyC[n] = c; n++; }
+  if (!n) return;
+  int idx = random(0, n);
+  g2048Board[emptyR[idx]][emptyC[idx]] = (random(0, 10) == 0) ? 4 : 2;
+}
+// Slides and merges one 4-value line toward index 0 - call with a pre-
+// reversed line to slide toward index 3 instead (used for right/down).
+bool slideLine2048(uint16_t line[4], int& scoreDelta) {
+  uint16_t before[4]; memcpy(before, line, sizeof(before));
+  uint16_t out[4] = {0, 0, 0, 0}; int w = 0;
+  for (int i = 0; i < 4; ++i) if (line[i] != 0) out[w++] = line[i];
+  for (int i = 0; i < 3; ++i) {
+    if (out[i] != 0 && out[i] == out[i + 1]) {
+      out[i] *= 2; scoreDelta += out[i];
+      for (int j = i + 1; j < 3; ++j) out[j] = out[j + 1];
+      out[3] = 0;
+    }
+  }
+  memcpy(line, out, sizeof(out));
+  return memcmp(before, out, sizeof(out)) != 0;
+}
+// dir: 0 up, 1 down, 2 left, 3 right - matches this file's ;/./,//  convention.
+bool moveG2048(int dir) {
+  bool moved = false; int scoreDelta = 0;
+  bool vertical = (dir == 0 || dir == 1), reversed = (dir == 1 || dir == 3);
+  for (int k = 0; k < 4; ++k) {
+    uint16_t line[4];
+    for (int i = 0; i < 4; ++i) line[i] = vertical ? g2048Board[i][k] : g2048Board[k][i];
+    if (reversed) for (int i = 0; i < 2; ++i) { uint16_t t = line[i]; line[i] = line[3 - i]; line[3 - i] = t; }
+    bool changed = slideLine2048(line, scoreDelta);
+    if (reversed) for (int i = 0; i < 2; ++i) { uint16_t t = line[i]; line[i] = line[3 - i]; line[3 - i] = t; }
+    for (int i = 0; i < 4; ++i) { if (vertical) g2048Board[i][k] = line[i]; else g2048Board[k][i] = line[i]; }
+    moved = moved || changed;
+  }
+  g2048Score += scoreDelta;
+  return moved;
+}
+bool g2048HasMoves() {
+  for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) {
+    if (g2048Board[r][c] == 0) return true;
+    if (c < 3 && g2048Board[r][c] == g2048Board[r][c + 1]) return true;
+    if (r < 3 && g2048Board[r][c] == g2048Board[r + 1][c]) return true;
+  }
+  return false;
+}
+void drawG2048() {
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
+  tft.setTextSize(1);
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 4); tft.print("SCORE " + String(g2048Score));
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(150, CONTENT_Y + 4); tft.print("BEST " + String(g2048Best));
+  for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) {
+    int x = G2048_LEFT + c * (G2048_CELL + G2048_GAP), y = G2048_TOP + r * (G2048_CELL + G2048_GAP);
+    uint16_t value = g2048Board[r][c];
+    uint16_t fill = value == 0 ? ILI9341_DARKGREY : lerpColor565(ui.dim, ui.accent, min(1.0f, log2f((float)value) / 11.0f));
+    tft.fillRoundRect(x, y, G2048_CELL, G2048_CELL, 4, fill);
+    if (value != 0) {
+      String label = String(value);
+      tft.setTextColor(value >= 8 ? ILI9341_WHITE : ILI9341_BLACK, fill);
+      tft.setCursor(x + (G2048_CELL - (int)label.length() * 6) / 2, y + (G2048_CELL - 8) / 2);
+      tft.print(label);
+    }
+  }
+  if (g2048GameOver) {
+    int bx = G2048_LEFT - 4, by = G2048_TOP + 60, bw = G2048_CELL * 4 + G2048_GAP * 3 + 8;
+    tft.fillRoundRect(bx, by, bw, 40, 6, ui.panel);
+    tft.drawRoundRect(bx, by, bw, 40, 6, ui.accent);
+    tft.setTextColor(ILI9341_YELLOW, ui.panel); tft.setCursor(bx + 24, by + 8); tft.print("GAME OVER");
+    tft.setTextColor(ui.dim, ui.panel); tft.setCursor(bx + 12, by + 22); tft.print("ENTER TO RESTART");
+  }
+}
+
+// ---- Minesweeper (gameMode 5) -----------------------------------------------
+// Mines are placed upfront, including possibly under the very first reveal -
+// unlike many implementations this doesn't guarantee a safe opening click, a
+// deliberate simplicity trade-off for this scope.
+constexpr int MS_COLS = 14, MS_ROWS = 8, MS_CELL = 20, MS_MINES = 20;
+constexpr int MS_LEFT = (W - MS_COLS * MS_CELL) / 2;
+constexpr int MS_TOP = CONTENT_Y + 20;
+int8_t msGrid[MS_ROWS][MS_COLS];  // -1 = mine, else 0-8 adjacent mine count
+bool msRevealed[MS_ROWS][MS_COLS];
+bool msFlagged[MS_ROWS][MS_COLS];
+int msCursorR = 0, msCursorC = 0, msRevealedCount = 0;
+bool msGameOver = false, msWin = false;
+void startMinesweeperGame() {
+  memset(msGrid, 0, sizeof(msGrid));
+  memset(msRevealed, 0, sizeof(msRevealed));
+  memset(msFlagged, 0, sizeof(msFlagged));
+  msCursorR = MS_ROWS / 2; msCursorC = MS_COLS / 2;
+  msRevealedCount = 0; msGameOver = false; msWin = false;
+  int placed = 0;
+  while (placed < MS_MINES) {
+    int r = random(0, MS_ROWS), c = random(0, MS_COLS);
+    if (msGrid[r][c] == -1) continue;
+    msGrid[r][c] = -1; placed++;
+  }
+  for (int r = 0; r < MS_ROWS; ++r) for (int c = 0; c < MS_COLS; ++c) {
+    if (msGrid[r][c] == -1) continue;
+    int n = 0;
+    for (int dr = -1; dr <= 1; ++dr) for (int dc = -1; dc <= 1; ++dc) {
+      int rr = r + dr, cc = c + dc;
+      if (rr >= 0 && rr < MS_ROWS && cc >= 0 && cc < MS_COLS && msGrid[rr][cc] == -1) n++;
+    }
+    msGrid[r][c] = n;
+  }
+}
+// Iterative flood-fill (an explicit stack, not recursion, to keep this off
+// the call stack no matter how large a connected empty area turns out to be)
+// - opens every connected zero-count cell plus the numbered cells bordering
+// it, the standard Minesweeper "open a whole empty area" reveal.
+void msRevealFlood(int startR, int startC) {
+  int stackR[MS_ROWS * MS_COLS], stackC[MS_ROWS * MS_COLS], sp = 0;
+  stackR[sp] = startR; stackC[sp] = startC; sp++;
+  while (sp > 0) {
+    sp--;
+    int r = stackR[sp], c = stackC[sp];
+    if (r < 0 || r >= MS_ROWS || c < 0 || c >= MS_COLS) continue;
+    if (msRevealed[r][c] || msFlagged[r][c]) continue;
+    msRevealed[r][c] = true; msRevealedCount++;
+    if (msGrid[r][c] != 0) continue;  // only 0-count cells keep expanding
+    for (int dr = -1; dr <= 1; ++dr) for (int dc = -1; dc <= 1; ++dc) {
+      if (dr == 0 && dc == 0) continue;
+      int rr = r + dr, cc = c + dc;
+      if (rr >= 0 && rr < MS_ROWS && cc >= 0 && cc < MS_COLS && !msRevealed[rr][cc]) { stackR[sp] = rr; stackC[sp] = cc; sp++; }
+    }
+  }
+}
+void msReveal(int r, int c) {
+  if (msFlagged[r][c] || msRevealed[r][c] || msGameOver || msWin) return;
+  if (msGrid[r][c] == -1) {
+    msRevealed[r][c] = true; msGameOver = true;
+    for (int rr = 0; rr < MS_ROWS; ++rr) for (int cc = 0; cc < MS_COLS; ++cc) if (msGrid[rr][cc] == -1) msRevealed[rr][cc] = true;
+    playExitSound(); vibrate(80);
+    return;
+  }
+  msRevealFlood(r, c);
+  if (msRevealedCount >= MS_ROWS * MS_COLS - MS_MINES) { msWin = true; playEnterSound(); }
+}
+// A fresh local array each call (not a function-static one) - a static's
+// initializer only runs once, so it would freeze at whatever theme was
+// active on the FIRST call instead of following theme changes.
+uint16_t msCountColor(int n) {
+  uint16_t colors[9] = {ui.dim, ILI9341_CYAN, ILI9341_GREEN, ILI9341_RED, ILI9341_BLUE, ILI9341_ORANGE, ILI9341_MAGENTA, ILI9341_BLACK, ILI9341_DARKGREY};
+  return colors[constrain(n, 0, 8)];
+}
+void drawMinesweeperCell(int r, int c) {
+  int x = MS_LEFT + c * MS_CELL, y = MS_TOP + r * MS_CELL;
+  bool isCursor = (r == msCursorR && c == msCursorC);
+  if (msRevealed[r][c]) {
+    uint16_t fill = (msGrid[r][c] == -1) ? ILI9341_RED : ui.bg;
+    tft.fillRect(x, y, MS_CELL - 1, MS_CELL - 1, fill);
+    if (msGrid[r][c] == -1) { tft.setTextColor(ILI9341_WHITE, fill); tft.setCursor(x + 6, y + 5); tft.print("*"); }
+    else if (msGrid[r][c] > 0) { tft.setTextColor(msCountColor(msGrid[r][c]), fill); tft.setCursor(x + 6, y + 5); tft.print(msGrid[r][c]); }
+  } else {
+    tft.fillRect(x, y, MS_CELL - 1, MS_CELL - 1, ILI9341_DARKGREY);
+    if (msFlagged[r][c]) { tft.setTextColor(ILI9341_YELLOW, ILI9341_DARKGREY); tft.setCursor(x + 6, y + 5); tft.print("F"); }
+  }
+  tft.drawRect(x, y, MS_CELL - 1, MS_CELL - 1, isCursor ? ILI9341_WHITE : ui.dim);
+}
+void drawMinesweeper() {
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
+  tft.setTextSize(1);
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 4);
+  tft.print("MINES " + String(MS_MINES) + "   OPEN " + String(msRevealedCount) + "/" + String(MS_ROWS * MS_COLS - MS_MINES));
+  for (int r = 0; r < MS_ROWS; ++r) for (int c = 0; c < MS_COLS; ++c) drawMinesweeperCell(r, c);
+  if (msGameOver || msWin) {
+    tft.setTextColor(msWin ? ILI9341_GREEN : ILI9341_RED, ui.bg);
+    tft.setCursor(MS_LEFT + 60, MS_TOP + MS_ROWS * MS_CELL + 4);
+    tft.print(msWin ? "CLEARED! ENTER RESTART" : "BOOM! ENTER RESTART");
+  }
+}
+
+// ---- Breakout (gameMode 6) --------------------------------------------------
+constexpr int BRK_COLS = 8, BRK_ROWS = 4;
+constexpr int BRK_BRICK_W = 34, BRK_BRICK_H = 10, BRK_BRICK_GAP = 3;
+constexpr int BRK_FIELD_LEFT = (W - (BRK_COLS * (BRK_BRICK_W + BRK_BRICK_GAP) - BRK_BRICK_GAP)) / 2;
+constexpr int BRK_FIELD_TOP = CONTENT_Y + 16;
+constexpr int BRK_FIELD_RIGHT = W - 4;
+constexpr int BRK_FIELD_BOTTOM = H - FOOTER_H - 2;
+constexpr int BRK_PADDLE_W = 44, BRK_PADDLE_H = 6;
+constexpr float BRK_PADDLE_SPEED = 240.0f, BRK_BALL_SPEED = 150.0f, BRK_BALL_R = 3.0f;
+bool brkBricks[BRK_ROWS][BRK_COLS];
+float brkPaddleX, brkBallX, brkBallY, brkBallVX, brkBallVY;
+int brkScore = 0, brkLives = 3, brkBest = 0;
+enum BrkState { BRK_SERVE, BRK_PLAYING, BRK_GAMEOVER, BRK_WIN };
+BrkState brkState = BRK_SERVE;
+unsigned long brkLastFrameMs = 0;
+int brkBrickY(int row) { return BRK_FIELD_TOP + row * (BRK_BRICK_H + BRK_BRICK_GAP); }
+int brkBrickX(int col) { return BRK_FIELD_LEFT + col * (BRK_BRICK_W + BRK_BRICK_GAP); }
+void brkServeBall() {
+  brkBallX = brkPaddleX + BRK_PADDLE_W / 2.0f;
+  brkBallY = BRK_FIELD_BOTTOM - BRK_PADDLE_H - BRK_BALL_R - 2;
+  float angle = radians(60.0f + random(0, 60));  // 60-120 deg from horizontal: mostly upward
+  brkBallVX = BRK_BALL_SPEED * cosf(angle) * (random(0, 2) ? 1 : -1);
+  brkBallVY = -BRK_BALL_SPEED * sinf(angle);
+}
+void startBreakoutGame() {
+  for (int r = 0; r < BRK_ROWS; ++r) for (int c = 0; c < BRK_COLS; ++c) brkBricks[r][c] = true;
+  brkPaddleX = W / 2.0f - BRK_PADDLE_W / 2.0f;
+  brkScore = 0; brkLives = 3; brkState = BRK_SERVE;
+  preferences.begin("brk", true); brkBest = preferences.getInt("best", 0); preferences.end();
+  brkServeBall();
+  brkLastFrameMs = millis();
+}
+void drawBreakoutBrick(int r, int c) {
+  int x = brkBrickX(c), y = brkBrickY(r);
+  if (!brkBricks[r][c]) { tft.fillRect(x, y, BRK_BRICK_W, BRK_BRICK_H, ui.bg); return; }
+  uint16_t colors[BRK_ROWS] = {ILI9341_RED, ILI9341_ORANGE, ILI9341_YELLOW, ILI9341_GREEN};
+  tft.fillRect(x, y, BRK_BRICK_W, BRK_BRICK_H, colors[r % BRK_ROWS]);
+}
+void drawBreakoutHud() {
+  tft.fillRect(0, CONTENT_Y, W, 14, ui.bg);
+  tft.setTextSize(1); tft.setTextColor(ui.accent, ui.bg); tft.setCursor(8, CONTENT_Y + 2);
+  tft.print("SCORE " + String(brkScore) + "   BEST " + String(brkBest) + "   LIVES " + String(brkLives));
+}
+void drawBreakout() {
+  tft.fillRect(0, CONTENT_Y, W, H - FOOTER_H - CONTENT_Y, ui.bg);
+  drawBreakoutHud();
+  for (int r = 0; r < BRK_ROWS; ++r) for (int c = 0; c < BRK_COLS; ++c) drawBreakoutBrick(r, c);
+  tft.fillRect((int)brkPaddleX, BRK_FIELD_BOTTOM - BRK_PADDLE_H, BRK_PADDLE_W, BRK_PADDLE_H, ui.text);
+  tft.fillCircle((int)brkBallX, (int)brkBallY, (int)BRK_BALL_R, ILI9341_WHITE);
+  if (brkState == BRK_GAMEOVER || brkState == BRK_WIN) {
+    tft.setTextColor(brkState == BRK_WIN ? ILI9341_GREEN : ILI9341_RED, ui.bg);
+    tft.setCursor(W / 2 - 60, BRK_FIELD_TOP + 60); tft.print(brkState == BRK_WIN ? "ALL BRICKS CLEARED!" : "GAME OVER");
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(W / 2 - 55, BRK_FIELD_TOP + 74); tft.print("ENTER TO RESTART");
+  } else if (brkState == BRK_SERVE) {
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(W / 2 - 55, BRK_FIELD_TOP + 60); tft.print("ENTER TO SERVE");
+  }
+}
+// Continuous per-frame play, mirroring stepKartRace()/stepSnakeGame()'s
+// "bypass redrawNeeded, draw directly" approach - but unlike Minesweeper/
+// 2048/Grid Hunt's bounded-full-redraw style, the paddle and ball are erased
+// from their OLD position and redrawn at the new one every single frame:
+// at Breakout's frame rate, redrawing the whole field like those turn-based
+// games do would flash far more of the screen, far more often.
+void stepBreakoutGame() {
+  if (page != GAMEHUB || gameMode != 6 || quickMenuOpen) return;
+  unsigned long now = millis();
+  float dt = (now - brkLastFrameMs) / 1000.0f;
+  brkLastFrameMs = now;
+  if (dt > 0.05f) dt = 0.05f;
+
+  float oldPaddleX = brkPaddleX;
+  if (brkState != BRK_GAMEOVER && brkState != BRK_WIN) {
+    if (M5Cardputer.Keyboard.isKeyPressed(',')) brkPaddleX -= BRK_PADDLE_SPEED * dt;
+    else if (M5Cardputer.Keyboard.isKeyPressed('/')) brkPaddleX += BRK_PADDLE_SPEED * dt;
+    brkPaddleX = constrain(brkPaddleX, (float)BRK_FIELD_LEFT, (float)(BRK_FIELD_RIGHT - BRK_PADDLE_W));
+  }
+  if (brkPaddleX != oldPaddleX) {
+    tft.fillRect((int)oldPaddleX, BRK_FIELD_BOTTOM - BRK_PADDLE_H, BRK_PADDLE_W, BRK_PADDLE_H, ui.bg);
+    tft.fillRect((int)brkPaddleX, BRK_FIELD_BOTTOM - BRK_PADDLE_H, BRK_PADDLE_W, BRK_PADDLE_H, ui.text);
+  }
+  if (brkState == BRK_SERVE) { brkBallX = brkPaddleX + BRK_PADDLE_W / 2.0f; return; }
+  if (brkState != BRK_PLAYING) return;
+
+  float oldBallX = brkBallX, oldBallY = brkBallY;
+  brkBallX += brkBallVX * dt;
+  brkBallY += brkBallVY * dt;
+
+  if (brkBallX - BRK_BALL_R < BRK_FIELD_LEFT) { brkBallX = BRK_FIELD_LEFT + BRK_BALL_R; brkBallVX = -brkBallVX; playCursorSound(); }
+  else if (brkBallX + BRK_BALL_R > BRK_FIELD_RIGHT) { brkBallX = BRK_FIELD_RIGHT - BRK_BALL_R; brkBallVX = -brkBallVX; playCursorSound(); }
+  if (brkBallY - BRK_BALL_R < BRK_FIELD_TOP) { brkBallY = BRK_FIELD_TOP + BRK_BALL_R; brkBallVY = -brkBallVY; playCursorSound(); }
+
+  // Paddle collision: only while descending into it, and only near the top of
+  // the ball's travel through the paddle's Y band (keeps a "catch" from the
+  // side/below from looking wrong).
+  if (brkBallVY > 0 && brkBallY + BRK_BALL_R >= BRK_FIELD_BOTTOM - BRK_PADDLE_H && oldBallY + BRK_BALL_R < BRK_FIELD_BOTTOM - BRK_PADDLE_H + 4 &&
+      brkBallX >= brkPaddleX - BRK_BALL_R && brkBallX <= brkPaddleX + BRK_PADDLE_W + BRK_BALL_R) {
+    float hit = (brkBallX - (brkPaddleX + BRK_PADDLE_W / 2.0f)) / (BRK_PADDLE_W / 2.0f);  // -1..1
+    float angle = radians(60.0f + (hit + 1.0f) * 30.0f);  // 60 (left edge) .. 120 (right edge)
+    brkBallVX = BRK_BALL_SPEED * cosf(angle) * (hit < 0 ? -1 : 1);
+    brkBallVY = -fabsf(BRK_BALL_SPEED * sinf(angle));
+    brkBallY = BRK_FIELD_BOTTOM - BRK_PADDLE_H - BRK_BALL_R;
+    playMenuSound();
+  }
+
+  // Brick collision: nearest brick to the ball's new position, a simple AABB
+  // check - good enough at this ball speed/brick size for this scope.
+  if (brkBallY - BRK_BALL_R < brkBrickY(BRK_ROWS - 1) + BRK_BRICK_H) {
+    int col = (int)((brkBallX - BRK_FIELD_LEFT) / (BRK_BRICK_W + BRK_BRICK_GAP));
+    int row = (int)((brkBallY - BRK_FIELD_TOP) / (BRK_BRICK_H + BRK_BRICK_GAP));
+    if (row >= 0 && row < BRK_ROWS && col >= 0 && col < BRK_COLS && brkBricks[row][col]) {
+      brkBricks[row][col] = false;
+      brkBallVY = -brkBallVY;
+      brkScore += (BRK_ROWS - row) * 10;
+      drawBreakoutBrick(row, col);
+      drawBreakoutHud();
+      playFunctionSound();
+      bool anyLeft = false;
+      for (int r = 0; r < BRK_ROWS && !anyLeft; ++r) for (int c = 0; c < BRK_COLS; ++c) if (brkBricks[r][c]) { anyLeft = true; break; }
+      if (!anyLeft) {
+        brkState = BRK_WIN;
+        if (brkScore > brkBest) { brkBest = brkScore; preferences.begin("brk", false); preferences.putInt("best", brkBest); preferences.end(); }
+        drawBreakout();
+        return;
+      }
+    }
+  }
+
+  if (brkBallY - BRK_BALL_R > BRK_FIELD_BOTTOM) {
+    brkLives--;
+    if (brkLives <= 0) {
+      brkState = BRK_GAMEOVER;
+      if (brkScore > brkBest) { brkBest = brkScore; preferences.begin("brk", false); preferences.putInt("best", brkBest); preferences.end(); }
+      drawBreakout();
+      return;
+    }
+    brkState = BRK_SERVE;
+    brkServeBall();
+    vibrate(40); playExitSound();
+    drawBreakout();
+    return;
+  }
+
+  tft.fillCircle((int)oldBallX, (int)oldBallY, (int)BRK_BALL_R + 1, ui.bg);
+  tft.fillCircle((int)brkBallX, (int)brkBallY, (int)BRK_BALL_R, ILI9341_WHITE);
+}
+
+// ---- Tetris (gameMode 7) -----------------------------------------------------
+constexpr int TET_COLS = 10, TET_ROWS = 16, TET_CELL = 10;
+constexpr int TET_FIELD_LEFT = 70, TET_FIELD_TOP = CONTENT_Y + 4;
+constexpr int TET_PANEL_X = TET_FIELD_LEFT + TET_COLS * TET_CELL + 16;
+uint8_t tetField[TET_ROWS][TET_COLS];  // 0 empty, else 1..7 = piece colour index
+int8_t tetShapes[7][4][4][2];          // [type][rotation][cell][x,y] - computed once, see computeTetrominoRotations()
+int tetCurrentType = 0, tetCurrentRot = 0, tetCurrentX = 0, tetCurrentY = 0, tetNextType = 0;
+int tetScore = 0, tetLines = 0, tetLevel = 1, tetBest = 0;
+bool tetGameOver = false;
+unsigned long tetNextDropAt = 0;
+uint16_t tetColors[8] = {ILI9341_BLACK, 0x07FF, ILI9341_YELLOW, 0x780F, ILI9341_GREEN, ILI9341_RED, 0x001F, ILI9341_ORANGE};
+// Only the "spawn" rotation (index 0) of each of the 7 tetrominoes is hand-
+// written below; rotations 1-3 are derived from it with a plain 90-degree
+// grid rotation ((x,y) -> (3-y,x) in a 4x4 box), applied repeatedly - far
+// less error-prone than hand-transcribing all 28 rotated cell positions, and
+// geometrically guaranteed to be a valid rotation of the base shape.
+void computeTetrominoRotations() {
+  static const int8_t base[7][4][2] = {
+    {{0, 1}, {1, 1}, {2, 1}, {3, 1}},  // I
+    {{1, 1}, {2, 1}, {1, 2}, {2, 2}},  // O
+    {{1, 1}, {0, 2}, {1, 2}, {2, 2}},  // T
+    {{1, 1}, {2, 1}, {0, 2}, {1, 2}},  // S
+    {{0, 1}, {1, 1}, {1, 2}, {2, 2}},  // Z
+    {{0, 1}, {0, 2}, {1, 2}, {2, 2}},  // J
+    {{2, 1}, {0, 2}, {1, 2}, {2, 2}},  // L
+  };
+  for (int t = 0; t < 7; ++t) {
+    for (int c = 0; c < 4; ++c) { tetShapes[t][0][c][0] = base[t][c][0]; tetShapes[t][0][c][1] = base[t][c][1]; }
+    for (int r = 1; r < 4; ++r) for (int c = 0; c < 4; ++c) {
+      int8_t px = tetShapes[t][r - 1][c][0], py = tetShapes[t][r - 1][c][1];
+      tetShapes[t][r][c][0] = 3 - py;
+      tetShapes[t][r][c][1] = px;
+    }
+  }
+}
+bool tetFits(int type, int rot, int x, int y) {
+  for (int i = 0; i < 4; ++i) {
+    int fx = x + tetShapes[type][rot][i][0], fy = y + tetShapes[type][rot][i][1];
+    if (fx < 0 || fx >= TET_COLS || fy >= TET_ROWS) return false;
+    if (fy >= 0 && tetField[fy][fx] != 0) return false;
+  }
+  return true;
+}
+unsigned long tetDropIntervalMs() { int ms = 750 - (tetLevel - 1) * 55; return (unsigned long)max(120, ms); }
+void tetSpawnPiece() {
+  tetCurrentType = tetNextType;
+  tetNextType = random(0, 7);
+  tetCurrentRot = 0;
+  tetCurrentX = TET_COLS / 2 - 2;
+  tetCurrentY = -1;
+  if (!tetFits(tetCurrentType, tetCurrentRot, tetCurrentX, tetCurrentY)) {
+    tetGameOver = true;
+    if (tetScore > tetBest) { tetBest = tetScore; preferences.begin("tetris", false); preferences.putInt("best", tetBest); preferences.end(); }
+  }
+  tetNextDropAt = millis() + tetDropIntervalMs();
+}
+void startTetrisGame() {
+  computeTetrominoRotations();
+  memset(tetField, 0, sizeof(tetField));
+  tetScore = 0; tetLines = 0; tetLevel = 1; tetGameOver = false;
+  preferences.begin("tetris", true); tetBest = preferences.getInt("best", 0); preferences.end();
+  tetNextType = random(0, 7);
+  tetSpawnPiece();
+}
+void tetLockPiece() {
+  for (int i = 0; i < 4; ++i) {
+    int fx = tetCurrentX + tetShapes[tetCurrentType][tetCurrentRot][i][0];
+    int fy = tetCurrentY + tetShapes[tetCurrentType][tetCurrentRot][i][1];
+    if (fy >= 0) tetField[fy][fx] = tetCurrentType + 1;
+  }
+  int cleared = 0;
+  for (int r = TET_ROWS - 1; r >= 0; --r) {
+    bool full = true;
+    for (int c = 0; c < TET_COLS; ++c) if (tetField[r][c] == 0) { full = false; break; }
+    if (full) {
+      cleared++;
+      for (int rr = r; rr > 0; --rr) memcpy(tetField[rr], tetField[rr - 1], sizeof(tetField[rr]));
+      memset(tetField[0], 0, sizeof(tetField[0]));
+      r++;  // re-check this row index, now filled from above
+    }
+  }
+  if (cleared) {
+    static const int lineScore[5] = {0, 100, 300, 500, 800};
+    tetScore += lineScore[cleared] * tetLevel;
+    tetLines += cleared;
+    tetLevel = 1 + tetLines / 10;
+    vibrate(cleared >= 4 ? 60 : 25);
+    playEnterSound();
+  }
+  tetSpawnPiece();
+}
+bool tetTryRotate() {
+  int newRot = (tetCurrentRot + 1) % 4;
+  static const int kicks[] = {0, -1, 1, -2, 2};
+  for (int k : kicks) if (tetFits(tetCurrentType, newRot, tetCurrentX + k, tetCurrentY)) { tetCurrentRot = newRot; tetCurrentX += k; return true; }
+  return false;
+}
+void drawTetrisField() {
+  tft.fillRect(TET_FIELD_LEFT, TET_FIELD_TOP, TET_COLS * TET_CELL, TET_ROWS * TET_CELL, ui.bg);
+  tft.drawRect(TET_FIELD_LEFT - 1, TET_FIELD_TOP - 1, TET_COLS * TET_CELL + 2, TET_ROWS * TET_CELL + 2, ui.dim);
+  for (int r = 0; r < TET_ROWS; ++r) for (int c = 0; c < TET_COLS; ++c) {
+    if (tetField[r][c] == 0) continue;
+    tft.fillRect(TET_FIELD_LEFT + c * TET_CELL, TET_FIELD_TOP + r * TET_CELL, TET_CELL - 1, TET_CELL - 1, tetColors[tetField[r][c]]);
+  }
+  if (!tetGameOver) {
+    for (int i = 0; i < 4; ++i) {
+      int fx = tetCurrentX + tetShapes[tetCurrentType][tetCurrentRot][i][0];
+      int fy = tetCurrentY + tetShapes[tetCurrentType][tetCurrentRot][i][1];
+      if (fy >= 0) tft.fillRect(TET_FIELD_LEFT + fx * TET_CELL, TET_FIELD_TOP + fy * TET_CELL, TET_CELL - 1, TET_CELL - 1, tetColors[tetCurrentType + 1]);
+    }
+  }
+  tft.setTextSize(1);
+  tft.fillRect(TET_PANEL_X, TET_FIELD_TOP, W - TET_PANEL_X - 4, TET_ROWS * TET_CELL, ui.bg);
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(TET_PANEL_X, TET_FIELD_TOP); tft.print("SCORE");
+  tft.setCursor(TET_PANEL_X, TET_FIELD_TOP + 10); tft.print(tetScore);
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(TET_PANEL_X, TET_FIELD_TOP + 26); tft.print("BEST");
+  tft.setCursor(TET_PANEL_X, TET_FIELD_TOP + 36); tft.print(tetBest);
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(TET_PANEL_X, TET_FIELD_TOP + 52); tft.print("LEVEL");
+  tft.setCursor(TET_PANEL_X, TET_FIELD_TOP + 62); tft.print(tetLevel);
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(TET_PANEL_X, TET_FIELD_TOP + 78); tft.print("NEXT");
+  for (int i = 0; i < 4; ++i) {
+    int nx = tetShapes[tetNextType][0][i][0], ny = tetShapes[tetNextType][0][i][1];
+    tft.fillRect(TET_PANEL_X + nx * 8, TET_FIELD_TOP + 90 + ny * 8, 7, 7, tetColors[tetNextType + 1]);
+  }
+  if (tetGameOver) {
+    tft.setTextColor(ILI9341_RED, ui.bg);
+    int midY = TET_FIELD_TOP + TET_ROWS * TET_CELL / 2;
+    tft.setCursor(TET_FIELD_LEFT + 6, midY - 14); tft.print("GAME");
+    tft.setCursor(TET_FIELD_LEFT + 6, midY - 2); tft.print("OVER");
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(TET_FIELD_LEFT + 2, midY + 12); tft.print("ENTER");
+  }
+}
+void drawTetris() { drawTetrisField(); }
+// Gravity tick: moves the current piece down one row on a level-scaled timer
+// (see tetDropIntervalMs()), independent of the instant left/right/rotate/
+// soft-drop response handled by keyboard() - redraws the whole field rect
+// each time, the same bounded-area approach 2048/Minesweeper/Grid Hunt use
+// rather than per-cell diffing, since the field is small and drops happen at
+// most a few times a second even at high levels.
+void stepTetrisGame() {
+  if (page != GAMEHUB || gameMode != 7 || quickMenuOpen || tetGameOver) return;
+  if ((long)(millis() - tetNextDropAt) < 0) return;
+  tetNextDropAt = millis() + tetDropIntervalMs();
+  if (tetFits(tetCurrentType, tetCurrentRot, tetCurrentX, tetCurrentY + 1)) tetCurrentY++;
+  else tetLockPiece();
+  drawTetrisField();
+}
+
 void drawGameHub() {
   lastDrawnGameMode = gameMode;
   if (gameMode == 3) { drawKartHub(); return; }
-  tft.fillScreen(ui.bg); header(gameMode == 1 ? "GAMES / SNAKE" : (gameMode == 2 ? "GAMES / GRID HUNT" : "GAMES"));
+  tft.fillScreen(ui.bg);
+  String title = gameMode == 0 ? "GAMES" : String("GAMES / ") + GAME_NAMES[gameMode - 1];
+  header(title.c_str());
   tft.setTextSize(1);
   if (gameMode == 0) { drawGameMenuList(); footer(";/. SELECT     ENTER PLAY     FN BACK"); return; }
   if (gameMode == 1) {
@@ -3148,8 +3670,12 @@ void drawGameHub() {
     footer(snakeRunning ? "; UP  , LEFT  / RIGHT  . DOWN" : "ENTER RESTART     FN GAMES");
     return;
   }
-  drawGridHuntGrid();
-  footer("; UP  , LEFT  / RIGHT  . DOWN  ENTER CATCH");
+  if (gameMode == 2) { drawGridHuntGrid(); footer("; UP  , LEFT  / RIGHT  . DOWN  ENTER CATCH"); return; }
+  if (gameMode == 4) { drawG2048(); footer(g2048GameOver ? "ENTER RESTART     FN GAMES" : "; UP  , LEFT  / RIGHT  . DOWN"); return; }
+  if (gameMode == 5) { drawMinesweeper(); footer((msGameOver || msWin) ? "ENTER RESTART     FN GAMES" : ";/. / , MOVE  ENTER OPEN  SPACE FLAG"); return; }
+  if (gameMode == 6) { drawBreakout(); footer((brkState == BRK_GAMEOVER || brkState == BRK_WIN) ? "ENTER RESTART     FN GAMES" : ", LEFT  / RIGHT  ENTER SERVE"); return; }
+  drawTetris();
+  footer(tetGameOver ? "ENTER RESTART     FN GAMES" : ", LEFT  / RIGHT  . SOFT DROP  ; ROTATE  ENTER HARD DROP");
 }
 void startSnakeGame() {
   snakeLength = 3; snakeScore = 0; snakeDx = 1; snakeDy = 0;
@@ -4503,6 +5029,17 @@ void refreshLocalPage() {
       else if (gameMode == 1) drawGameHub();  // rare: crash / restart, footer text changes too
       else if (gameMode == 2) drawGridHuntGrid();
       else if (gameMode == 3) drawKartHub();
+      // 2048/Minesweeper redraw their own content on every move (turn-based,
+      // like Grid Hunt above) but the footer's hint text also depends on
+      // game-over state, so it's repainted here too - cheap (a small fixed
+      // strip), unlike a full drawGameHub() on every move would be.
+      else if (gameMode == 4) { drawG2048(); footer(g2048GameOver ? "ENTER RESTART     FN GAMES" : "; UP  , LEFT  / RIGHT  . DOWN"); }
+      else if (gameMode == 5) { drawMinesweeper(); footer((msGameOver || msWin) ? "ENTER RESTART     FN GAMES" : ";/. / , MOVE  ENTER OPEN  SPACE FLAG"); }
+      // Breakout/Tetris draw directly from their own step function or input
+      // handler, bypassing redrawNeeded entirely like Kart/Snake's
+      // continuous play does - these are just a defensive fallback.
+      else if (gameMode == 6) drawBreakout();
+      else if (gameMode == 7) drawTetris();
       break;
     case DICERANDOM:
       tft.fillRect(12, CONTENT_Y + 25, 296, 130, ui.bg);
@@ -4998,13 +5535,74 @@ void keyboard() {
   if (page == DICERANDOM) { if (k.enter) { rollDiceRandom(); playEnterSound(); redrawNeeded = true; } return; }
   if (page == GAMEHUB) {
     if (gameMode == 0) {
-      for (char c : k.word) { if (c == ';') { gameMenuSelected = (gameMenuSelected + 2) % 3; redrawNeeded = true; } else if (c == '.') { gameMenuSelected = (gameMenuSelected + 1) % 3; redrawNeeded = true; } }
+      for (char c : k.word) { if (c == ';') { gameMenuSelected = (gameMenuSelected + GAME_COUNT - 1) % GAME_COUNT; redrawNeeded = true; } else if (c == '.') { gameMenuSelected = (gameMenuSelected + 1) % GAME_COUNT; redrawNeeded = true; } }
       if (k.enter) {
         if (gameMenuSelected == 0) { gameMode = 1; startSnakeGame(); }
         else if (gameMenuSelected == 1) { gameMode = 2; huntCursor = random(0, 9); huntTarget = random(0, 9); if (huntTarget == huntCursor) huntTarget = (huntTarget + 1) % 9; huntScore = 0; }
-        else { gameMode = 3; kartRaceState = KART_HOME; }
+        else if (gameMenuSelected == 2) { gameMode = 3; kartRaceState = KART_HOME; }
+        else if (gameMenuSelected == 3) { gameMode = 4; startG2048Game(); }
+        else if (gameMenuSelected == 4) { gameMode = 5; startMinesweeperGame(); }
+        else if (gameMenuSelected == 5) { gameMode = 6; startBreakoutGame(); }
+        else { gameMode = 7; startTetrisGame(); }
         playEnterSound(); redrawNeeded = true;
       }
+      return;
+    }
+    if (gameMode == 4) {
+      if (g2048GameOver) { if (k.enter) { startG2048Game(); playEnterSound(); redrawNeeded = true; } return; }
+      bool up = wordContains(k.word, ';'), down = wordContains(k.word, '.');
+      bool left = wordContains(k.word, ','), right = wordContains(k.word, '/');
+      int dir = up ? 0 : down ? 1 : left ? 2 : right ? 3 : -1;
+      if (dir >= 0) {
+        if (moveG2048(dir)) {
+          spawnG2048Tile();
+          if (g2048Score > g2048Best) { g2048Best = g2048Score; preferences.begin("g2048", false); preferences.putInt("best", g2048Best); preferences.end(); }
+          if (!g2048HasMoves()) { g2048GameOver = true; playExitSound(); } else playMenuSound();
+          redrawNeeded = true;
+        } else playBlockedSound();
+      }
+      return;
+    }
+    if (gameMode == 5) {
+      if (msGameOver || msWin) { if (k.enter) { startMinesweeperGame(); playEnterSound(); redrawNeeded = true; } return; }
+      int oldR = msCursorR, oldC = msCursorC;
+      bool up = wordContains(k.word, ';'), down = wordContains(k.word, '.');
+      bool left = wordContains(k.word, ','), right = wordContains(k.word, '/');
+      if (up && msCursorR > 0) msCursorR--;
+      else if (down && msCursorR < MS_ROWS - 1) msCursorR++;
+      else if (left && msCursorC > 0) msCursorC--;
+      else if (right && msCursorC < MS_COLS - 1) msCursorC++;
+      else if (up || down || left || right) playBlockedSound();
+      if (msCursorR != oldR || msCursorC != oldC) { playCursorSound(); redrawNeeded = true; }
+      if (k.enter) { msReveal(msCursorR, msCursorC); redrawNeeded = true; }
+      if (wordContains(k.word, ' ') && !msRevealed[msCursorR][msCursorC]) { msFlagged[msCursorR][msCursorC] = !msFlagged[msCursorR][msCursorC]; playFunctionSound(); redrawNeeded = true; }
+      return;
+    }
+    if (gameMode == 6) {
+      // Paddle motion is polled directly in stepBreakoutGame(), the same way
+      // Kart polls its own throttle/steer - only the discrete serve/restart
+      // action goes through this per-event handler.
+      if (k.enter) {
+        if (brkState == BRK_GAMEOVER || brkState == BRK_WIN) { startBreakoutGame(); playEnterSound(); drawBreakout(); }
+        else if (brkState == BRK_SERVE) { brkState = BRK_PLAYING; playEnterSound(); }
+      }
+      return;
+    }
+    if (gameMode == 7) {
+      if (tetGameOver) { if (k.enter) { startTetrisGame(); playEnterSound(); drawTetrisField(); } return; }
+      bool moved = false;
+      for (char c : k.word) {
+        if (c == ',') { if (tetFits(tetCurrentType, tetCurrentRot, tetCurrentX - 1, tetCurrentY)) { tetCurrentX--; moved = true; } else playBlockedSound(); }
+        else if (c == '/') { if (tetFits(tetCurrentType, tetCurrentRot, tetCurrentX + 1, tetCurrentY)) { tetCurrentX++; moved = true; } else playBlockedSound(); }
+        else if (c == '.') { if (tetFits(tetCurrentType, tetCurrentRot, tetCurrentX, tetCurrentY + 1)) { tetCurrentY++; moved = true; tetNextDropAt = millis() + tetDropIntervalMs(); } else playBlockedSound(); }
+        else if (c == ';') { if (tetTryRotate()) { moved = true; playCursorSound(); } else playBlockedSound(); }
+      }
+      if (k.enter) {
+        while (tetFits(tetCurrentType, tetCurrentRot, tetCurrentX, tetCurrentY + 1)) tetCurrentY++;
+        tetLockPiece();
+        moved = true;
+      }
+      if (moved) drawTetrisField();
       return;
     }
     if (gameMode == 3) {
@@ -5034,6 +5632,7 @@ void keyboard() {
       for (char c : k.word) { if (c == ';' && snakeDy == 0) { snakeDx = 0; snakeDy = -1; } else if (c == '.' && snakeDy == 0) { snakeDx = 0; snakeDy = 1; } else if (c == ',' && snakeDx == 0) { snakeDx = -1; snakeDy = 0; } else if (c == '/' && snakeDx == 0) { snakeDx = 1; snakeDy = 0; } }
       return;
     }
+    // Reached only for gameMode == 2 (Grid Hunt) - every other mode returns above.
     for (char c : k.word) { if (c == ';' && huntCursor >= 3) huntCursor -= 3; else if (c == '.' && huntCursor < 6) huntCursor += 3; else if (c == ',' && huntCursor % 3) huntCursor--; else if (c == '/' && huntCursor % 3 < 2) huntCursor++; }
     if (k.enter) { if (huntCursor == huntTarget) { huntScore++; playEnterSound(); huntTarget = random(0, 9); if (huntTarget == huntCursor) huntTarget = (huntTarget + 1) % 9; } else playExitSound(); redrawNeeded = true; }
     if (!k.word.empty()) redrawNeeded = true;
@@ -5306,6 +5905,8 @@ void loop() {
   handleCLabCursorKeys();
   stepSnakeGame();
   stepKartRace();
+  stepBreakoutGame();
+  stepTetrisGame();
   // One 16th-note per tick. The grid is refreshed only on the new playhead
   // position rather than continuously redrawing a full screen.
   if (page == MUSICLAB && drumPlaying && !sleeping && !quickMenuOpen && millis() >= drumNextStepAt) {
