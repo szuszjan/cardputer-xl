@@ -295,6 +295,8 @@ void playCursorSound();
 void playFunctionSound();
 void playEnterSound();
 void playTabSound();
+void playBlockedSound();
+void playAppIntroAnimation(Page p);
 void setBacklight(bool on);
 void applyBacklight();
 void updateStatusLed();
@@ -1022,6 +1024,11 @@ void playFunctionSound() { vibrate(45); if (volumeLevel) M5Cardputer.Speaker.ton
 // Enter confirms an action, so it has a slightly firmer ON/OFF pulse.
 void playEnterSound() { vibrate(70); if (volumeLevel) M5Cardputer.Speaker.tone(ENTER_TONE_HZ, ENTER_TONE_MS); }
 void playTabSound() { if (volumeLevel) M5Cardputer.Speaker.tone(TAB_TONE_HZ, TAB_TONE_MS); }
+constexpr uint16_t BLOCKED_TONE_HZ = 220, BLOCKED_TONE_MS = 40;
+// Every other short sound here confirms an action succeeded; this one is
+// the opposite - a low "bump" for pressing a direction that hits an edge
+// (top/bottom row, first/last column, ...) and doesn't move the selection.
+void playBlockedSound() { if (volumeLevel) M5Cardputer.Speaker.tone(BLOCKED_TONE_HZ, BLOCKED_TONE_MS); }
 void playBootSound() {
   if (!volumeLevel) return;
   M5Cardputer.Speaker.tone(880, 70);
@@ -1698,10 +1705,33 @@ void startLauncherFocusAnimation(int oldSelected, int oldScroll) { (void)oldSele
 void updateLauncherFocusAnimation() {}
 // Selection change: same colour-fade approach as Home's startHomeFocusAnimation()
 // (see the lerpColor565 comment above it) when the scroll window didn't move;
-// a scroll jump just redraws the whole grid fresh instead, unanimated, the
-// same way the old row-list handled it.
+// a scroll jump instead reveals the new set of rows top-to-bottom, each tile
+// fading in from the background colour rather than popping in solid. A real
+// sliding/moving scroll would need to draw content outside a tile's own
+// fixed slot mid-motion, which risks spilling into the header/caption above
+// and below the grid - this display has no arbitrary clip-rect to contain
+// that the way a real framebuffer would, so the animation stays inside each
+// slot's own bounds (fading it, not moving it) the same way every other
+// animation in this file does, and still reads clearly as "the grid just
+// scrolled" thanks to the row-by-row stagger.
 void updateLauncherSelection(int oldSelected, int oldScroll) {
-  if (oldScroll != appScroll) { drawLauncherGrid(); drawLauncherCaption(); return; }
+  if (oldScroll != appScroll) {
+    tft.fillRect(0, CONTENT_Y, W, LAUNCHER_GRID_BOTTOM - CONTENT_Y, ui.bg);
+    for (int row = 0; row < LAUNCHER_GRID_ROWS; ++row) {
+      for (int gridPos = row * LAUNCHER_GRID_COLS; gridPos < (row + 1) * LAUNCHER_GRID_COLS; ++gridPos) {
+        int listIndex = appScroll + gridPos;
+        if (listIndex >= SECONDARY_APP_COUNT) continue;
+        bool selected = listIndex == appSelected;
+        uint16_t fill = selected ? ui.selected : ILI9341_DARKGREY, border = selected ? ui.accent : ui.dim;
+        drawLauncherTileColored(listIndex, gridPos, lerpColor565(ui.bg, fill, 0.45f), lerpColor565(ui.bg, border, 0.45f));
+        drawLauncherTileColored(listIndex, gridPos, fill, border);
+      }
+      M5Cardputer.update();
+      delay(30);
+    }
+    drawLauncherCaption();
+    return;
+  }
   int oldGridPos = oldSelected - appScroll, newGridPos = appSelected - appScroll;
   constexpr int FRAMES = 5;
   for (int f = 1; f <= FRAMES; ++f) {
@@ -1923,6 +1953,76 @@ void closeQuickMenuAnimated() {
     M5Cardputer.update();
     delay(9);
   }
+}
+
+// ---- Per-app opening intro: a ~1.1s icon+name splash plus a short two-note
+// jingle, played whenever navigating into a genuinely different app (see the
+// hook in draw()). Purely decorative - it never touches app state, and
+// nothing here is a real Page of its own. One shared template rather than
+// 29 hand-authored sequences, but each app still reads as distinct: its own
+// icon (appIcons[]), its own name, one of several accent tints picked by
+// app index, and a genuinely unique two-note jingle (see the comment above
+// APP_JINGLE_A below for how uniqueness across all 29 apps is guaranteed).
+// Two independent note tables, deliberately sized 8 and 7 (coprime): since
+// every app in 0..28 is well under their lcm (56), (index%8, index%7) never
+// repeats across the whole app list, so every app's two-note jingle really
+// is unique, without hand-picking 29 pairs. Both tables are a pentatonic-ish
+// selection so no combination ever sounds dissonant against itself.
+static const uint16_t APP_JINGLE_A[] = {523, 587, 659, 784, 880, 1047, 1175, 1319};
+static const uint16_t APP_JINGLE_B[] = {392, 440, 494, 587, 659, 740, 831};
+static const uint16_t APP_INTRO_TINTS[] = {
+  ILI9341_CYAN, ILI9341_ORANGE, ILI9341_MAGENTA, ILI9341_GREEN,
+  ILI9341_YELLOW, 0x841F /* violet */, ILI9341_RED, 0x07FF /* teal */, ILI9341_WHITE
+};
+void playAppIntroAnimation(Page p) {
+  int appIndex = (int)p - 1;
+  if (appIndex < 0 || appIndex >= APP_COUNT) return;  // LAUNCHER etc. aren't "apps" - no intro
+  const char* icon = appIcons[appIndex];
+  const char* name = appNames[appIndex];
+  uint16_t tint = APP_INTRO_TINTS[appIndex % (sizeof(APP_INTRO_TINTS) / sizeof(APP_INTRO_TINTS[0]))];
+
+  tft.fillScreen(ILI9341_BLACK);
+  vibrate(20);
+  if (volumeLevel) M5Cardputer.Speaker.tone(APP_JINGLE_A[appIndex % 8], 100);
+
+  // The icon zooms in: every frame is centred on the same point and
+  // strictly bigger than the last (growing text size, opaque background),
+  // so it always fully covers the previous, smaller frame - the same
+  // "safe to grow, unsafe to move or shrink without clearing" rule the
+  // quick-launch menu's open animation follows, applied to text instead of
+  // a filled rect.
+  constexpr int ZOOM_FRAMES = 6;
+  for (int f = 1; f <= ZOOM_FRAMES; ++f) {
+    tft.setTextSize(f);
+    int16_t bx, by; uint16_t bw, bh;
+    tft.getTextBounds(icon, 0, 0, &bx, &by, &bw, &bh);
+    tft.setTextColor(tint, ILI9341_BLACK);
+    tft.setCursor(W / 2 - (int)bw / 2 - bx, H / 2 - 20 - (int)bh / 2 - by);
+    tft.print(icon);
+    M5Cardputer.update();
+    delay(12);
+  }
+
+  delay(120);
+  if (volumeLevel) M5Cardputer.Speaker.tone(APP_JINGLE_B[appIndex % 7], 150);
+
+  // The name fades in below - fixed position and size every frame, only
+  // the colour animates (see lerpColor565()'s comment for why that's safe:
+  // it's the same 1-bit glyph shape redrawn each time, just brighter).
+  constexpr int FADE_FRAMES = 5;
+  tft.setTextSize(2);
+  int16_t nx, ny; uint16_t nw, nh;
+  tft.getTextBounds(name, 0, 0, &nx, &ny, &nw, &nh);
+  int textX = W / 2 - (int)nw / 2 - nx, textY = H / 2 + 30;
+  for (int f = 1; f <= FADE_FRAMES; ++f) {
+    tft.setTextColor(lerpColor565(ILI9341_BLACK, ILI9341_WHITE, (float)f / FADE_FRAMES), ILI9341_BLACK);
+    tft.setCursor(textX, textY);
+    tft.print(name);
+    M5Cardputer.update();
+    delay(12);
+  }
+
+  delay(850);  // hold so the whole splash reads as ~1.1s, not a flicker
 }
 
 void drawLauncher() {
@@ -4375,11 +4475,14 @@ void draw() {
   // APP tile, ahead of overwriting lastDrawnPage below. System transitions
   // (lock/screensaver/the Wi-Fi setup sub-flow, on either side of the
   // change) don't count as an app worth resuming into.
-  if (lastDrawnPage != page &&
+  bool realAppTransition = lastDrawnPage != page &&
       lastDrawnPage != LOCKSCREEN && lastDrawnPage != SCREENSAVER && lastDrawnPage != WIFISETUP &&
-      page != LOCKSCREEN && page != SCREENSAVER && page != WIFISETUP) {
-    previousPage = lastDrawnPage;
-  }
+      page != LOCKSCREEN && page != SCREENSAVER && page != WIFISETUP;
+  if (realAppTransition) previousPage = lastDrawnPage;
+  // Same "real navigation into an app" condition as above, minus LAUNCHER
+  // itself (Home/Apps aren't "an app" to splash into) - see
+  // playAppIntroAnimation()'s own comment for what this actually plays.
+  if (realAppTransition && page != LAUNCHER) playAppIntroAnimation(page);
   if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) drawBleKeyboard(); else if (page == SCREENSAVER) drawScreensaver(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
 
 // Repaint only a changed application's content. Headers and footers are kept
@@ -4862,11 +4965,13 @@ void keyboard() {
       bool left = wordContains(k.word, ',');
       bool right = wordContains(k.word, '/');
       bool down = wordContains(k.word, '.');
-      if (up && homeSelected >= 2) homeSelected -= 2;
-      else if (left && homeSelected % 2) homeSelected--;
-      else if (right && homeSelected % 2 == 0) homeSelected++;
-      else if (down && homeSelected < 4) homeSelected += 2;
-      if (homeSelected != oldHome) { playMenuSound(); startHomeFocusAnimation(oldHome, homeSelected); }
+      bool homeMoved = false;
+      if (up && homeSelected >= 2) { homeSelected -= 2; homeMoved = true; }
+      else if (left && homeSelected % 2) { homeSelected--; homeMoved = true; }
+      else if (right && homeSelected % 2 == 0) { homeSelected++; homeMoved = true; }
+      else if (down && homeSelected < 4) { homeSelected += 2; homeMoved = true; }
+      if (homeMoved) { playMenuSound(); startHomeFocusAnimation(oldHome, homeSelected); }
+      else if (up || left || right || down) playBlockedSound();
     } else {
       // A 4-column grid: ;/. move a whole row (LAUNCHER_GRID_COLS) at a
       // time, ,// move one tile within the current row only - the same
@@ -4878,11 +4983,13 @@ void keyboard() {
       bool right = wordContains(k.word, '/');
       bool down = wordContains(k.word, '.');
       int col = appSelected % LAUNCHER_GRID_COLS;
-      if (up && appSelected - LAUNCHER_GRID_COLS >= 0) appSelected -= LAUNCHER_GRID_COLS;
-      else if (down && appSelected + LAUNCHER_GRID_COLS < SECONDARY_APP_COUNT) appSelected += LAUNCHER_GRID_COLS;
-      else if (left && col > 0) appSelected--;
-      else if (right && col < LAUNCHER_GRID_COLS - 1 && appSelected + 1 < SECONDARY_APP_COUNT) appSelected++;
-      if (appSelected != oldSelected) { playMenuSound(); syncLauncherScroll(); updateLauncherSelection(oldSelected, oldScroll); }
+      bool appsMoved = false;
+      if (up && appSelected - LAUNCHER_GRID_COLS >= 0) { appSelected -= LAUNCHER_GRID_COLS; appsMoved = true; }
+      else if (down && appSelected + LAUNCHER_GRID_COLS < SECONDARY_APP_COUNT) { appSelected += LAUNCHER_GRID_COLS; appsMoved = true; }
+      else if (left && col > 0) { appSelected--; appsMoved = true; }
+      else if (right && col < LAUNCHER_GRID_COLS - 1 && appSelected + 1 < SECONDARY_APP_COUNT) { appSelected++; appsMoved = true; }
+      if (appsMoved) { playMenuSound(); syncLauncherScroll(); updateLauncherSelection(oldSelected, oldScroll); }
+      else if (up || left || right || down) playBlockedSound();
     }
     return;
   }
