@@ -319,7 +319,10 @@ void updateLauncherIndicators();
 void drawHomeTile(int tile, bool selected);
 void startHomeFocusAnimation(int oldTile, int newTile);
 void drawQuickMenuTile(int tile, bool selected);
+void drawQuickMenuCaption();
 void drawQuickMenu();
+void openQuickMenuAnimated();
+void closeQuickMenuAnimated();
 void updateHomeFocusAnimation();
 void drawLauncherFocusRail(int y);
 void startLauncherFocusAnimation(int oldSelected, int oldScroll);
@@ -1686,34 +1689,85 @@ void updateHomeFocusAnimation() {
 // full repaint of whatever page is underneath once it closes (see
 // forceFullRedraw). This keeps it a true overlay - reachable without
 // disturbing whatever app/state the user was in.
-constexpr int QUICKMENU_X = 4, QUICKMENU_Y = 4, QUICKMENU_W = 312, QUICKMENU_H = 232;
-constexpr int QUICKMENU_TILE_W = 140, QUICKMENU_TILE_H = 46, QUICKMENU_GAP_X = 14, QUICKMENU_GAP_Y = 8;
-constexpr int QUICKMENU_TILE_LEFT = QUICKMENU_X + (QUICKMENU_W - (QUICKMENU_TILE_W * 2 + QUICKMENU_GAP_X)) / 2;
-constexpr int QUICKMENU_TILE_TOP = QUICKMENU_Y + 26;
+// A slim horizontal dock (1x6, not the old 2x3 block) vertically centered on
+// the panel. A one-line caption above the icons names whatever is currently
+// selected, since a 44px-wide tile has no room for a full app name.
+constexpr int QUICKMENU_W = 300, QUICKMENU_H = 62;
+constexpr int QUICKMENU_X = (W - QUICKMENU_W) / 2, QUICKMENU_Y = (H - QUICKMENU_H) / 2;
+constexpr int QUICKMENU_TILE_W = 44, QUICKMENU_TILE_H = 36, QUICKMENU_GAP_X = 4;
+constexpr int QUICKMENU_TILE_LEFT = QUICKMENU_X + 8;
+constexpr int QUICKMENU_TILE_TOP = QUICKMENU_Y + 20;
 void drawQuickMenuTile(int tile, bool selected) {
-  int col = tile % 2, row = tile / 2;
-  int x = QUICKMENU_TILE_LEFT + col * (QUICKMENU_TILE_W + QUICKMENU_GAP_X);
-  int y = QUICKMENU_TILE_TOP + row * (QUICKMENU_TILE_H + QUICKMENU_GAP_Y);
+  int x = QUICKMENU_TILE_LEFT + tile * (QUICKMENU_TILE_W + QUICKMENU_GAP_X);
   uint16_t fill = selected ? ui.selected : ILI9341_DARKGREY;
-  tft.fillRoundRect(x, y, QUICKMENU_TILE_W, QUICKMENU_TILE_H, 6, fill);
-  tft.drawRoundRect(x, y, QUICKMENU_TILE_W, QUICKMENU_TILE_H, 6, selected ? ui.accent : ui.dim);
+  tft.fillRoundRect(x, QUICKMENU_TILE_TOP, QUICKMENU_TILE_W, QUICKMENU_TILE_H, 6, fill);
+  tft.drawRoundRect(x, QUICKMENU_TILE_TOP, QUICKMENU_TILE_W, QUICKMENU_TILE_H, 6, selected ? ui.accent : ui.dim);
   tft.setTextSize(2); tft.setTextColor(ui.text, fill);
-  tft.setCursor(x + 10, y + 6); tft.print(homeTileIcon(tile));
-  tft.setTextSize(1); tft.setTextColor(ui.text, fill);
-  tft.setCursor(x + 10, y + 30); tft.print(homeTileLabel(tile));
+  tft.setCursor(x + 10, QUICKMENU_TILE_TOP + 10); tft.print(homeTileIcon(tile));
 }
+// Redraws just the caption naming the current selection - called on open and
+// every time the selection moves (icons alone are too narrow for a label).
+void drawQuickMenuCaption() {
+  tft.fillRect(QUICKMENU_X + 4, QUICKMENU_Y + 4, QUICKMENU_W - 8, 12, ui.panel);
+  tft.setTextSize(1); tft.setTextColor(ui.accent, ui.panel);
+  String label = homeTileLabel(quickMenuSelected);
+  // Default GFX font advances 6px/char at text size 1 - the same trick the
+  // lock screen already uses to center its date string.
+  tft.setCursor(QUICKMENU_X + (QUICKMENU_W - (int)label.length() * 6) / 2, QUICKMENU_Y + 6);
+  tft.print(label);
+}
+// Full, final paint of the dock at rest (all 6 icons + caption). Used to
+// finish the opening animation below, and reusable on its own if the panel
+// ever needs a plain, non-animated repaint.
 void drawQuickMenu() {
-  // A double border makes the popup read as "floating above" the page
-  // still visible around its edges, rather than a full scene change.
   tft.fillRoundRect(QUICKMENU_X, QUICKMENU_Y, QUICKMENU_W, QUICKMENU_H, 10, ui.panel);
   tft.drawRoundRect(QUICKMENU_X, QUICKMENU_Y, QUICKMENU_W, QUICKMENU_H, 10, ui.accent);
-  tft.drawRoundRect(QUICKMENU_X + 2, QUICKMENU_Y + 2, QUICKMENU_W - 4, QUICKMENU_H - 4, 8, ui.accent);
-  tft.setTextSize(1); tft.setTextColor(ui.accent, ui.panel);
-  tft.setCursor(QUICKMENU_X + 12, QUICKMENU_Y + 10); tft.print("QUICK LAUNCH");
+  drawQuickMenuCaption();
   for (int tile = 0; tile < HOME_TILE_COUNT; ++tile) drawQuickMenuTile(tile, tile == quickMenuSelected);
-  tft.setTextColor(ui.dim, ui.panel);
-  tft.setCursor(QUICKMENU_X + 12, QUICKMENU_Y + QUICKMENU_H - 16);
-  tft.print(";/. MOVE   ENTER OPEN   OPT CLOSE");
+}
+// Opening: grow the bar from a centered horizontal line up to full height.
+// Each frame's solid fill is centered on the same point and strictly taller
+// than the last, so it always fully contains the previous frame - nothing
+// needs erasing in between, which matters on this write-only panel where
+// nothing CAN be erased. The icons themselves only appear on the final,
+// full-size frame (drawQuickMenu()) rather than being clipped mid-grow.
+void openQuickMenuAnimated() {
+  constexpr int FRAMES = 7;
+  const int centerY = QUICKMENU_Y + QUICKMENU_H / 2;
+  for (int f = 1; f <= FRAMES; ++f) {
+    int h = QUICKMENU_H * f / FRAMES;
+    int y = centerY - h / 2;
+    int radius = min(10, h / 2);
+    tft.fillRoundRect(QUICKMENU_X, y, QUICKMENU_W, h, radius, ui.panel);
+    tft.drawRoundRect(QUICKMENU_X, y, QUICKMENU_W, h, radius, ui.accent);
+    M5Cardputer.update();
+    delay(16);
+  }
+  drawQuickMenu();
+}
+// Closing: the reverse shrink. A shrinking fill does NOT self-cover the
+// previous, larger frame's outer edge (the opposite of the growth trick
+// above), so each frame first flattens the whole original footprint back to
+// ui.bg before drawing the current, smaller panel on top - otherwise the
+// last frame's border would be left behind permanently. The very last frame
+// (h=0) is just that flat fill, and loop()'s forceFullRedraw path (set by
+// the caller right after this returns) replaces it with whatever the real
+// page underneath actually looks like.
+void closeQuickMenuAnimated() {
+  constexpr int FRAMES = 7;
+  const int centerY = QUICKMENU_Y + QUICKMENU_H / 2;
+  for (int f = FRAMES - 1; f >= 0; --f) {
+    tft.fillRect(QUICKMENU_X, QUICKMENU_Y, QUICKMENU_W, QUICKMENU_H, ui.bg);
+    int h = QUICKMENU_H * f / FRAMES;
+    if (h > 0) {
+      int y = centerY - h / 2;
+      int radius = min(10, h / 2);
+      tft.fillRoundRect(QUICKMENU_X, y, QUICKMENU_W, h, radius, ui.panel);
+      tft.drawRoundRect(QUICKMENU_X, y, QUICKMENU_W, h, radius, ui.accent);
+    }
+    M5Cardputer.update();
+    delay(16);
+  }
 }
 
 void drawLauncher() {
@@ -4396,7 +4450,7 @@ void keyboard() {
   // Fn/"back" behaviour below - the overlay sits on top of whatever page is
   // running and must never leak a Fn press through to it.
   if (fn && !fnLast) {
-    if (quickMenuOpen) { quickMenuOpen = false; forceFullRedraw = true; playExitSound(); redrawNeeded = true; }
+    if (quickMenuOpen) { quickMenuOpen = false; playExitSound(); closeQuickMenuAnimated(); forceFullRedraw = true; redrawNeeded = true; }
     else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
@@ -4408,34 +4462,35 @@ void keyboard() {
     quickMenuOpen = !quickMenuOpen;
     quickMenuSelected = 0;
     playMenuSound();
-    // Opening paints immediately so the overlay appears the instant the key
-    // is pressed, rather than waiting on the redrawNeeded/draw() dispatch
-    // further down in loop() - that dispatch doesn't know about this
-    // overlay and would just redraw the page underneath it.
-    if (quickMenuOpen) drawQuickMenu();
-    // Closing has nothing bounded to repaint (the overlay covers an
-    // arbitrary chunk of whatever page is underneath, and the panel is
-    // write-only so there is no way to "erase" just the covered pixels) -
-    // forceFullRedraw makes the loop() dispatch below do a full draw() of
-    // the current page even though `page` itself never changed.
-    else { forceFullRedraw = true; redrawNeeded = true; }
+    // Opening animates and paints immediately so the overlay appears the
+    // instant the key is pressed, rather than waiting on the
+    // redrawNeeded/draw() dispatch further down in loop() - that dispatch
+    // doesn't know about this overlay and would just redraw the page
+    // underneath it.
+    if (quickMenuOpen) openQuickMenuAnimated();
+    // Closing animates it away, then leans on the same dispatch: the panel
+    // is write-only so there is no way to "erase" just the covered pixels,
+    // so forceFullRedraw asks loop() for one full draw() of the current
+    // page even though `page` itself never changed.
+    else { closeQuickMenuAnimated(); forceFullRedraw = true; redrawNeeded = true; }
   }
   optLast = k.opt;
   if (quickMenuOpen) {
     // The overlay owns all input while open; the page underneath must not
     // also react to the same keystroke (e.g. GAMEHUB's own ;/. handling).
     if (!event || !M5Cardputer.Keyboard.isPressed()) return;
+    // A single horizontal row: any of the four direction keys cycles it,
+    // ;/, stepping back and ./  stepping forward, wrapping at both ends.
     int oldSelected = quickMenuSelected;
-    bool up = wordContains(k.word, ';'), left = wordContains(k.word, ',');
-    bool right = wordContains(k.word, '/'), down = wordContains(k.word, '.');
-    if (up && quickMenuSelected >= 2) quickMenuSelected -= 2;
-    else if (left && quickMenuSelected % 2) quickMenuSelected--;
-    else if (right && quickMenuSelected % 2 == 0) quickMenuSelected++;
-    else if (down && quickMenuSelected < 4) quickMenuSelected += 2;
-    if (quickMenuSelected != oldSelected) { playMenuSound(); drawQuickMenuTile(oldSelected, false); drawQuickMenuTile(quickMenuSelected, true); }
+    bool prev = wordContains(k.word, ';') || wordContains(k.word, ',');
+    bool next = wordContains(k.word, '.') || wordContains(k.word, '/');
+    if (prev) quickMenuSelected = (quickMenuSelected + HOME_TILE_COUNT - 1) % HOME_TILE_COUNT;
+    else if (next) quickMenuSelected = (quickMenuSelected + 1) % HOME_TILE_COUNT;
+    if (quickMenuSelected != oldSelected) { playMenuSound(); drawQuickMenuTile(oldSelected, false); drawQuickMenuTile(quickMenuSelected, true); drawQuickMenuCaption(); }
     if (k.enter) {
       playEnterSound();
       quickMenuOpen = false;
+      closeQuickMenuAnimated();
       forceFullRedraw = true;
       redrawNeeded = true;
       // Tile 5 is always "APPS" (the full app list); tiles 0-4 mirror
@@ -5034,7 +5089,8 @@ void loop() {
   // Nothing below may draw while the quick-launch overlay is open - every
   // page's draw()/refreshLocalPage() is oblivious to it and would just
   // paint straight over it. The overlay is repainted directly by keyboard()
-  // instead (open: drawQuickMenu(); navigate: the two changed tiles).
+  // instead (open/close: an animation; navigate: the two changed tiles
+  // plus the caption naming the new selection).
   if (redrawNeeded && !sleeping && !quickMenuOpen) {
     // A page transition (or forceFullRedraw, e.g. the overlay just closed
     // and left an arbitrary area of the screen needing a full repaint) needs
