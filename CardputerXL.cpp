@@ -487,6 +487,11 @@ Page page = LAUNCHER;
 // Tracks the fully painted scene.  Input inside the same scene is refreshed
 // locally; a real page change is still allowed one complete scene paint.
 Page lastDrawnPage = LAUNCHER;
+// "The app you were in before this one" - updated in draw() whenever a real
+// navigation happens, skipping system transitions (lock/screensaver/the
+// Wi-Fi setup sub-flow) that aren't something worth "resuming". Feeds the
+// quick-launch overlay's 7th tile (see "---- Floating quick-launch overlay").
+Page previousPage = LAUNCHER;
 Page screensaverReturnPage = LAUNCHER;
 unsigned long screensaverStartedAt = 0;
 unsigned long screensaverLastFrameAt = 0;
@@ -494,6 +499,15 @@ const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR"
 const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt"};
 constexpr int APP_COUNT = 29;
 constexpr int APP_VISIBLE = 5;
+// appNames[] is indexed by (Page - 1) and only covers pages up to GAMEHUB -
+// WIFISETUP/LOCKSCREEN/SCREENSAVER aren't "apps" and have no entry, so a raw
+// appNames[(int)p - 1] lookup on an arbitrary Page is not always safe. This
+// wraps that lookup for previousPage/quick-menu display purposes.
+const char* pageDisplayName(Page p) {
+  if (p == LAUNCHER) return "HOME";
+  int index = (int)p - 1;
+  return (index >= 0 && index < APP_COUNT) ? appNames[index] : "APPS";
+}
 // The first launcher page is a compact 2x3 dashboard. APPS opens the
 // secondary list, which deliberately excludes the five pinned home apps.
 constexpr int HOME_TILE_COUNT = 6;
@@ -1680,90 +1694,95 @@ void updateHomeFocusAnimation() {
 }
 
 // ---- Floating quick-launch overlay (Opt key, any page) --------------------
-// A compact popup showing the exact same 6 tiles as the Home screen above
+// A macOS-dock-style strip: 7 icons in one row, anchored just above the
+// bottom edge of the panel, that slides up into view and back down again.
+// The first 6 icons are the exact same tiles as the Home screen above
 // (homeTileIcon()/homeTileLabel()/homeAppIndices - pin an app to Home and it
-// is automatically on this menu too, no separate setup). Unlike every other
-// screen in this file it does not own a Page value and is not drawn through
-// draw()/refreshLocalPage(): it is painted directly by keyboard() when Opt
-// opens it or the selection moves, and removed by asking loop() for one
-// full repaint of whatever page is underneath once it closes (see
-// forceFullRedraw). This keeps it a true overlay - reachable without
-// disturbing whatever app/state the user was in.
-// A slim horizontal dock (1x6, not the old 2x3 block) vertically centered on
-// the panel. A one-line caption above the icons names whatever is currently
-// selected, since a 44px-wide tile has no room for a full app name.
-constexpr int QUICKMENU_W = 300, QUICKMENU_H = 62;
-constexpr int QUICKMENU_X = (W - QUICKMENU_W) / 2, QUICKMENU_Y = (H - QUICKMENU_H) / 2;
-constexpr int QUICKMENU_TILE_W = 44, QUICKMENU_TILE_H = 36, QUICKMENU_GAP_X = 4;
-constexpr int QUICKMENU_TILE_LEFT = QUICKMENU_X + 8;
+// is automatically on this menu too, no separate setup); the 7th is a "last
+// app" shortcut to previousPage (tracked in draw()), with no equivalent on
+// the physical Home screen. Unlike every other screen in this file it does
+// not own a Page value and is not drawn through draw()/refreshLocalPage():
+// it is painted directly by keyboard() when Opt opens it or the selection
+// moves, and removed by asking loop() for one full repaint of whatever page
+// is underneath once it closes (see forceFullRedraw). This keeps it a true
+// overlay - reachable without disturbing whatever app/state the user was in.
+constexpr int QUICKMENU_TILE_COUNT = HOME_TILE_COUNT + 1;
+constexpr int QUICKMENU_W = 302, QUICKMENU_H = 62, QUICKMENU_MARGIN_BOTTOM = 6;
+constexpr int QUICKMENU_X = (W - QUICKMENU_W) / 2;
+// Resting position, docked near the bottom edge; the slide animation moves
+// the panel between this Y and H (fully off-screen, below the last pixel row).
+constexpr int QUICKMENU_Y = H - QUICKMENU_H - QUICKMENU_MARGIN_BOTTOM;
+constexpr int QUICKMENU_TILE_W = 38, QUICKMENU_TILE_H = 36, QUICKMENU_GAP_X = 4;
+constexpr int QUICKMENU_TILE_LEFT = QUICKMENU_X + 6;
 constexpr int QUICKMENU_TILE_TOP = QUICKMENU_Y + 20;
+// Icon/label for the 7 quick-menu tiles: 0-5 are identical to Home's own
+// tiles; tile 6 has no Home equivalent, so it's handled separately here.
+const char* quickMenuIcon(int tile) { return tile == HOME_TILE_COUNT ? "<<" : homeTileIcon(tile); }
+const char* quickMenuLabel(int tile) { return tile == HOME_TILE_COUNT ? pageDisplayName(previousPage) : homeTileLabel(tile); }
 void drawQuickMenuTile(int tile, bool selected) {
   int x = QUICKMENU_TILE_LEFT + tile * (QUICKMENU_TILE_W + QUICKMENU_GAP_X);
   uint16_t fill = selected ? ui.selected : ILI9341_DARKGREY;
   tft.fillRoundRect(x, QUICKMENU_TILE_TOP, QUICKMENU_TILE_W, QUICKMENU_TILE_H, 6, fill);
   tft.drawRoundRect(x, QUICKMENU_TILE_TOP, QUICKMENU_TILE_W, QUICKMENU_TILE_H, 6, selected ? ui.accent : ui.dim);
   tft.setTextSize(2); tft.setTextColor(ui.text, fill);
-  tft.setCursor(x + 10, QUICKMENU_TILE_TOP + 10); tft.print(homeTileIcon(tile));
+  tft.setCursor(x + 7, QUICKMENU_TILE_TOP + 10); tft.print(quickMenuIcon(tile));
 }
 // Redraws just the caption naming the current selection - called on open and
 // every time the selection moves (icons alone are too narrow for a label).
 void drawQuickMenuCaption() {
   tft.fillRect(QUICKMENU_X + 4, QUICKMENU_Y + 4, QUICKMENU_W - 8, 12, ui.panel);
   tft.setTextSize(1); tft.setTextColor(ui.accent, ui.panel);
-  String label = homeTileLabel(quickMenuSelected);
+  String label = quickMenuLabel(quickMenuSelected);
   // Default GFX font advances 6px/char at text size 1 - the same trick the
   // lock screen already uses to center its date string.
   tft.setCursor(QUICKMENU_X + (QUICKMENU_W - (int)label.length() * 6) / 2, QUICKMENU_Y + 6);
   tft.print(label);
 }
-// Full, final paint of the dock at rest (all 6 icons + caption). Used to
+// Full, final paint of the dock at rest (all 7 icons + caption). Used to
 // finish the opening animation below, and reusable on its own if the panel
 // ever needs a plain, non-animated repaint.
 void drawQuickMenu() {
   tft.fillRoundRect(QUICKMENU_X, QUICKMENU_Y, QUICKMENU_W, QUICKMENU_H, 10, ui.panel);
   tft.drawRoundRect(QUICKMENU_X, QUICKMENU_Y, QUICKMENU_W, QUICKMENU_H, 10, ui.accent);
   drawQuickMenuCaption();
-  for (int tile = 0; tile < HOME_TILE_COUNT; ++tile) drawQuickMenuTile(tile, tile == quickMenuSelected);
+  for (int tile = 0; tile < QUICKMENU_TILE_COUNT; ++tile) drawQuickMenuTile(tile, tile == quickMenuSelected);
 }
-// Opening: grow the bar from a centered horizontal line up to full height.
-// Each frame's solid fill is centered on the same point and strictly taller
-// than the last, so it always fully contains the previous frame - nothing
-// needs erasing in between, which matters on this write-only panel where
-// nothing CAN be erased. The icons themselves only appear on the final,
-// full-size frame (drawQuickMenu()) rather than being clipped mid-grow.
+// The panel only ever moves within Y in [QUICKMENU_Y, H] - from resting
+// position down to fully off-screen. Both animations below clear this exact
+// zone every frame before drawing the current frame's panel on top of it,
+// which is what makes a MOVING (not just growing/shrinking) shape safe on a
+// write-only display: the previous frame's pixels are never left behind,
+// because the whole zone they could possibly be in is always reset first.
+constexpr int QUICKMENU_SLIDE_ZONE_H = H - QUICKMENU_Y;
+// Opening sweeps the panel up from H (invisible, its top edge sitting on the
+// very last screen row) to QUICKMENU_Y - a dock "rising" into view. The
+// icons themselves only appear on the final, full-size frame (drawQuickMenu())
+// once the panel is at rest, rather than being clipped mid-slide.
 void openQuickMenuAnimated() {
-  constexpr int FRAMES = 7;
-  const int centerY = QUICKMENU_Y + QUICKMENU_H / 2;
+  constexpr int FRAMES = 8;
   for (int f = 1; f <= FRAMES; ++f) {
-    int h = QUICKMENU_H * f / FRAMES;
-    int y = centerY - h / 2;
-    int radius = min(10, h / 2);
-    tft.fillRoundRect(QUICKMENU_X, y, QUICKMENU_W, h, radius, ui.panel);
-    tft.drawRoundRect(QUICKMENU_X, y, QUICKMENU_W, h, radius, ui.accent);
+    int y = H - (H - QUICKMENU_Y) * f / FRAMES;
+    tft.fillRect(QUICKMENU_X, QUICKMENU_Y, QUICKMENU_W, QUICKMENU_SLIDE_ZONE_H, ui.bg);
+    tft.fillRoundRect(QUICKMENU_X, y, QUICKMENU_W, QUICKMENU_H, 10, ui.panel);
+    tft.drawRoundRect(QUICKMENU_X, y, QUICKMENU_W, QUICKMENU_H, 10, ui.accent);
     M5Cardputer.update();
     delay(16);
   }
   drawQuickMenu();
 }
-// Closing: the reverse shrink. A shrinking fill does NOT self-cover the
-// previous, larger frame's outer edge (the opposite of the growth trick
-// above), so each frame first flattens the whole original footprint back to
-// ui.bg before drawing the current, smaller panel on top - otherwise the
-// last frame's border would be left behind permanently. The very last frame
-// (h=0) is just that flat fill, and loop()'s forceFullRedraw path (set by
-// the caller right after this returns) replaces it with whatever the real
-// page underneath actually looks like.
+// Closing is the reverse: the dock sinks back down out of view. The last
+// frame (f=0, fully off-screen) is just the zone-clearing fill with nothing
+// drawn on top, and loop()'s forceFullRedraw path (set by the caller right
+// after this returns) replaces that flat colour with whatever the real page
+// underneath actually looks like.
 void closeQuickMenuAnimated() {
-  constexpr int FRAMES = 7;
-  const int centerY = QUICKMENU_Y + QUICKMENU_H / 2;
+  constexpr int FRAMES = 8;
   for (int f = FRAMES - 1; f >= 0; --f) {
-    tft.fillRect(QUICKMENU_X, QUICKMENU_Y, QUICKMENU_W, QUICKMENU_H, ui.bg);
-    int h = QUICKMENU_H * f / FRAMES;
-    if (h > 0) {
-      int y = centerY - h / 2;
-      int radius = min(10, h / 2);
-      tft.fillRoundRect(QUICKMENU_X, y, QUICKMENU_W, h, radius, ui.panel);
-      tft.drawRoundRect(QUICKMENU_X, y, QUICKMENU_W, h, radius, ui.accent);
+    int y = H - (H - QUICKMENU_Y) * f / FRAMES;
+    tft.fillRect(QUICKMENU_X, QUICKMENU_Y, QUICKMENU_W, QUICKMENU_SLIDE_ZONE_H, ui.bg);
+    if (f > 0) {
+      tft.fillRoundRect(QUICKMENU_X, y, QUICKMENU_W, QUICKMENU_H, 10, ui.panel);
+      tft.drawRoundRect(QUICKMENU_X, y, QUICKMENU_W, QUICKMENU_H, 10, ui.accent);
     }
     M5Cardputer.update();
     delay(16);
@@ -4210,7 +4229,17 @@ void applyWebInput() {
 // scratch. Called from loop() whenever `page` just changed or a
 // forceFullRedraw was requested (see the rendering-model note at the top of
 // this file) - never called every frame, only on real scene changes.
-void draw() { if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) drawBleKeyboard(); else if (page == SCREENSAVER) drawScreensaver(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
+void draw() {
+  // Capture "the app before this one" for the quick-launch overlay's LAST
+  // APP tile, ahead of overwriting lastDrawnPage below. System transitions
+  // (lock/screensaver/the Wi-Fi setup sub-flow, on either side of the
+  // change) don't count as an app worth resuming into.
+  if (lastDrawnPage != page &&
+      lastDrawnPage != LOCKSCREEN && lastDrawnPage != SCREENSAVER && lastDrawnPage != WIFISETUP &&
+      page != LOCKSCREEN && page != SCREENSAVER && page != WIFISETUP) {
+    previousPage = lastDrawnPage;
+  }
+  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) drawBleKeyboard(); else if (page == SCREENSAVER) drawScreensaver(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
 
 // Repaint only a changed application's content. Headers and footers are kept
 // intact; full draw() remains reserved for entering a different scene, modal
@@ -4484,8 +4513,8 @@ void keyboard() {
     int oldSelected = quickMenuSelected;
     bool prev = wordContains(k.word, ';') || wordContains(k.word, ',');
     bool next = wordContains(k.word, '.') || wordContains(k.word, '/');
-    if (prev) quickMenuSelected = (quickMenuSelected + HOME_TILE_COUNT - 1) % HOME_TILE_COUNT;
-    else if (next) quickMenuSelected = (quickMenuSelected + 1) % HOME_TILE_COUNT;
+    if (prev) quickMenuSelected = (quickMenuSelected + QUICKMENU_TILE_COUNT - 1) % QUICKMENU_TILE_COUNT;
+    else if (next) quickMenuSelected = (quickMenuSelected + 1) % QUICKMENU_TILE_COUNT;
     if (quickMenuSelected != oldSelected) { playMenuSound(); drawQuickMenuTile(oldSelected, false); drawQuickMenuTile(quickMenuSelected, true); drawQuickMenuCaption(); }
     if (k.enter) {
       playEnterSound();
@@ -4493,9 +4522,11 @@ void keyboard() {
       closeQuickMenuAnimated();
       forceFullRedraw = true;
       redrawNeeded = true;
-      // Tile 5 is always "APPS" (the full app list); tiles 0-4 mirror
-      // Home's five configurable slots verbatim, empty slots included.
-      if (quickMenuSelected == 5) { page = LAUNCHER; launcherHome = false; appSelected = appScroll = 0; }
+      // Tile 6 resumes previousPage; tile 5 is always "APPS" (the full app
+      // list); tiles 0-4 mirror Home's five configurable slots verbatim,
+      // empty slots included.
+      if (quickMenuSelected == HOME_TILE_COUNT) { page = previousPage; }
+      else if (quickMenuSelected == 5) { page = LAUNCHER; launcherHome = false; appSelected = appScroll = 0; }
       else if (homeAppIndices[quickMenuSelected] >= 0) page = static_cast<Page>(homeAppIndices[quickMenuSelected] + 1);
     }
     return;
