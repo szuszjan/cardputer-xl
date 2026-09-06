@@ -533,33 +533,36 @@ bool soundWifiKnown = false, soundWifiWasConnected = false;
 bool soundBtKnown = false, soundBtWasPaired = false;
 bool soundBatteryKnown = false, soundBatteryWasLow = false;
 bool soundChargeKnown = false, soundWasCharging = false;
-// Some ADV battery reports jump upward when USB power is attached before the
-// charging-state flag settles. Track the LOWEST reading seen in the trailing
-// window (not just the immediately preceding sample) - plugging in USB can
-// cause a brief inrush-current dip right before the real rise, and comparing
-// only against the last sample would reset the reference point at exactly
-// the wrong moment, turning detection into a per-tick timing coin flip
-// (this was one confirmed cause of "charging detection is inconsistent").
-int chargeRecentMinBattery = -1;
-unsigned long chargeRecentMinAt = 0;
-unsigned long inferredChargingUntil = 0;
-// Set for one service cycle when the live battery report makes the characteristic
-// USB-insertion jump. It is an event, not a persistent charging state.
+// M5Unified's Power_Class::isCharging() switches on M5.getBoard(): it has
+// explicit cases for M5StickS3/M5PaperS3/M5ChainCaptain/etc, but no case for
+// any Cardputer variant, so it falls through to "default: return
+// charge_unknown" - unconditionally, forever, regardless of real hardware
+// state (confirmed by reading Power_Class.cpp). This is not a flaky/flickering
+// read as originally assumed; there is no working charge-status signal on
+// this board at all via M5Unified. chargerReported below is kept only so a
+// future library update that adds a real Cardputer case starts working for
+// free - on current hardware it is always false, and the battery-level trend
+// below is the ONLY real signal this firmware has.
+//
+// This fuel gauge is voltage-based, not a coulomb counter: plugging in
+// changes the sensed pack voltage immediately, so the reported percentage
+// STEPS - confirmed on hardware jumping ~45% to ~64% the instant USB power
+// lands, not a gradual climb. Unplugging removes that same voltage offset,
+// so it steps back down just as instantly. This is therefore a symmetric
+// step detector, not a slow trend: track a baseline that drifts with normal
+// slow charge/discharge, and flip state the instant the reading jumps away
+// from it by more than real charge/discharge could produce in one tick.
+int chargeBaseline = -1;
+bool chargeInferredCharging = false;
+// Set for one service cycle on a fresh rise-triggered transition (not held
+// while already charging). Used only to pick the toast/sound wording.
 bool chargeRiseJustDetected = false;
-// USB insertion on this Cardputer can make the reported level jump by about
-// 10–20 percentage points. Require a substantial jump in a short window so
-// normal one-percent measurement wobble is never treated as charging.
-constexpr int CHARGE_RISE_TRIGGER_PERCENT = 8;
-constexpr unsigned long CHARGE_RISE_WINDOW_MS = 90000UL;
-constexpr unsigned long INFERRED_CHARGING_HOLD_MS = 120000UL;
-// M5Cardputer.Power.isCharging() is documented elsewhere in this file as
-// sometimes flickering/misreporting on real ADV units. Once either signal
-// (the raw API or the battery-rise fallback) says "charging", latch that and
-// require a sustained absence of both before clearing it - a single bad
-// isCharging() read can no longer cancel an otherwise-correct detection.
+constexpr int CHARGE_STEP_PERCENT = 6;
+// A short guard against a single corrupted battery reading flipping state,
+// not a slow-trend timeout - the step itself is already instant.
 bool chargingLatched = false;
 unsigned long chargingLastSeenAt = 0;
-constexpr unsigned long CHARGING_LATCH_RELEASE_MS = 20000UL;
+constexpr unsigned long CHARGING_LATCH_RELEASE_MS = 5000UL;
 
 Page page = LAUNCHER;
 // Tracks the fully painted scene.  Input inside the same scene is refreshed
@@ -1146,31 +1149,30 @@ void playChargingStartedSound() {
   delay(70);
   M5Cardputer.Speaker.tone(1320, 90);
 }
-// Returns true briefly after the characteristic fast battery-level increase
-// caused by plugging in USB power. This is a fallback only: the Power API
-// remains the primary charging indication.
+// Returns the current inferred-from-battery charging state - a persistent
+// state flipped by a step, not a timed hold. See the comment above
+// chargeBaseline for why this board needs a step detector rather than a
+// slow-trend one: plugging in / unplugging changes the voltage-based
+// percentage instantly in either direction.
 bool chargingInferredFromBatteryRise(int battery) {
-  const unsigned long now = millis();
   chargeRiseJustDetected = false;
-  if (battery < 0) return now < inferredChargingUntil;
+  if (battery < 0) return chargeInferredCharging;  // no reading; keep prior state
+  if (chargeBaseline < 0) { chargeBaseline = battery; return chargeInferredCharging; }
 
-  // Re-anchor the tracked minimum whenever it's stale (older than the
-  // detection window), on the very first reading, or when a new, lower
-  // floor appears - but NOT on every call, so a brief dip can't erase the
-  // pre-dip baseline right as a real rise is starting.
-  if (chargeRecentMinBattery < 0 || now - chargeRecentMinAt > CHARGE_RISE_WINDOW_MS || battery < chargeRecentMinBattery) {
-    chargeRecentMinBattery = battery;
-    chargeRecentMinAt = now;
+  int delta = battery - chargeBaseline;
+  if (delta >= CHARGE_STEP_PERCENT) {
+    if (!chargeInferredCharging) chargeRiseJustDetected = true;
+    chargeInferredCharging = true;
+    chargeBaseline = battery;
+  } else if (-delta >= CHARGE_STEP_PERCENT) {
+    chargeInferredCharging = false;
+    chargeBaseline = battery;
+  } else {
+    // Normal slow charge/discharge drift - track it so it never accumulates
+    // into a spurious step later.
+    chargeBaseline = battery;
   }
-  if (battery >= chargeRecentMinBattery + CHARGE_RISE_TRIGGER_PERCENT) {
-    inferredChargingUntil = now + INFERRED_CHARGING_HOLD_MS;
-    chargeRiseJustDetected = true;
-    // Re-anchor to the new level so this exact rise doesn't keep re-firing
-    // every subsequent call while still within the hold window.
-    chargeRecentMinBattery = battery;
-    chargeRecentMinAt = now;
-  }
-  return now < inferredChargingUntil;
+  return chargeInferredCharging;
 }
 void serviceStatusSounds() {
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
@@ -1204,8 +1206,10 @@ void serviceStatusSounds() {
   // re-announce "Charging detected from battery rise" as if it were new.)
   if ((!soundChargeKnown || !soundWasCharging) && charging) {
     playChargingStartedSound();
-    queueToast(chargeRiseJustDetected ? "Charging detected from battery rise" :
-               (chargerReported ? "Charging started" : "Charging detected"));
+    // chargerReported is always false on this board (see the comment by
+    // chargeBaseline above) - the battery-step fallback is the only signal
+    // that can ever actually trigger this, so it's the only wording.
+    queueToast("Charging detected");
   }
 
   soundWifiKnown = soundBtKnown = soundBatteryKnown = soundChargeKnown = true;
