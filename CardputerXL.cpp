@@ -473,6 +473,10 @@ uint8_t cardcLedRed = 0, cardcLedGreen = 255, cardcLedBlue = 0;
 // Saved Settings switch for the built-in RGB LED. When disabled it overrides
 // every normal status colour, CardC led() command and startup rainbow effect.
 bool statusLedEnabled = true;
+// Settings switch: skip the PIN gate at boot entirely and go straight to
+// the launcher. Default true (locked) so nothing changes for anyone who
+// hasn't touched this setting.
+bool lockOnStartupEnabled = true;
 // Critical battery warning always overrides the user LED switch and every
 // normal status/CardC colour. Its dark phase makes the red warning blink.
 bool lowBatteryAlertOn = false;
@@ -889,11 +893,11 @@ int replHistoryCount = 0;
 bool cardcReplRunning = false;
 
 int settingSelected = 0;
-const char* settingNames[] = {"Theme", "Rotation", "Backlight", "Brightness", "Screensaver", "Lock after saver", "Volume", "Lock PIN", "Wi-Fi setup", "BLE HID", "LED"};
-constexpr int SETTINGS_COUNT = 11;
+const char* settingNames[] = {"Theme", "Rotation", "Backlight", "Brightness", "Screensaver", "Lock after saver", "Volume", "Lock PIN", "Wi-Fi setup", "BLE HID", "LED", "Lock on startup"};
+constexpr int SETTINGS_COUNT = 12;
 // Eleven compact rows fit above the fixed footer.
 constexpr int SETTINGS_ROW_Y = CONTENT_Y + 6;
-constexpr int SETTINGS_ROW_STEP = 17;
+constexpr int SETTINGS_ROW_STEP = 15;  // was 17; 12 rows no longer fit above the footer at that spacing
 
 String uptime() { unsigned long s = millis() / 1000UL; char x[18]; snprintf(x, sizeof(x), "%02lu:%02lu:%02lu", s / 3600UL, (s % 3600UL) / 60UL, s % 60UL); return String(x); }
 int noteCharacterCount() { int total = 0; for (int i = 0; i < noteCount; ++i) total += notes[i].length(); return total; }
@@ -1006,6 +1010,7 @@ void loadPersistentState() {
   if (displayRotation != 1 && displayRotation != 3) displayRotation = 3;
   backlightOn = preferences.getBool("backlight", backlightOn);
   statusLedEnabled = preferences.getBool("status_led", statusLedEnabled);
+  lockOnStartupEnabled = preferences.getBool("lock_on_boot", lockOnStartupEnabled);
   brightnessLevel = constrain(preferences.getUChar("brightness", brightnessLevel), 1, 10);
   sleepIndex = constrain(preferences.getInt("sleep", sleepIndex), 0, 4);
   lockAfterScreensaverIndex = constrain(preferences.getInt("lock_after_ss", lockAfterScreensaverIndex), 0, 4);
@@ -1072,7 +1077,7 @@ void savePersistentState() {
   captureCLabUserApp();
   storedCode = cUserApps[cLabActiveUserApp];
   preferences.begin("cyberdeck", false);
-  preferences.putInt("theme", themeIndex); preferences.putUChar("rotation", displayRotation); preferences.putBool("backlight", backlightOn); preferences.putBool("status_led", statusLedEnabled); preferences.putUChar("brightness", brightnessLevel);
+  preferences.putInt("theme", themeIndex); preferences.putUChar("rotation", displayRotation); preferences.putBool("backlight", backlightOn); preferences.putBool("status_led", statusLedEnabled); preferences.putBool("lock_on_boot", lockOnStartupEnabled); preferences.putUChar("brightness", brightnessLevel);
   String storedFavs; for (int i = 0; i < APP_COUNT; ++i) storedFavs += appFavourite[i] ? '1' : '0';
   String storedHome; for (int slot = 0; slot < 5; ++slot) { if (slot) storedHome += ','; storedHome += String(homeAppIndices[slot]); }
   preferences.putInt("sleep", sleepIndex); preferences.putInt("lock_after_ss", lockAfterScreensaverIndex); preferences.putUChar("volume", volumeLevel); preferences.putString("lockhash", lockPinHash); preferences.putString("notes", storedNotes); preferences.putString("code", storedCode); preferences.putString("clab_name", cLabFileName); preferences.putString("qrtext", qrText); preferences.putString("favs", storedFavs); preferences.putString("home", storedHome);
@@ -3290,6 +3295,7 @@ float skyBankRateCur = 0, skyPitchRateCur = 0;
 bool skyWasStalling = false;
 unsigned long skyLastStallBeepAt = 0;
 int skyTargetAirport = -1;   // airport index for AIRPORT TO AIRPORT; -1 = free roam
+int skyStartAirport = 0;     // departure airport for AIRPORT TO AIRPORT (randomized each flight)
 bool skyMissionSuccess = false;
 bool skyFirstPerson = false;   // 'v' during flight, like Kart Racer's own toggle
 bool skyEngineSoundEnabled = true;  // 'm' on the HOME screen, like Kart's M/F
@@ -3363,14 +3369,19 @@ void skyLoadBest() {
 }
 void skySaveBest() { preferences.begin("skypilot", false); preferences.putInt("best", skyBestScore); preferences.end(); }
 
-// Two fixed airports - a start and a destination for AIRPORT TO AIRPORT, and
-// the freeroam runway-start spawn point. pos.y is a placeholder; the actual
-// runway elevation is wherever skyTerrainHeight() flattens to near it.
+// Five fixed airports - AIRPORT TO AIRPORT picks a random distinct
+// start/destination pair from this pool each flight (see
+// startSkyPilotFlight()), and ALPHA (index 0) is also the freeroam
+// runway-start spawn point. pos.y is a placeholder; the actual runway
+// elevation is wherever skyTerrainHeight() flattens to near it.
 struct SkyAirport { KVec3 pos; float heading; float length, width; const char* name; };
-constexpr int SKY_AIRPORT_COUNT = 2;
+constexpr int SKY_AIRPORT_COUNT = 5;
 SkyAirport skyAirports[SKY_AIRPORT_COUNT] = {
   {{0, 0, 0}, 0.0f, 110.0f, 16.0f, "ALPHA"},
   {{560, 0, 460}, 2.1f, 110.0f, 16.0f, "BRAVO"},
+  {{-520, 0, 340}, 4.0f, 110.0f, 16.0f, "CHARLIE"},
+  {{320, 0, -580}, 5.3f, 110.0f, 16.0f, "DELTA"},
+  {{-680, 0, -260}, 1.0f, 110.0f, 16.0f, "ECHO"},
 };
 constexpr float SKY_RUNWAY_ELEVATION = 10.0f;
 // Both fixed airport coordinates happen to sit right where this terrain
@@ -3740,7 +3751,8 @@ void skyDrawSonicBoomEffect() {
 }
 
 // modeSelected: 0=free roam from a runway, 1=free roam launched airborne,
-// 2=airport to airport (Alpha -> Bravo).
+// 2=airport to airport (a random distinct start/destination pair from the
+// airport pool, picked fresh each flight).
 void startSkyPilotFlight(int modeSelected) {
   skyLoadBest();
   skyPlane = SkyPlane();
@@ -3756,11 +3768,12 @@ void startSkyPilotFlight(int modeSelected) {
 
   if (modeSelected == 2) {
     skyMode = SKY_MODE_AIRPORT;
-    skyTargetAirport = 1;
+    skyStartAirport = random(0, SKY_AIRPORT_COUNT);
+    do { skyTargetAirport = random(0, SKY_AIRPORT_COUNT); } while (skyTargetAirport == skyStartAirport);
     skyGrounded = true;
     skyGearDown = true;
     skyThrottleLevel = 0;
-    const SkyAirport& a = skyAirports[0];
+    const SkyAirport& a = skyAirports[skyStartAirport];
     skyPlane.pos = {a.pos.x, skyTerrainHeight(a.pos.x, a.pos.z), a.pos.z};
     skyPlane.heading = a.heading;
     skyPlane.speed = 0;
@@ -6243,7 +6256,7 @@ void drawCLab() { if (cCanvasActive) return; if (cLabSaveDialogVisible) { drawCL
 // keyboard() handles ,/  left/right); 7-10 open their own sub-flow (PIN
 // change, Wi-Fi setup, or a straight on/off toggle) instead.
 void updateSettingsRow(int i) { int y = SETTINGS_ROW_Y + i * SETTINGS_ROW_STEP; bool sel = i == settingSelected; tft.fillRect(8, y - 3, 304, 18, ui.bg); uint16_t fill = sel ? ui.selected : ui.bg; if (sel) tft.fillRoundRect(8, y - 3, 304, 18, 4, fill); tft.setTextSize(1); tft.setTextColor(ui.text, fill); tft.setCursor(16, y); tft.print(sel ? "> " : "  "); tft.print(settingNames[i]); tft.setTextColor(sel ? ui.accent : ui.dim, fill); tft.setCursor(165, y); tft.print(settingValue(i)); }
-String settingValue(int i) { if (i == 0) return themeNames[themeIndex]; if (i == 1) return displayRotation == 3 ? "LANDSCAPE RIGHT" : "LANDSCAPE LEFT"; if (i == 2) return backlightOn ? "ON" : "OFF"; if (i == 3) return String(brightnessLevel * 10) + "%"; if (i == 4) return sleepValues[sleepIndex] == 0 ? "NEVER" : String(sleepValues[sleepIndex]) + " SEC"; if (i == 5) return lockAfterScreensaverValues[lockAfterScreensaverIndex] == 0 ? "NEVER" : String(lockAfterScreensaverValues[lockAfterScreensaverIndex]) + " SEC"; if (i == 6) return String(volumeLevel * 10) + "%"; if (i == 7) return "ENTER CHANGE"; if (i == 8) return WiFi.status() == WL_CONNECTED ? "CONNECTED" : "SCAN / CONNECT"; if (i == 9) return bleHidEnabled ? "ON" : "OFF"; return statusLedEnabled ? "ON" : "OFF"; }
+String settingValue(int i) { if (i == 0) return themeNames[themeIndex]; if (i == 1) return displayRotation == 3 ? "LANDSCAPE RIGHT" : "LANDSCAPE LEFT"; if (i == 2) return backlightOn ? "ON" : "OFF"; if (i == 3) return String(brightnessLevel * 10) + "%"; if (i == 4) return sleepValues[sleepIndex] == 0 ? "NEVER" : String(sleepValues[sleepIndex]) + " SEC"; if (i == 5) return lockAfterScreensaverValues[lockAfterScreensaverIndex] == 0 ? "NEVER" : String(lockAfterScreensaverValues[lockAfterScreensaverIndex]) + " SEC"; if (i == 6) return String(volumeLevel * 10) + "%"; if (i == 7) return "ENTER CHANGE"; if (i == 8) return WiFi.status() == WL_CONNECTED ? "CONNECTED" : "SCAN / CONNECT"; if (i == 9) return bleHidEnabled ? "ON" : "OFF"; if (i == 10) return statusLedEnabled ? "ON" : "OFF"; return lockOnStartupEnabled ? "ON" : "OFF"; }
 void drawSettings() {
   tft.fillScreen(ui.bg); header(pinChangeActive ? "SETTINGS / LOCK PIN" : "SETTINGS"); tft.setTextSize(1);
   if (pinChangeActive) {
@@ -7416,6 +7429,7 @@ void keyboard() {
     if (k.enter && settingSelected == 8) { wifiSetupEditingPassword = false; wifiSetupSelected = 0; playEnterSound(); page = WIFISETUP; if (!scanDone && !scanRunning) startScan(); redrawNeeded = true; return; }
     if (k.enter && settingSelected == 9) { bleHidEnabled = !bleHidEnabled; if (bleHidEnabled) ensureBleReady(); playEnterSound(); markStateDirty(); redrawNeeded = true; return; }
     if (k.enter && settingSelected == 10) { statusLedEnabled = !statusLedEnabled; updateStatusLed(); playEnterSound(); markStateDirty(); redrawNeeded = true; return; }
+    if (k.enter && settingSelected == 11) { lockOnStartupEnabled = !lockOnStartupEnabled; playEnterSound(); markStateDirty(); redrawNeeded = true; return; }
     for (char c : k.word) { if (c == ';') { int old = settingSelected; settingSelected = (settingSelected + SETTINGS_COUNT - 1) % SETTINGS_COUNT; playMenuSound(); updateSettingsRow(old); updateSettingsRow(settingSelected); } else if (c == '.') { int old = settingSelected; settingSelected = (settingSelected + 1) % SETTINGS_COUNT; playMenuSound(); updateSettingsRow(old); updateSettingsRow(settingSelected); } else if (c == ',' && settingSelected < 7) { playMenuSound(); changeSetting(-1); } else if (c == '/' && settingSelected < 7) { playMenuSound(); changeSetting(1); } }
   }
 }
@@ -7465,8 +7479,11 @@ void setup() {
   SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS); tft.begin(); tft.setRotation(displayRotation); tft.setTextWrap(false); applyTheme(); drawLinuxBoot(); drawBootScreen();
   // One clear boot confirmation through the ready-made motor driver.
   vibrate(700);
-  // Always begin at the visible PIN gate rather than exposing the last app.
-  page = LOCKSCREEN; sleeping = false; setBacklight(true); updateStatusLed(); lastActivity = millis(); draw();
+  // Begin at the visible PIN gate by default, unless the "Lock on startup"
+  // Settings toggle has been turned off - either way, never expose the
+  // last app that happened to be open before power-off.
+  page = lockOnStartupEnabled ? LOCKSCREEN : LAUNCHER; launcherHome = true;
+  sleeping = false; setBacklight(true); updateStatusLed(); lastActivity = millis(); draw();
 }
 // Runs forever. Roughly: poll input (keyboard()) -> let any continuously-
 // animating app draw its own frame (Snake/Kart Racer/Music Lab, all of
