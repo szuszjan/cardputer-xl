@@ -3266,6 +3266,14 @@ bool skyMissionSuccess = false;
 bool skyFirstPerson = false;   // 'v' during flight, like Kart Racer's own toggle
 bool skyEngineSoundEnabled = true;  // 'm' on the HOME screen, like Kart's M/F
 float skyEngineSmoothedFreq = 0;
+// Discrete throttle notches (W/A step through them) instead of a free-form
+// analog hold, like a real throttle lever's detents: the plane's speed
+// chases whichever target the current notch implies rather than
+// accelerating without bound for as long as a key is held.
+constexpr int SKY_THROTTLE_LEVELS = 4;
+const char* skyThrottleNames[SKY_THROTTLE_LEVELS] = {"OFF", "LOW", "MED", "HIGH"};
+const float skyThrottleTargetSpeed[SKY_THROTTLE_LEVELS] = {0.0f, 14.0f, 24.0f, 34.0f};
+int skyThrottleLevel = 0;
 
 float skyScore = 0;      // distance flown this flight, in world units
 int skyBestScore = 0;
@@ -3287,11 +3295,18 @@ void skySaveBest() { preferences.begin("skypilot", false); preferences.putInt("b
 struct SkyAirport { KVec3 pos; float heading; float length, width; const char* name; };
 constexpr int SKY_AIRPORT_COUNT = 2;
 SkyAirport skyAirports[SKY_AIRPORT_COUNT] = {
-  {{0, 0, 0}, 0.0f, 70.0f, 12.0f, "ALPHA"},
-  {{560, 0, 460}, 2.1f, 70.0f, 12.0f, "BRAVO"},
+  {{0, 0, 0}, 0.0f, 110.0f, 16.0f, "ALPHA"},
+  {{560, 0, 460}, 2.1f, 110.0f, 16.0f, "BRAVO"},
 };
 constexpr float SKY_RUNWAY_ELEVATION = 10.0f;
-constexpr float SKY_RUNWAY_FLATTEN_RADIUS = 90.0f;
+// Both fixed airport coordinates happen to sit right where this terrain
+// function's raw (unflattened) height peaks near 45 units - a real "wall"
+// only ~50 units past the runway threshold at the old radius (90), close
+// enough that any takeoff climb-out could fly straight into it even while
+// pulling up. A much bigger radius plus a gentler (quintic) ease-in gives a
+// genuinely safe climb-out margin instead of just a flat pad with a cliff
+// at its edge.
+constexpr float SKY_RUNWAY_FLATTEN_RADIUS = 260.0f;
 
 // Distance from (x,z) to the airport's runway FOOTPRINT (a rectangle), not
 // just its center point - zero anywhere inside the rectangle. Using plain
@@ -3328,7 +3343,11 @@ float skyTerrainHeight(float x, float z) {
     float d = skyRunwayPadDistance(x, z, skyAirports[i]);
     if (d < SKY_RUNWAY_FLATTEN_RADIUS) {
       float t = d / SKY_RUNWAY_FLATTEN_RADIUS;
-      float smooth = t * t * (3 - 2 * t);
+      // Quintic ease (zero first AND second derivative at t=0) instead of
+      // the standard cubic smoothstep - stays close to dead flat for longer
+      // right around the runway before easing into the climb toward full
+      // terrain height, instead of ramping immediately.
+      float smooth = t * t * t * (t * (t * 6 - 15) + 10);
       h = SKY_RUNWAY_ELEVATION * (1 - smooth) + h * smooth;
     }
   }
@@ -3436,17 +3455,29 @@ void skyDrawRunway(const KartCam& cam, const SkyAirport& a) {
     kartDrawSeg(cam, center + fwd * (t0 * a.length), center + fwd * (t1 * a.length), ILI9341_WHITE);
   }
 }
-// A simple cockpit sill/windscreen-frame overlay for first-person view -
-// there's no exterior plane model to look at from inside it, so this gives
-// some sense of actually sitting in the aircraft instead of a bare view.
+// A cockpit window frame and dashboard overlay for first-person view -
+// there's no exterior plane model to look at from inside it, so this is
+// what actually sells "you're sitting in the aircraft" instead of a bare
+// view: a top visor strip, a center windscreen pillar, angled corner
+// pillars, and a glareshield with a couple of decorative gauge bezels and
+// switches sitting right above the real instrument strip (SKY_HUD_H, 34px).
 void skyDrawCockpitOverlay() {
   int w = kartCanvas.width(), h = kartCanvas.height();
   const uint16_t DASH = 0x2987, TRIM = ILI9341_LIGHTGREY;
-  int sillTop = h - h / 6;
-  kartCanvas.fillRect(0, sillTop, w, h - sillTop, DASH);
+
+  kartCanvas.fillRect(0, 0, w, 5, DASH);
+  kartCanvas.fillRect(w / 2 - 3, 0, 6, 46, DASH);
+  kartCanvas.drawFastVLine(w / 2 - 3, 0, 46, TRIM); kartCanvas.drawFastVLine(w / 2 + 3, 0, 46, TRIM);
+  kartCanvas.fillTriangle(0, 0, 24, 0, 0, 52, DASH);
+  kartCanvas.fillTriangle(w - 1, 0, w - 25, 0, w - 1, 52, DASH);
+
+  int sillTop = h - 34 - 16;  // 16px glareshield band directly above the HUD's instrument strip
+  kartCanvas.fillRoundRect(-6, sillTop, w + 12, 34 + 22, 12, DASH);
   kartCanvas.drawFastHLine(0, sillTop, w, TRIM);
-  kartCanvas.fillTriangle(0, 0, 20, 0, 0, 44, DASH);
-  kartCanvas.fillTriangle(w - 1, 0, w - 21, 0, w - 1, 44, DASH);
+  kartCanvas.drawCircle(26, sillTop + 10, 7, TRIM);
+  kartCanvas.drawCircle(w - 26, sillTop + 10, 7, TRIM);
+  kartCanvas.fillRect(w / 2 - 16, sillTop + 4, 6, 11, TRIM);
+  kartCanvas.fillRect(w / 2 + 10, sillTop + 4, 6, 11, TRIM);
 }
 void skyRenderScene(const KartCam& cam, const KVec3& fwd, bool firstPerson) {
   kartCanvas.fillScreen(ILI9341_BLACK);
@@ -3571,8 +3602,9 @@ void skyRenderHud(bool stalling, bool pullUp) {
   kartCanvas.drawFastHLine(0, hudY, kartCanvas.width(), ILI9341_DARKGREY);
 
   float clearance = skyPlane.pos.y - skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
+  kartCanvas.setTextColor(ILI9341_ORANGE, ILI9341_BLACK);
+  kartCanvas.setCursor(4, hudY + 3); kartCanvas.print(skyThrottleNames[skyThrottleLevel]);
   kartCanvas.setTextColor(clearance < 8.0f ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
-  kartCanvas.setCursor(4, hudY + 3); kartCanvas.print("SPD");
   snprintf(buf, sizeof(buf), "%3d", (int)skyPlane.speed); kartCanvas.setCursor(4, hudY + 15); kartCanvas.print(buf);
 
   skyDrawAttitudeIndicator(95, hudY + SKY_HUD_H / 2, 15);
@@ -3599,6 +3631,7 @@ void startSkyPilotFlight(int modeSelected) {
     skyTargetAirport = 1;
     skyGrounded = true;
     skyGearDown = true;
+    skyThrottleLevel = 0;
     const SkyAirport& a = skyAirports[0];
     skyPlane.pos = {a.pos.x, skyTerrainHeight(a.pos.x, a.pos.z), a.pos.z};
     skyPlane.heading = a.heading;
@@ -3609,12 +3642,14 @@ void startSkyPilotFlight(int modeSelected) {
     if (modeSelected == 1) {
       skyGrounded = false;
       skyGearDown = false;
+      skyThrottleLevel = 2;  // MED, matching the airborne spawn speed below
       skyPlane.pos = {0, 45, 0};
       skyPlane.heading = 0;
       skyPlane.speed = 20.0f;
     } else {
       skyGrounded = true;
       skyGearDown = true;
+      skyThrottleLevel = 0;
       const SkyAirport& a = skyAirports[0];
       skyPlane.pos = {a.pos.x, skyTerrainHeight(a.pos.x, a.pos.z), a.pos.z};
       skyPlane.heading = a.heading;
@@ -3651,9 +3686,9 @@ void drawSkyPilotHub() {
     tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  "); tft.print(modes[i]);
   }
   tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 100); tft.print("; . PITCH      , / BANK + TURN");
-  tft.setCursor(12, CONTENT_Y + 114); tft.print("W/A THROTTLE   Q GEAR   V VIEW");
+  tft.setCursor(12, CONTENT_Y + 114); tft.print("W/A THROTTLE (4 STEPS)  Q GEAR  V VIEW");
   tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 134); tft.print("Controls hold their angle on release.");
-  tft.setCursor(12, CONTENT_Y + 146); tft.print("Below 12 spd airborne, watch for a stall.");
+  tft.setCursor(12, CONTENT_Y + 146); tft.print("MED or HIGH throttle needed to take off.");
   footer(";/. SELECT   ENTER START   M SOUND   FN GAMES");
 }
 
@@ -3707,13 +3742,20 @@ void stepSkyPilotFlight() {
   bool edgeV = nowV && !prevV; prevV = nowV;
   if (edgeV) skyFirstPerson = !skyFirstPerson;
 
-  int pitchInput = 0, bankInput = 0, throttleInput = 0;
+  int pitchInput = 0, bankInput = 0;
   if (M5Cardputer.Keyboard.isKeyPressed(';')) pitchInput = 1;
   else if (M5Cardputer.Keyboard.isKeyPressed('.')) pitchInput = -1;
   if (M5Cardputer.Keyboard.isKeyPressed(',')) bankInput = -1;
   else if (M5Cardputer.Keyboard.isKeyPressed('/')) bankInput = 1;
-  if (M5Cardputer.Keyboard.isKeyPressed('w')) throttleInput = 1;
-  else if (M5Cardputer.Keyboard.isKeyPressed('a')) throttleInput = -1;
+  // Throttle is 4 discrete notches (OFF/LOW/MED/HIGH), not a free-form
+  // hold - W/A step one notch at a time, like a real lever's detents.
+  static bool prevW = false, prevA = false;
+  bool nowW = M5Cardputer.Keyboard.isKeyPressed('w');
+  bool edgeW = nowW && !prevW; prevW = nowW;
+  if (edgeW) skyThrottleLevel = min(skyThrottleLevel + 1, SKY_THROTTLE_LEVELS - 1);
+  bool nowA = M5Cardputer.Keyboard.isKeyPressed('a');
+  bool edgeA = nowA && !prevA; prevA = nowA;
+  if (edgeA) skyThrottleLevel = max(skyThrottleLevel - 1, 0);
 
   bool stalling = !skyGrounded && skyPlane.speed < SKY_STALL_SPEED;
   if (stalling && (now - skyLastStallBeepAt > 450 || !skyWasStalling)) {
@@ -3721,13 +3763,14 @@ void stepSkyPilotFlight() {
   }
   skyWasStalling = stalling;
 
-  // Throttle, plus a small extra drag from the gear hanging in the airstream
-  // - the same lever that's required for a safe landing also costs you
-  // cruise speed if you forget to raise it after takeoff.
-  static const float THROTTLE_ACCEL = 9.0f, CRUISE_DECAY = 1.0f, GEAR_DRAG = 1.4f;
-  if (throttleInput > 0) skyPlane.speed += THROTTLE_ACCEL * dt;
-  else if (throttleInput < 0) skyPlane.speed -= THROTTLE_ACCEL * dt;
-  else if (skyPlane.speed > SkyPlane::MIN_SPEED) skyPlane.speed -= CRUISE_DECAY * dt;
+  // Speed chases whichever target the current throttle notch implies,
+  // plus a small extra drag from the gear hanging in the airstream - the
+  // same lever that's required for a safe landing also costs you cruise
+  // speed if you forget to raise it after takeoff.
+  static const float SPEED_APPROACH_RATE = 7.0f, GEAR_DRAG = 1.4f;
+  float throttleTarget = skyThrottleTargetSpeed[skyThrottleLevel];
+  if (skyPlane.speed < throttleTarget) skyPlane.speed = min(skyPlane.speed + SPEED_APPROACH_RATE * dt, throttleTarget);
+  else if (skyPlane.speed > throttleTarget) skyPlane.speed = max(skyPlane.speed - SPEED_APPROACH_RATE * dt, throttleTarget);
   if (skyGearDown && !skyGrounded) skyPlane.speed -= GEAR_DRAG * dt;
 
   if (skyGrounded) {
