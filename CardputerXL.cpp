@@ -2846,10 +2846,23 @@ void kartMusicSetEnabled(bool m, bool f) {
 
 // ---- Rendering (renderer.h/.cpp), drawn straight onto the launcher's `tft`
 // external panel instead of a canvas buffer ----
+// Clips against the near plane (matching KartCam::project()'s own NEAR_Z)
+// before projecting, instead of just dropping the whole segment when either
+// endpoint alone fails to project. A long segment (Sky Pilot's ~110-unit
+// runway edges, say) routinely has one end behind the camera while most of
+// its length is clearly in view - the pre-clip version made the entire
+// segment vanish the instant the near end crossed the plane, which read as
+// "the runway's side lines disappear" whenever the plane got close to it.
 static void kartDrawSeg(const KartCam& cam, const KVec3& a, const KVec3& b, uint16_t col) {
+  constexpr float NEAR_Z = 0.16f;  // KartCam::project()'s own NEAR_Z (0.15) plus a hair of margin
+  KVec3 pa = a, pb = b;
+  float za = kdot(pa - cam.position, cam.forward), zb = kdot(pb - cam.position, cam.forward);
+  if (za < NEAR_Z && zb < NEAR_Z) return;  // fully behind the camera
+  if (za < NEAR_Z) pa = pa + (pb - pa) * ((NEAR_Z - za) / (zb - za));
+  else if (zb < NEAR_Z) pb = pb + (pa - pb) * ((NEAR_Z - zb) / (za - zb));
   int ax, ay, bx, by;
-  if (!cam.project(a, kartCanvas.width(), kartCanvas.height(), ax, ay)) return;
-  if (!cam.project(b, kartCanvas.width(), kartCanvas.height(), bx, by)) return;
+  if (!cam.project(pa, kartCanvas.width(), kartCanvas.height(), ax, ay)) return;
+  if (!cam.project(pb, kartCanvas.width(), kartCanvas.height(), bx, by)) return;
   kartCanvas.drawLine(ax, ay, bx, by, col);
 }
 static void kartFillQuad(const KartCam& cam, const KVec3& a, const KVec3& b, const KVec3& c, const KVec3& d, uint16_t col) {
@@ -3322,6 +3335,7 @@ float skyScore = 0;      // distance flown this flight, in world units
 int skyBestScore = 0;
 unsigned long skyLastFrameMs = 0;
 bool skyLoadedBest = false;
+float skyFpsSmoothed = 0;
 
 void skyLoadBest() {
   if (skyLoadedBest) return;
@@ -3662,6 +3676,10 @@ void skyRenderHud(bool stalling, bool pullUp) {
     kartCanvas.setCursor(kartCanvas.width() / 2 - 40, 2); kartCanvas.print("STALL");
   }
   skyDrawMinimap(kartCanvas.width() - 54, 2, 52);
+  char fpsBuf[8]; snprintf(fpsBuf, sizeof(fpsBuf), "%dFPS", (int)(skyFpsSmoothed + 0.5f));
+  kartCanvas.fillRect(kartCanvas.width() - 54, 56, 52, 10, ILI9341_BLACK);
+  kartCanvas.setTextColor(ILI9341_GREEN, ILI9341_BLACK);
+  kartCanvas.setCursor(kartCanvas.width() - 4 - 6 * strlen(fpsBuf), 57); kartCanvas.print(fpsBuf);
   // GPWS-style terrain warning - large and center-screen (not tucked into a
   // corner strip like STALL) since this one means impact is imminent.
   if (pullUp) {
@@ -3711,6 +3729,7 @@ void startSkyPilotFlight(int modeSelected) {
   skyPlane = SkyPlane();
   skyBankRateCur = skyPitchRateCur = 0;
   skyWasStalling = false;
+  skyFpsSmoothed = 0;
   skyWasSupersonic = false;
   skyBoomFlashUntil = 0;
   skyScore = 0;
@@ -3819,10 +3838,12 @@ void stepSkyPilotFlight() {
   lastActivity = millis();
 
   unsigned long now = millis();
-  float dt = (now - skyLastFrameMs) / 1000.0f;
+  float rawDt = (now - skyLastFrameMs) / 1000.0f;
   skyLastFrameMs = now;
+  float dt = rawDt;
   if (dt > 0.1f) dt = 0.1f;
   if (dt < 0) dt = 0;
+  if (rawDt > 0.001f) { float fps = 1.0f / rawDt; skyFpsSmoothed += (fps - skyFpsSmoothed) * 0.15f; }
 
   static bool prevH = false, prevQ = false, prevV = false;
   bool nowH = M5Cardputer.Keyboard.isKeyPressed('h');
