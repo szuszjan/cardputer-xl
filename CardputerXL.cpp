@@ -302,6 +302,7 @@ void stepKartRace();
 void drawSkyPilotHub();
 void startSkyPilotFlight(int modeSelected);
 void stepSkyPilotFlight();
+void stepSkyPilotHubPreview();
 void autoConnectWifi();
 void miniCamJoinNetwork();
 void miniCamLeaveNetwork();
@@ -3976,32 +3977,49 @@ void startSkyPilotFlight(int modeSelected) {
   skyState = SKY_FLYING;
 }
 
-// A static 3/4-view showcase for the PLANE stage of the HOME wizard - a
-// fixed camera/pose (not the flight's own moving camera or the player's
-// actual bank/pitch), reusing skyDrawPlaneModel()/kartCanvas exactly like
-// the live flight view does, just invoked from the menu instead. No
-// animation (no continuous stepper exists for the HOME screen the way
-// stepSkyPilotFlight() drives the live view), so it only needs to redraw
-// when the picked plane actually changes.
+// A turntable-style showcase for the PLANE stage of the HOME wizard - the
+// camera position/target are fixed in world space (unlike the flight's own
+// moving camera), while skyPreviewSpin (advanced by stepSkyPilotHubPreview()
+// each tick the stage is open) rotates the MODEL's own heading. Rotating the
+// camera's offset together with the model's heading (the original approach)
+// made the whole rig turn as one rigid unit, which cancels out visually -
+// the model never appeared to spin relative to the screen at all.
+float skyPreviewSpin = 0.8f;
 void skyDrawPlanePreviewScene() {
   int w = kartCanvas.width(), h = kartCanvas.height();
   kartCanvas.fillScreen(ILI9341_NAVY);
   kartCanvas.fillRect(0, h * 2 / 3, w, h / 3, ILI9341_DARKGREEN);
 
   KVec3 showcasePos{0, 0, 0};
-  float heading = 0.8f, pitch = 0.08f, bank = 0.28f;
-  KVec3 fwd{cosf(pitch) * sinf(heading), sinf(pitch), cosf(pitch) * cosf(heading)};
+  float pitch = 0.08f, bank = 0.28f;
+  KVec3 fwd{cosf(pitch) * sinf(skyPreviewSpin), sinf(pitch), cosf(pitch) * cosf(skyPreviewSpin)};
   KVec3 worldUp{0, 1, 0};
-  KVec3 camRight = knormalized(kcross(fwd, worldUp));
 
   KartCam cam;
-  cam.position = showcasePos - fwd * 7.0f + worldUp * 1.4f - camRight * 2.2f;
+  cam.position = {0, 1.4f, -7.0f};
   cam.forward = knormalized(showcasePos - cam.position);
   cam.right = knormalized(kcross(cam.forward, worldUp));
   cam.up = kcross(cam.right, cam.forward);
   cam.fovY = 55.0f;
 
   skyDrawPlaneModel(cam, fwd, showcasePos, bank, skyPlaneModels[skyPlaneModelIndex]);
+}
+void drawSkyPilotHubPlane();
+// Continuous driver for the PLANE stage's rotation - bypasses redrawNeeded
+// like Kart Racer/Sky Pilot's own live view do, self-gated on actually
+// being on that stage so it's a no-op everywhere else.
+unsigned long skyPreviewLastMs = 0;
+void stepSkyPilotHubPreview() {
+  if (page != GAMEHUB || gameMode != 8 || skyState != SKY_HOME || skyHubStage != SkyHubStage::PLANE) { skyPreviewLastMs = 0; return; }
+  if (quickMenuOpen) return;
+  unsigned long now = millis();
+  if (skyPreviewLastMs == 0) skyPreviewLastMs = now;
+  float dt = (now - skyPreviewLastMs) / 1000.0f;
+  skyPreviewLastMs = now;
+  if (dt > 0.1f) dt = 0.1f;
+  skyPreviewSpin += dt * 1.1f;
+  if (skyPreviewSpin > 6.2832f) skyPreviewSpin -= 6.2832f;
+  drawSkyPilotHubPlane();
 }
 
 void drawSkyPilotHubMode() {
@@ -8235,6 +8253,7 @@ void loop() {
   stepBreakoutGame();
   stepTetrisGame();
   stepSkyPilotFlight();
+  stepSkyPilotHubPreview();
   stepTrikiScope();
   stepMiniCam();
   // One 16th-note per tick. The grid is refreshed only on the new playhead
