@@ -3380,10 +3380,31 @@ void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd) {
 
   kartDrawSeg(cam, tail, finTop, ILI9341_RED); kartDrawSeg(cam, finTop, finBack, ILI9341_RED); kartDrawSeg(cam, finBack, tail, ILI9341_RED);
 }
+// A runway outline plus dashed centerline and a threshold stripe, drawn over
+// the terrain's flattened landing pad - the flattening alone made a runway
+// only geometrically flat, not visually distinct from any other patch of
+// ground, so there was nothing to actually aim for from a distance.
+void skyDrawRunway(const KartCam& cam, const SkyAirport& a) {
+  KVec3 fwd = {sinf(a.heading), 0, cosf(a.heading)};
+  KVec3 right = knormalized(kcross(fwd, KVec3{0, 1, 0}));
+  KVec3 center{a.pos.x, skyTerrainHeight(a.pos.x, a.pos.z) + 0.08f, a.pos.z};
+  KVec3 halfFwd = fwd * (a.length * 0.5f), halfRight = right * (a.width * 0.5f);
+  KVec3 c1 = center - halfFwd - halfRight, c2 = center + halfFwd - halfRight;
+  KVec3 c3 = center + halfFwd + halfRight, c4 = center - halfFwd + halfRight;
+  kartDrawSeg(cam, c1, c2, ILI9341_LIGHTGREY); kartDrawSeg(cam, c2, c3, ILI9341_LIGHTGREY);
+  kartDrawSeg(cam, c3, c4, ILI9341_LIGHTGREY); kartDrawSeg(cam, c4, c1, ILI9341_LIGHTGREY);
+  kartDrawSeg(cam, c1, c4, ILI9341_YELLOW);  // threshold stripe at the landing end
+  constexpr int DASHES = 7;
+  for (int i = 0; i < DASHES; ++i) {
+    float t0 = -0.5f + (i + 0.15f) / DASHES, t1 = -0.5f + (i + 0.65f) / DASHES;
+    kartDrawSeg(cam, center + fwd * (t0 * a.length), center + fwd * (t1 * a.length), ILI9341_WHITE);
+  }
+}
 void skyRenderScene(const KartCam& cam, const KVec3& fwd) {
   kartCanvas.fillScreen(ILI9341_BLACK);
   kartDrawSky(cam);
   skyDrawTerrain(cam, fwd);
+  for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) skyDrawRunway(cam, skyAirports[i]);
   skyDrawPlaneModel(cam, fwd);
 }
 // Bottom instrument strip: a rotating/tilting attitude indicator (per-column
@@ -3466,7 +3487,7 @@ void skyDrawMinimap(int x0, int y0, int size) {
   float ax = sinf(skyPlane.heading), az = cosf(skyPlane.heading);
   kartCanvas.drawLine(cx - (int)(ax * 4), cy + (int)(az * 4), cx + (int)(ax * 7), cy - (int)(az * 7), ILI9341_WHITE);
 }
-void skyRenderHud(bool stalling) {
+void skyRenderHud(bool stalling, bool pullUp) {
   int hudY = kartCanvas.height() - SKY_HUD_H;
   kartCanvas.fillRect(0, 0, kartCanvas.width() - 58, 22, ILI9341_BLACK);
   kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
@@ -3483,6 +3504,15 @@ void skyRenderHud(bool stalling) {
     kartCanvas.setCursor(kartCanvas.width() / 2 - 40, 2); kartCanvas.print("STALL");
   }
   skyDrawMinimap(kartCanvas.width() - 54, 2, 52);
+  // GPWS-style terrain warning - large and center-screen (not tucked into a
+  // corner strip like STALL) since this one means impact is imminent.
+  if (pullUp) {
+    kartCanvas.setTextSize(2);
+    kartCanvas.setTextColor((millis() / 200) % 2 ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
+    kartCanvas.setCursor(kartCanvas.width() / 2 - 62, kartCanvas.height() / 2 - 30);
+    kartCanvas.print("PULL UP");
+    kartCanvas.setTextSize(1);
+  }
 
   kartCanvas.fillRect(0, hudY, kartCanvas.width(), SKY_HUD_H, ILI9341_BLACK);
   kartCanvas.drawFastHLine(0, hudY, kartCanvas.width(), ILI9341_DARKGREY);
@@ -3673,17 +3703,29 @@ void stepSkyPilotFlight() {
   if (stalling) skyPlane.pos.y -= 4.0f * dt;  // sinking faster than pitch alone implies
   skyScore += moveDist;
 
+  bool pullUp = false;
   if (skyGrounded) {
     skyPlane.pos.y = skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
     if (skyPlane.pitch > 0.08f && skyPlane.speed >= SKY_ROTATE_SPEED) skyGrounded = false;  // liftoff
   } else {
     float ground = skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
+    int nearAirport = -1;
+    for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) {
+      float dx = skyPlane.pos.x - skyAirports[i].pos.x, dz = skyPlane.pos.z - skyAirports[i].pos.z;
+      // A wider capture radius than the landing check below - close enough
+      // to a runway that a low, intentional final approach shouldn't also
+      // trip the terrain warning.
+      if (sqrtf(dx * dx + dz * dz) < skyAirports[i].length * 0.9f) { nearAirport = i; break; }
+    }
+    // GPWS-style terrain warning: airborne, closing on the ground, and not
+    // already lined up with a runway to land on it.
+    constexpr float SKY_PULLUP_CLEARANCE = 15.0f;
+    pullUp = nearAirport < 0 && (skyPlane.pos.y - ground) < SKY_PULLUP_CLEARANCE;
+    static unsigned long lastPullUpBeepAt = 0;
+    if (pullUp && now - lastPullUpBeepAt > 350) {
+      lastPullUpBeepAt = now; vibrate(70); if (volumeLevel) M5Cardputer.Speaker.tone(1100, 90);
+    }
     if (skyPlane.pos.y <= ground + 1.0f) {
-      int nearAirport = -1;
-      for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) {
-        float dx = skyPlane.pos.x - skyAirports[i].pos.x, dz = skyPlane.pos.z - skyAirports[i].pos.z;
-        if (sqrtf(dx * dx + dz * dz) < skyAirports[i].length * 0.55f) { nearAirport = i; break; }
-      }
       float vSpeed = fwd.y * skyPlane.speed;
       bool safe = nearAirport >= 0 && skyGearDown && vSpeed > -8.0f && fabsf(skyPlane.bank) < 0.35f && fabsf(skyPlane.pitch) < 0.35f;
       if (safe) {
@@ -3720,7 +3762,7 @@ void stepSkyPilotFlight() {
   cam.fovY = 68.0f;
 
   skyRenderScene(cam, fwd);
-  skyRenderHud(stalling);
+  skyRenderHud(stalling, pullUp);
   tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
 }
 // ============================================================================
