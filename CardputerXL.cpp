@@ -124,7 +124,7 @@ struct Theme { uint16_t bg, panel, accent, text, dim, selected; };
 // middle would shift every later page's index into those arrays by one.
 // WIFISETUP/LOCKSCREEN/SCREENSAVER are deliberately last and excluded from
 // that indexing already (see pageDisplayName()).
-enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, TRIKISCOPE, WIFISETUP, LOCKSCREEN, SCREENSAVER };
+enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, TRIKISCOPE, MINICAM, WIFISETUP, LOCKSCREEN, SCREENSAVER };
 
 struct CVar { String name; long value; };
 
@@ -302,6 +302,11 @@ void stepKartRace();
 void drawSkyPilotHub();
 void startSkyPilotFlight(int modeSelected);
 void stepSkyPilotFlight();
+void autoConnectWifi();
+void miniCamJoinNetwork();
+void miniCamLeaveNetwork();
+void drawMiniCam();
+void stepMiniCam();
 void drawDeviceCheck();
 void drawQRToolsPlus();
 void drawMiniPaint();
@@ -583,15 +588,15 @@ Page previousPage = LAUNCHER;
 Page screensaverReturnPage = LAUNCHER;
 unsigned long screensaverStartedAt = 0;
 unsigned long screensaverLastFrameAt = 0;
-const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES", "TRIKI SCOPE"};
-const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt", "Zabka Triki motion controller over BLE"};
-constexpr int APP_COUNT = 30;
+const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES", "TRIKI SCOPE", "MINI CAM"};
+const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt", "Zabka Triki motion controller over BLE", "MiniCam network camera preview and shutter"};
+constexpr int APP_COUNT = 31;
 constexpr int APP_VISIBLE = 5;
 // Abstract two-character glyphs for the APPS grid (see drawLauncherTileColored()
 // below), same punctuation-icon style as Home's homeTileIcons[] - the default
 // GFX font is ASCII-only, so these are stand-ins rather than literal pictograms.
 // Indexed identically to appNames[]/appInfo[] (i.e. by Page - 1).
-const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><", "^y"};
+const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><", "^y", "(o"};
 // appNames[] is indexed by (Page - 1) and only covers pages up to GAMEHUB -
 // WIFISETUP/LOCKSCREEN/SCREENSAVER aren't "apps" and have no entry, so a raw
 // appNames[(int)p - 1] lookup on an arbitrary Page is not always safe. This
@@ -609,8 +614,8 @@ constexpr int HOME_TILE_COUNT = 6;
 int homeAppIndices[5] = {5, 2, 6, 4, 8}; // C LAB, Notes, REPL, Calc, Settings
 const char* homeTileIcons[HOME_TILE_COUNT] = {"{}", "[]", ">_", "+-", "*", "::"};
 // Entry 0 is a navigation action; the remaining entries open secondary apps.
-const int secondaryAppIndices[25] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29};
-constexpr int SECONDARY_APP_COUNT = 26;
+const int secondaryAppIndices[26] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30};
+constexpr int SECONDARY_APP_COUNT = 27;
 bool launcherHome = true;
 int homeSelected = 0;
 int appSelected = 0, appScroll = 0;
@@ -1097,6 +1102,12 @@ void applyVolume() { M5Cardputer.Speaker.setVolume((volumeLevel * 255U) / 10U); 
 // No LEDC/PWM channel is used for haptics.
 void vibrate(uint16_t durationMs) {
   if (durationMs == 0) return;
+  // MINI CAM's whole point is powering the external camera unit off the
+  // Grove port's 5V rail - the haptic motor is a real current draw on that
+  // same rail, so rumble is disabled outright while this app is open rather
+  // than trying to guess which specific calls (low battery, screensaver,
+  // charging, etc.) might fire during a shoot.
+  if (page == MINICAM) return;
   digitalWrite(HAPTIC_IN_PIN, HIGH);
   delay(durationMs);
   digitalWrite(HAPTIC_IN_PIN, LOW);
@@ -5317,6 +5328,333 @@ void stepTrikiScope() {
   if (trikiView == TrikiView::STATUS) drawTrikiStatus(); else drawTrikiGraph();
 }
 
+// ============================================================================
+// ---- MINI CAM: a client for the separate MiniCam project (an M5Stack Unit
+// CamS3 running its own firmware, see C:\...\Arduino\MiniCam\MiniCam.ino) -
+// this app is the same role that project's MiniCamDisplay.ino (M5StickS3)
+// plays, ported to the Cardputer's external panel instead of building a
+// fourth board into that project. The CamS3 has no free GPIO at all (its
+// Grove pins are hardwired to native USB D+/D-), so it hosts its own WiFi
+// SoftAP and streams over a plain TCP socket - there is no wired data link,
+// only power: the Grove port is wired to the CamS3 purely to run it, since
+// it has no battery of its own. See the vibrate()/serviceAutoConnectWifi()
+// guards elsewhere in this file for why haptics are disabled and the saved
+// home Wi-Fi network is left alone while this app is open.
+// ============================================================================
+constexpr char MINICAM_AP_SSID[] = "MiniCam";
+constexpr char MINICAM_AP_PASSWORD[] = "minicam123";
+const IPAddress MINICAM_SERVER_IP(192, 168, 4, 1);
+constexpr uint16_t MINICAM_TCP_PORT = 3333;
+
+constexpr uint8_t MINICAM_FRAME_PREVIEW = 0x01, MINICAM_FRAME_ACK = 0x02, MINICAM_FRAME_ERROR = 0x03, MINICAM_FRAME_STATUS = 0x04, MINICAM_FRAME_THUMB = 0x05;
+
+// The CamS3 rotates both the preview and thumbnails 270 deg CW before
+// sending, to suit the MiniCamDisplay project's portrait StickS3 screen -
+// WIRE_* is the size/orientation actually received; this app undoes that
+// rotation back to LAND_*, the sensor's real (landscape) orientation, since
+// the Cardputer's external panel is landscape too and a 4x nearest-neighbor
+// scale of the 80x60 landscape preview fills its 320x240 panel exactly.
+constexpr int MINICAM_PREVIEW_WIRE_W = 60, MINICAM_PREVIEW_LAND_W = 80, MINICAM_PREVIEW_LAND_H = 60;
+constexpr int MINICAM_THUMB_WIRE_W = 32, MINICAM_THUMB_LAND_W = 57, MINICAM_THUMB_LAND_H = 32;
+constexpr int MINICAM_GALLERY_MAX = 9;  // matches the CamS3's own RAM thumbnail ring size
+
+WiFiClient miniCamClient;
+bool miniCamJoined = false;
+unsigned long miniCamLastConnectAttemptMs = 0;
+
+enum class MiniCamUiMode { LIVE, GALLERY, PHOTO };
+MiniCamUiMode miniCamUiMode = MiniCamUiMode::LIVE;
+int miniCamGallerySelected = 0;
+
+int miniCamPhotosTaken = 0, miniCamMaxPhotos = 999;
+bool miniCamShowSaved = false;
+unsigned long miniCamSavedUntil = 0;
+unsigned long miniCamLastPreviewMs = 0;
+char miniCamErrorMsg[80] = "";
+unsigned long miniCamLastErrorMs = 0;
+char miniCamStatusMsg[80] = "";
+bool miniCamNeedsRedraw = true;
+
+uint16_t miniCamPreviewLandscape[MINICAM_PREVIEW_LAND_W * MINICAM_PREVIEW_LAND_H];
+uint16_t miniCamGalleryThumbs[MINICAM_GALLERY_MAX][MINICAM_THUMB_LAND_W * MINICAM_THUMB_LAND_H];
+bool miniCamGalleryLoaded[MINICAM_GALLERY_MAX];
+int miniCamPendingFetchSlot = -1;
+uint16_t miniCamPendingFetchPhotoNumber = 0;
+unsigned long miniCamPendingFetchStartMs = 0;
+
+// Small non-blocking parser for the CamS3's
+// [0xAA][0x55][type][lenLo][lenHi][payload...][checksum] frames, same
+// protocol/state machine as MiniCamDisplay.ino's pollNet().
+enum class MiniCamParseState { SYNC1, SYNC2, TYPE, LEN_LO, LEN_HI, PAYLOAD, CHECKSUM };
+MiniCamParseState miniCamParseState = MiniCamParseState::SYNC1;
+uint8_t miniCamFrameType;
+uint16_t miniCamFrameLen, miniCamFrameIdx;
+uint8_t miniCamFrameChecksum;
+uint8_t miniCamFrameBuf[MINICAM_PREVIEW_WIRE_W * MINICAM_PREVIEW_LAND_H * 2];  // big enough for the largest frame (preview)
+
+// Undoes the CamS3's rotate270CW(): wireW is the received buffer's own width
+// (its height is landW); landW/landH are the desired original, pre-rotation
+// dimensions. Derived by algebraically inverting that function's exact
+// mapping (dst(y,x) = src(x, srcW-1-y)) rather than guessed.
+void miniCamUnrotate270(const uint8_t* wireBytes, int wireW, int landW, int landH, uint16_t* dstLandscape) {
+  for (int r = 0; r < landH; r++) {
+    for (int c = 0; c < landW; c++) {
+      int wireIdx = (landW - 1 - c) * wireW + r;
+      const uint8_t* px = wireBytes + (size_t)wireIdx * 2;
+      dstLandscape[r * landW + c] = ((uint16_t)px[0] << 8) | px[1];
+    }
+  }
+}
+
+void miniCamJoinNetwork() {
+  if (miniCamJoined) return;
+  miniCamJoined = true;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(MINICAM_AP_SSID, MINICAM_AP_PASSWORD);
+  miniCamLastConnectAttemptMs = millis();
+  miniCamUiMode = MiniCamUiMode::LIVE;
+  miniCamPhotosTaken = 0; miniCamMaxPhotos = 999;
+  miniCamErrorMsg[0] = '\0'; miniCamStatusMsg[0] = '\0';
+  miniCamLastPreviewMs = 0; miniCamLastErrorMs = 0;
+  miniCamParseState = MiniCamParseState::SYNC1;
+  for (int i = 0; i < MINICAM_GALLERY_MAX; i++) miniCamGalleryLoaded[i] = false;
+  miniCamPendingFetchSlot = -1;
+  miniCamNeedsRedraw = true;
+}
+void miniCamLeaveNetwork() {
+  if (!miniCamJoined) return;
+  miniCamJoined = false;
+  if (miniCamClient.connected()) miniCamClient.stop();
+  autoConnectWifi();  // rejoin the saved home network
+}
+
+void miniCamMaintainConnection() {
+  if (miniCamClient.connected()) return;
+  if (WiFi.status() != WL_CONNECTED) return;  // WiFi's own auto-reconnect handles rejoining the AP
+  if (millis() - miniCamLastConnectAttemptMs > 2000) {
+    miniCamClient.connect(MINICAM_SERVER_IP, MINICAM_TCP_PORT);
+    miniCamLastConnectAttemptMs = millis();
+  }
+}
+
+void miniCamHandleFrame(uint8_t type, const uint8_t* payload, uint16_t len) {
+  if (type == MINICAM_FRAME_PREVIEW && len == MINICAM_PREVIEW_WIRE_W * MINICAM_PREVIEW_LAND_H * 2) {
+    miniCamUnrotate270(payload, MINICAM_PREVIEW_WIRE_W, MINICAM_PREVIEW_LAND_W, MINICAM_PREVIEW_LAND_H, miniCamPreviewLandscape);
+    miniCamLastPreviewMs = millis();
+    if (miniCamUiMode == MiniCamUiMode::LIVE) miniCamNeedsRedraw = true;
+  } else if (type == MINICAM_FRAME_ACK && len == 4) {
+    miniCamPhotosTaken = payload[0] | (payload[1] << 8);
+    miniCamMaxPhotos = payload[2] | (payload[3] << 8);
+    miniCamShowSaved = true; miniCamSavedUntil = millis() + 800;
+    miniCamNeedsRedraw = true;
+  } else if (type == MINICAM_FRAME_ERROR) {
+    uint16_t n = min((size_t)len, sizeof(miniCamErrorMsg) - 1);
+    memcpy(miniCamErrorMsg, payload, n); miniCamErrorMsg[n] = '\0';
+    miniCamLastErrorMs = millis();
+    miniCamNeedsRedraw = true;
+  } else if (type == MINICAM_FRAME_STATUS) {
+    uint16_t n = min((size_t)len, sizeof(miniCamStatusMsg) - 1);
+    memcpy(miniCamStatusMsg, payload, n); miniCamStatusMsg[n] = '\0';
+  } else if (type == MINICAM_FRAME_THUMB && len == 2 + MINICAM_THUMB_WIRE_W * MINICAM_THUMB_LAND_H * 2) {
+    uint16_t num = payload[0] | (payload[1] << 8);
+    if (miniCamPendingFetchSlot >= 0 && num == miniCamPendingFetchPhotoNumber) {
+      miniCamUnrotate270(payload + 2, MINICAM_THUMB_WIRE_W, MINICAM_THUMB_LAND_W, MINICAM_THUMB_LAND_H, miniCamGalleryThumbs[miniCamPendingFetchSlot]);
+      miniCamGalleryLoaded[miniCamPendingFetchSlot] = true;
+      miniCamPendingFetchSlot = -1;
+      miniCamNeedsRedraw = true;
+    }
+  }
+}
+
+void miniCamPollNet() {
+  while (miniCamClient.available()) {
+    uint8_t b = miniCamClient.read();
+    switch (miniCamParseState) {
+      case MiniCamParseState::SYNC1: if (b == 0xAA) miniCamParseState = MiniCamParseState::SYNC2; break;
+      case MiniCamParseState::SYNC2: miniCamParseState = (b == 0x55) ? MiniCamParseState::TYPE : MiniCamParseState::SYNC1; break;
+      case MiniCamParseState::TYPE: miniCamFrameType = b; miniCamParseState = MiniCamParseState::LEN_LO; break;
+      case MiniCamParseState::LEN_LO: miniCamFrameLen = b; miniCamParseState = MiniCamParseState::LEN_HI; break;
+      case MiniCamParseState::LEN_HI:
+        miniCamFrameLen |= (b << 8); miniCamFrameIdx = 0; miniCamFrameChecksum = 0;
+        miniCamParseState = (miniCamFrameLen == 0 || miniCamFrameLen > sizeof(miniCamFrameBuf)) ? MiniCamParseState::SYNC1 : MiniCamParseState::PAYLOAD;
+        break;
+      case MiniCamParseState::PAYLOAD:
+        miniCamFrameBuf[miniCamFrameIdx++] = b; miniCamFrameChecksum += b;
+        if (miniCamFrameIdx >= miniCamFrameLen) miniCamParseState = MiniCamParseState::CHECKSUM;
+        break;
+      case MiniCamParseState::CHECKSUM:
+        if (b == miniCamFrameChecksum) miniCamHandleFrame(miniCamFrameType, miniCamFrameBuf, miniCamFrameLen);
+        miniCamParseState = MiniCamParseState::SYNC1;
+        break;
+    }
+  }
+}
+
+// Fetches whichever visible gallery slot isn't loaded yet, one at a time -
+// the CamS3 only ever answers one 'T' request at a time. Photo numbers are
+// a plain contiguous 1..photosTaken sequence (no delete/tombstone tracking
+// in this port, unlike MiniCamDisplay.ino's SPIFFS-cached version).
+void miniCamUpdateGalleryFetching() {
+  if (miniCamUiMode == MiniCamUiMode::LIVE) return;
+  if (miniCamPhotosTaken <= 0) return;
+  if (miniCamPendingFetchSlot >= 0) {
+    if (millis() - miniCamPendingFetchStartMs > 3000) miniCamPendingFetchSlot = -1;
+    return;
+  }
+  int count = min(miniCamPhotosTaken, MINICAM_GALLERY_MAX);
+  int want = -1;
+  if (miniCamUiMode == MiniCamUiMode::PHOTO && !miniCamGalleryLoaded[miniCamGallerySelected]) want = miniCamGallerySelected;
+  else for (int i = 0; i < count; i++) if (!miniCamGalleryLoaded[i]) { want = i; break; }
+  if (want < 0 || !miniCamClient.connected()) return;
+  uint16_t photoNumber = (uint16_t)(miniCamPhotosTaken - want);
+  if (photoNumber < 1) return;
+  uint8_t cmd[3] = {'T', (uint8_t)(photoNumber & 0xFF), (uint8_t)(photoNumber >> 8)};
+  miniCamClient.write(cmd, sizeof(cmd));
+  miniCamPendingFetchSlot = want; miniCamPendingFetchPhotoNumber = photoNumber; miniCamPendingFetchStartMs = millis();
+}
+
+void miniCamSendCapture() {
+  if (!miniCamClient.connected()) { playBlockedSound(); return; }
+  miniCamClient.write('C');
+  if (volumeLevel) M5Cardputer.Speaker.tone(2200, 40);
+  tft.fillScreen(ILI9341_WHITE); delay(60);  // brief shutter flash - no vibrate(), see vibrate()'s own MINICAM guard
+  miniCamNeedsRedraw = true;
+}
+
+// ---- Rendering: direct to the panel, full-screen, bypassing the normal
+// header/footer chrome entirely - same live-view convention Kart Racer/
+// TRIKI SCOPE/Sky Pilot use, since the whole point is maximizing preview
+// size. A small reusable row-band buffer (2560 bytes) does the 4x scale
+// rather than a full 320x240 framebuffer (150KB - a real budget concern
+// after this file's own heap-exhaustion history), one source row at a time.
+uint16_t miniCamBandBuf[320 * 4];
+void miniCamBlitPreview() {
+  for (int sy = 0; sy < MINICAM_PREVIEW_LAND_H; sy++) {
+    for (int sx = 0; sx < MINICAM_PREVIEW_LAND_W; sx++) {
+      uint16_t px = miniCamPreviewLandscape[sy * MINICAM_PREVIEW_LAND_W + sx];
+      int bx = sx * 4;
+      for (int r = 0; r < 4; r++) {
+        int base = r * 320 + bx;
+        miniCamBandBuf[base] = px; miniCamBandBuf[base + 1] = px; miniCamBandBuf[base + 2] = px; miniCamBandBuf[base + 3] = px;
+      }
+    }
+    tft.drawRGBBitmap(0, sy * 4, miniCamBandBuf, 320, 4);
+  }
+}
+
+void drawMiniCamLive() {
+  bool haveError = (millis() - miniCamLastErrorMs) < 2000;
+  if (haveError) {
+    tft.fillScreen(ILI9341_BLACK);
+    tft.setTextSize(2); tft.setTextColor(ILI9341_RED, ILI9341_BLACK);
+    tft.setCursor(6, 30); tft.print(miniCamErrorMsg);
+    return;
+  }
+  bool haveSignal = (millis() - miniCamLastPreviewMs) < 1000;
+  if (haveSignal) miniCamBlitPreview(); else tft.fillScreen(ILI9341_BLACK);
+
+  if (!haveSignal) {
+    tft.setTextSize(2); tft.setTextColor(ILI9341_RED, ILI9341_BLACK);
+    tft.setCursor(46, 110);
+    tft.print(miniCamClient.connected() ? "NO SIGNAL" : (WiFi.status() == WL_CONNECTED ? "CONNECTING..." : "JOINING CAM WIFI"));
+  }
+  tft.setTextSize(1); tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+  tft.setCursor(4, 4); tft.printf("%d/%d", miniCamMaxPhotos - miniCamPhotosTaken, miniCamMaxPhotos);
+  tft.setCursor(4, 226);
+  if (miniCamShowSaved && millis() < miniCamSavedUntil) tft.print("saved!");
+  else tft.print("ENTER SHOOT   G GALLERY   FN EXIT");
+}
+
+constexpr int MINICAM_CELL_W = 320 / 3, MINICAM_CELL_H = (240 - 20) / 3;
+// Shared by both the small gallery-grid cells AND the much bigger enlarged
+// PHOTO view (57*5 x 32*5 = 285x160) - sized to the larger of the two uses,
+// not just the gallery cell, since a single reused buffer only sized for
+// the smaller case would overflow when drawMiniCamPhoto() calls this with
+// its own larger w/h.
+// 5x (285x160) pushed this whole app's static RAM to 69% before this cost
+// was trimmed - given this file's own history of I2S/WiFi failures from
+// static RAM crowding out runtime heap (see the Sky Pilot/Triki/BLE
+// comments elsewhere), 3x (171x96, ~33KB instead of ~91KB for this one
+// buffer) is a better trade for a photo view that's still 3x the thumbnail.
+constexpr int MINICAM_THUMB_SCALE = 3;
+constexpr int MINICAM_PHOTO_W = MINICAM_THUMB_LAND_W * MINICAM_THUMB_SCALE, MINICAM_PHOTO_H = MINICAM_THUMB_LAND_H * MINICAM_THUMB_SCALE;
+constexpr int MINICAM_THUMB_BUF_CELLS = MINICAM_PHOTO_W * MINICAM_PHOTO_H;  // 45600, comfortably covers the gallery cell size too
+uint16_t miniCamCellBuf[MINICAM_THUMB_BUF_CELLS];
+void miniCamDrawThumbCell(int x, int y, int w, int h, const uint16_t* thumb) {
+  for (int cy = 0; cy < h; cy++) {
+    int sy = cy * MINICAM_THUMB_LAND_H / h;
+    for (int cx = 0; cx < w; cx++) {
+      int sx = cx * MINICAM_THUMB_LAND_W / w;
+      miniCamCellBuf[cy * w + cx] = thumb[sy * MINICAM_THUMB_LAND_W + sx];
+    }
+  }
+  tft.drawRGBBitmap(x, y, miniCamCellBuf, w, h);
+}
+
+void drawMiniCamGallery() {
+  tft.fillScreen(ILI9341_BLACK);
+  int count = min(miniCamPhotosTaken, MINICAM_GALLERY_MAX);
+  if (count == 0) {
+    tft.setTextSize(2); tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+    tft.setCursor(20, 100); tft.print("NO PHOTOS YET");
+  } else {
+    for (int i = 0; i < MINICAM_GALLERY_MAX; i++) {
+      int col = i % 3, row = i / 3;
+      int x = col * MINICAM_CELL_W, y = 20 + row * MINICAM_CELL_H;
+      bool has = i < count;
+      if (has && miniCamGalleryLoaded[i]) {
+        miniCamDrawThumbCell(x + 1, y + 1, MINICAM_CELL_W - 2, MINICAM_CELL_H - 2, miniCamGalleryThumbs[i]);
+      } else if (has) {
+        tft.fillRect(x + 1, y + 1, MINICAM_CELL_W - 2, MINICAM_CELL_H - 2, ILI9341_DARKGREY);
+        tft.setTextSize(1); tft.setTextColor(ILI9341_WHITE, ILI9341_DARKGREY);
+        tft.setCursor(x + MINICAM_CELL_W / 2 - 9, y + MINICAM_CELL_H / 2 - 4); tft.print("...");
+      }
+      if (i == miniCamGallerySelected) tft.drawRect(x, y, MINICAM_CELL_W, MINICAM_CELL_H, ILI9341_GREEN);
+    }
+  }
+  tft.setTextSize(1); tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+  tft.setCursor(4, 4); tft.print(";/.,// SELECT   ENTER OPEN   FN BACK");
+}
+
+void drawMiniCamPhoto() {
+  tft.fillScreen(ILI9341_BLACK);
+  int count = min(miniCamPhotosTaken, MINICAM_GALLERY_MAX);
+  if (count == 0) return;
+  int pw = MINICAM_PHOTO_W, ph = MINICAM_PHOTO_H;  // 285x160, fits comfortably in 320x240
+  if (miniCamGalleryLoaded[miniCamGallerySelected]) {
+    miniCamDrawThumbCell((320 - pw) / 2, (240 - ph) / 2, pw, ph, miniCamGalleryThumbs[miniCamGallerySelected]);
+  } else {
+    tft.setTextSize(2); tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+    tft.setCursor(70, 110); tft.print("LOADING...");
+  }
+  tft.setTextSize(1); tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+  tft.setCursor(4, 4); tft.printf("#%d", miniCamPhotosTaken - miniCamGallerySelected);
+  tft.setCursor(4, 226); tft.print(",/. BROWSE   FN BACK");
+}
+
+void drawMiniCam() {
+  if (miniCamUiMode == MiniCamUiMode::GALLERY) drawMiniCamGallery();
+  else if (miniCamUiMode == MiniCamUiMode::PHOTO) drawMiniCamPhoto();
+  else drawMiniCamLive();
+  miniCamNeedsRedraw = false;
+}
+
+// Continuous per-tick driver (network + gallery-fetch + redraw), bypassing
+// the normal redrawNeeded/draw() dispatch the same way Kart Racer/TRIKI
+// SCOPE/Sky Pilot's live views do - called unconditionally from loop(),
+// self-gated on page == MINICAM. Input is handled separately, through the
+// normal keyboard() per-keypress dispatch (see the MINICAM block there) -
+// unlike those other live views, nothing here needs a continuously-held key.
+void stepMiniCam() {
+  if (page != MINICAM) return;
+  if (quickMenuOpen) return;
+  lastActivity = millis();
+  miniCamMaintainConnection();
+  miniCamPollNet();
+  miniCamUpdateGalleryFetching();
+  if (miniCamNeedsRedraw) drawMiniCam();
+}
+
 void drawGameHub() {
   lastDrawnGameMode = gameMode;
   if (gameMode == 3) { drawKartHub(); return; }
@@ -6404,6 +6742,11 @@ void autoConnectWifi() {
 // router is ready. It never starts Web Companion and avoids interrupting scans.
 void serviceAutoConnectWifi() {
   if (webRunning || scanRunning) return;
+  // MINI CAM deliberately joins the camera unit's own SoftAP instead of the
+  // saved home network while it's open - this must not fight that by trying
+  // to reconnect home Wi-Fi out from under it every time WL_CONNECTED is
+  // momentarily false during that join.
+  if (page == MINICAM) return;
   if (WiFi.status() == WL_CONNECTED) {
     autoWifiConnecting = false;
     // NTP was previously done only when Web Companion connected. Auto-connect
@@ -6680,7 +7023,7 @@ void draw() {
   // itself (Home/Apps aren't "an app" to splash into) - see
   // playAppIntroAnimation()'s own comment for what this actually plays.
   if (realAppTransition && page != LAUNCHER) playAppIntroAnimation(page);
-  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) { ensureBleReady(); drawBleKeyboard(); } else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
+  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) { ensureBleReady(); drawBleKeyboard(); } else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else if (page == MINICAM) { miniCamJoinNetwork(); drawMiniCam(); } else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
 
 // Repaint only a changed application's content. Headers and footers are kept
 // intact; full draw() remains reserved for entering a different scene, modal
@@ -6934,7 +7277,7 @@ void keyboard() {
   // running and must never leak a Fn press through to it.
   if (fn && !fnLast) {
     if (quickMenuOpen) { quickMenuOpen = false; playExitSound(); closeQuickMenuAnimated(); forceFullRedraw = true; redrawNeeded = true; }
-    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyEngineToneStop(); skyPaused = false; } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
+    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyEngineToneStop(); skyPaused = false; } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
   // Opt toggles the same floating quick-launch overlay from any page, any
@@ -7342,6 +7685,33 @@ void keyboard() {
     }
     return;
   }
+  if (page == MINICAM) {
+    // Discrete, event-based actions only (shutter/navigate/open) - unlike
+    // Sky Pilot/Kart, nothing here needs a continuously-held-key analog
+    // input, so this goes through the normal per-keypress dispatch instead
+    // of stepMiniCam() polling isKeyPressed() directly.
+    int count = min(miniCamPhotosTaken, MINICAM_GALLERY_MAX);
+    if (miniCamUiMode == MiniCamUiMode::LIVE) {
+      if (k.enter) miniCamSendCapture();
+      for (char c : k.word) if (c == 'g') { if (count > 0) { miniCamUiMode = MiniCamUiMode::GALLERY; miniCamGallerySelected = 0; playEnterSound(); miniCamNeedsRedraw = true; } else playBlockedSound(); }
+    } else if (miniCamUiMode == MiniCamUiMode::GALLERY) {
+      int oldSel = miniCamGallerySelected;
+      for (char c : k.word) {
+        if (c == ';' && miniCamGallerySelected - 3 >= 0) miniCamGallerySelected -= 3;
+        else if (c == '.' && miniCamGallerySelected + 3 < count) miniCamGallerySelected += 3;
+        else if (c == ',' && miniCamGallerySelected % 3 > 0) miniCamGallerySelected--;
+        else if (c == '/' && miniCamGallerySelected % 3 < 2 && miniCamGallerySelected + 1 < count) miniCamGallerySelected++;
+      }
+      if (miniCamGallerySelected != oldSel) { playCursorSound(); miniCamNeedsRedraw = true; }
+      if (k.enter && count > 0) { miniCamUiMode = MiniCamUiMode::PHOTO; playEnterSound(); miniCamNeedsRedraw = true; }
+    } else {  // PHOTO
+      for (char c : k.word) {
+        if (c == ',' && miniCamGallerySelected > 0) { miniCamGallerySelected--; playCursorSound(); miniCamNeedsRedraw = true; }
+        else if (c == '/' && miniCamGallerySelected + 1 < count) { miniCamGallerySelected++; playCursorSound(); miniCamNeedsRedraw = true; }
+      }
+    }
+    return;
+  }
   if (page == DEVICECHECK) { for (char c : k.word) { if (c == ';') { deviceCheckSelected = (deviceCheckSelected + 3) % 4; redrawNeeded = true; } else if (c == '.') { deviceCheckSelected = (deviceCheckSelected + 1) % 4; redrawNeeded = true; } } if (k.enter) { playEnterSound(); if (deviceCheckSelected == 0) { tft.fillScreen(ILI9341_RED); delay(180); tft.fillScreen(ILI9341_GREEN); delay(180); tft.fillScreen(ILI9341_BLUE); delay(180); deviceCheckStatus = "Screen colour test shown"; } else if (deviceCheckSelected == 1) { if (volumeLevel) { M5Cardputer.Speaker.tone(1000, 180); deviceCheckStatus = "Speaker tone played"; } else deviceCheckStatus = "Volume is 0%; speaker muted"; } else if (deviceCheckSelected == 2) deviceCheckStatus = "Press any keyboard key to verify input"; else { sendNec(0, 16); deviceCheckStatus = "NEC test frame sent on IR"; } redrawNeeded = true; } return; }
   if (page == QRTOOLSPLUS) { for (char c : k.word) { if (c == ';') { qrPlusSelected = (qrPlusSelected + 3) % 4; redrawNeeded = true; } else if (c == '.') { qrPlusSelected = (qrPlusSelected + 1) % 4; redrawNeeded = true; } } if (k.enter) { if (qrPlusSelected == 0) qrText = String("http://") + WEB_MDNS_HOST + ".local"; else if (qrPlusSelected == 1) qrText = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "Wi-Fi not connected"; else if (qrPlusSelected == 2) qrText = notes[0]; page = QRTEXT; markStateDirty(); redrawNeeded = true; } return; }
   if (page == MINIPAINT) { for (char c : k.word) { if (c == ';' && paintY > 0) paintY--; else if (c == '.' && paintY < 11) paintY++; else if (c == ',' && paintX > 0) paintX--; else if (c == '/' && paintX < 15) paintX++; } if (k.enter) paintPixels[paintY][paintX] = !paintPixels[paintY][paintX]; if (k.del) for (int y = 0; y < 12; ++y) for (int x = 0; x < 16; ++x) paintPixels[y][x] = false; redrawNeeded = true; return; }
@@ -7627,6 +7997,7 @@ void loop() {
   stepTetrisGame();
   stepSkyPilotFlight();
   stepTrikiScope();
+  stepMiniCam();
   // One 16th-note per tick. The grid is refreshed only on the new playhead
   // position rather than continuously redrawing a full screen.
   if (page == MUSICLAB && drumPlaying && !sleeping && !quickMenuOpen && millis() >= drumNextStepAt) {
