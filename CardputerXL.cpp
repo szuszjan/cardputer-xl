@@ -3295,12 +3295,28 @@ const SkyPlaneModelParams skyPlaneModels[SKY_PLANE_MODEL_COUNT] = {
   {"SR-71 BLACKBIRD","SUPERSONIC",           3.0f,3.2f,0.20f,  1.8f,1.4f,1.0f,0.00f,   0.5f,0.6f,0.3f,      false,false,false,     16.0f,22.0f,  0.50f,1.2f, 0.40f,1.0f,  {0,20,40,70}},
   {"B-2 SPIRIT",    "LOW-SPEED STABILITY",   1.0f,1.0f,1.00f,  4.0f,1.4f,1.1f,0.00f,   0.0f,0.0f,0.0f,      true, false,false,     8.0f, 14.0f,  0.40f,1.0f, 0.30f,0.8f,  {0,12,20,28}},
   {"BOEING 737",    "AUTOPILOT TRIM",        2.2f,2.6f,0.40f,  3.2f,0.8f,1.0f,0.10f,   1.3f,1.1f,0.6f,      false,true, true,      13.0f,19.0f,  0.35f,1.0f, 0.30f,0.9f,  {0,16,26,36}},
-  {"BUSH PLANE",    "SHORT TAKEOFF",         1.6f,1.8f,0.25f,  3.4f,0.2f,0.8f,0.20f,   0.9f,0.8f,0.4f,      false,false,false,     7.0f, 9.0f,   0.50f,1.3f, 0.40f,1.0f,  {0,10,16,22}},
+  // stall/rotate gap was only 2 (7/9) - every other plane keeps a 4-6 unit
+  // gap; that thin a margin meant it lifted off right at the edge of a
+  // stall and any climb attempt (which costs speed - see the climb/gear
+  // target penalty below) dropped it back under stall within about a
+  // second, reading as "it pitches up, beeps, and comes back down" instead
+  // of an actual takeoff. Lower stall speed further so the gap matches.
+  {"BUSH PLANE",    "SHORT TAKEOFF",         1.6f,1.8f,0.25f,  3.4f,0.2f,0.8f,0.20f,   0.9f,0.8f,0.4f,      false,false,false,     5.0f, 9.0f,   0.50f,1.3f, 0.40f,1.0f,  {0,10,16,22}},
 };
 int skyPlaneModelIndex = 0;
 constexpr float SKY_SOUND_BARRIER = 45.0f;
+constexpr unsigned long SKY_BOOM_EFFECT_MS = 500;
 bool skyWasSupersonic = false;
 unsigned long skyBoomFlashUntil = 0;
+// Arms the landing/crash check. Right after liftoff, altitude has only
+// risen a fraction of a unit in the first frame or two - "touching ground"
+// (pos.y <= ground+1) was still true, and since gear was still down with
+// modest pitch/bank it satisfied the SAME conditions as a real landing, so
+// every takeoff on every plane immediately re-grounded itself with a
+// landing chirp a frame or two after leaving the runway. The landing/crash
+// check is now skipped entirely until the plane has put real clearance
+// between itself and the ground at least once since the last liftoff.
+bool skyHasClearedGround = false;
 
 float skyScore = 0;      // distance flown this flight, in world units
 int skyBestScore = 0;
@@ -3437,19 +3453,21 @@ void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd, const SkyPlaneModel
   const KVec3& pos = skyPlane.pos;
 
   if (m.flyingWing) {
-    // The B-2's real silhouette is one continuous broad triangle/arrowhead -
-    // a straight leading-edge sweep from the nose straight out to each
-    // wingtip, with no separate fuselage/tailplane/fin at all. An earlier
-    // version routed the leading edge through a separate "body" point
-    // first, which put a kink in it and broke the clean triangle into
-    // more of a kite/hexagon - nose and wingtips are now the only three
-    // leading-edge points, plus a shallow center notch on the trailing
-    // edge (a simplified stand-in for the real aircraft's sawtooth edge).
+    // The B-2's real silhouette is one continuous broad triangle/arrowhead
+    // leading edge (nose straight out to each wingtip, no separate
+    // fuselage/tailplane/fin at all) PLUS its signature double-sawtooth
+    // ("W") trailing edge - a single flat notch read as a plain hexagon,
+    // not a B-2. Per side: wingtip (shallow) -> deep notch -> shallow peak
+    // -> the center notch, alternating depth twice for a real zigzag.
     KVec3 nose = pos + fwd * m.noseLen;
     KVec3 wingTipL = pos - right * m.wingSpan - fwd * m.wingSweep, wingTipR = pos + right * m.wingSpan - fwd * m.wingSweep;
-    KVec3 notchL = pos - right * m.bodyHalfWidth - fwd * m.tailLen, notchR = pos + right * m.bodyHalfWidth - fwd * m.tailLen;
+    float midSpan = (m.wingSpan + m.bodyHalfWidth) * 0.5f;
+    KVec3 deepL = pos - right * midSpan - fwd * m.tailLen, deepR = pos + right * midSpan - fwd * m.tailLen;
+    KVec3 peakL = pos - right * (midSpan * 0.65f) - fwd * (m.wingSweep * 0.6f), peakR = pos + right * (midSpan * 0.65f) - fwd * (m.wingSweep * 0.6f);
+    KVec3 notchL = pos - right * m.bodyHalfWidth - fwd * (m.tailLen * 0.7f), notchR = pos + right * m.bodyHalfWidth - fwd * (m.tailLen * 0.7f);
     kartDrawSeg(cam, nose, wingTipL, ILI9341_WHITE); kartDrawSeg(cam, nose, wingTipR, ILI9341_WHITE);
-    kartDrawSeg(cam, wingTipL, notchL, ILI9341_WHITE); kartDrawSeg(cam, wingTipR, notchR, ILI9341_WHITE);
+    kartDrawSeg(cam, wingTipL, deepL, ILI9341_WHITE); kartDrawSeg(cam, deepL, peakL, ILI9341_WHITE); kartDrawSeg(cam, peakL, notchL, ILI9341_WHITE);
+    kartDrawSeg(cam, wingTipR, deepR, ILI9341_WHITE); kartDrawSeg(cam, deepR, peakR, ILI9341_WHITE); kartDrawSeg(cam, peakR, notchR, ILI9341_WHITE);
     kartDrawSeg(cam, notchL, notchR, ILI9341_WHITE);
     return;
   }
@@ -3653,13 +3671,6 @@ void skyRenderHud(bool stalling, bool pullUp) {
     kartCanvas.print("PULL UP");
     kartCanvas.setTextSize(1);
   }
-  if (millis() < skyBoomFlashUntil) {
-    kartCanvas.setTextSize(2); kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
-    kartCanvas.setCursor(kartCanvas.width() / 2 - 78, kartCanvas.height() / 2 + 10);
-    kartCanvas.print("SONIC BOOM");
-    kartCanvas.setTextSize(1);
-  }
-
   kartCanvas.fillRect(0, hudY, kartCanvas.width(), SKY_HUD_H, ILI9341_BLACK);
   kartCanvas.drawFastHLine(0, hudY, kartCanvas.width(), ILI9341_DARKGREY);
 
@@ -3676,6 +3687,22 @@ void skyRenderHud(bool stalling, bool pullUp) {
   kartCanvas.setCursor(268, hudY + 3); kartCanvas.print("ALT");
   snprintf(buf, sizeof(buf), "%4d", (int)skyPlane.pos.y); kartCanvas.setCursor(268, hudY + 15); kartCanvas.print(buf);
 }
+// The Blackbird's sonic boom: a real visual punch instead of a text banner
+// - a brief full-white flash for the shock itself, then an expanding ring
+// (a shockwave) that grows and runs off-screen as it fades from the boom.
+// Drawn last, on top of the whole frame including the instrument strip.
+void skyDrawSonicBoomEffect() {
+  unsigned long nowMs = millis();
+  if (nowMs >= skyBoomFlashUntil) return;
+  unsigned long elapsed = SKY_BOOM_EFFECT_MS - (skyBoomFlashUntil - nowMs);
+  constexpr unsigned long FLASH_MS = 70;
+  if (elapsed < FLASH_MS) { kartCanvas.fillScreen(ILI9341_WHITE); return; }
+  float t = (float)(elapsed - FLASH_MS) / (float)(SKY_BOOM_EFFECT_MS - FLASH_MS);
+  int cx = kartCanvas.width() / 2, cy = kartCanvas.height() / 2;
+  int r1 = (int)(t * 240), r2 = max(0, r1 - 26);
+  kartCanvas.drawCircle(cx, cy, r1, ILI9341_WHITE);
+  kartCanvas.drawCircle(cx, cy, r2, ILI9341_LIGHTGREY);
+}
 
 // modeSelected: 0=free roam from a runway, 1=free roam launched airborne,
 // 2=airport to airport (Alpha -> Bravo).
@@ -3689,6 +3716,7 @@ void startSkyPilotFlight(int modeSelected) {
   skyScore = 0;
   skyLastFrameMs = millis();
   skyMissionSuccess = false;
+  skyHasClearedGround = false;
 
   if (modeSelected == 2) {
     skyMode = SKY_MODE_AIRPORT;
@@ -3705,6 +3733,7 @@ void startSkyPilotFlight(int modeSelected) {
     skyTargetAirport = -1;
     if (modeSelected == 1) {
       skyGrounded = false;
+      skyHasClearedGround = true;  // spawning airborne, not mid-liftoff
       skyGearDown = false;
       skyThrottleLevel = 2;  // MED, matching the airborne spawn speed below
       skyPlane.pos = {0, 45, 0};
@@ -3904,12 +3933,16 @@ void stepSkyPilotFlight() {
   skyPlane.speed = constrain(skyPlane.speed, 0.0f, maxSpeed);
 
   // The Blackbird's "SUPERSONIC" special: crossing the sound barrier gets a
-  // one-shot sonic boom (haptic thump, tone burst, a brief HUD flash) - only
-  // it can realistically reach this speed, but the check itself is generic.
+  // one-shot sonic boom - a sharp high crack transient immediately followed
+  // by a low rumbling report (the actual two-part sound of a real boom,
+  // not a single descending chirp), a strong haptic thump, and a shockwave
+  // flash (see skyDrawSonicBoomEffect()) - only the Blackbird can
+  // realistically reach this speed, but the check itself is generic.
   bool supersonic = skyPlane.speed >= SKY_SOUND_BARRIER;
   if (supersonic && !skyWasSupersonic) {
-    vibrate(150); if (volumeLevel) { M5Cardputer.Speaker.tone(1400, 60); delay(40); M5Cardputer.Speaker.tone(200, 140); }
-    skyBoomFlashUntil = now + 900;
+    vibrate(180);
+    if (volumeLevel) { M5Cardputer.Speaker.tone(3200, 15); delay(15); M5Cardputer.Speaker.tone(75, 260); }
+    skyBoomFlashUntil = now + SKY_BOOM_EFFECT_MS;
   }
   skyWasSupersonic = supersonic;
 
@@ -3922,9 +3955,10 @@ void stepSkyPilotFlight() {
   bool pullUp = false;
   if (skyGrounded) {
     skyPlane.pos.y = skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
-    if (skyPlane.pitch > 0.08f && skyPlane.speed >= model.rotateSpeed) { skyGrounded = false; vibrate(15); }  // liftoff
+    if (skyPlane.pitch > 0.08f && skyPlane.speed >= model.rotateSpeed) { skyGrounded = false; skyHasClearedGround = false; vibrate(15); }  // liftoff
   } else {
     float ground = skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
+    if (!skyHasClearedGround && skyPlane.pos.y - ground > 3.0f) skyHasClearedGround = true;
     int nearAirport = -1;
     for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) {
       float dx = skyPlane.pos.x - skyAirports[i].pos.x, dz = skyPlane.pos.z - skyAirports[i].pos.z;
@@ -3941,7 +3975,7 @@ void stepSkyPilotFlight() {
     if (pullUp && now - lastPullUpBeepAt > 350) {
       lastPullUpBeepAt = now; vibrate(70); if (volumeLevel) M5Cardputer.Speaker.tone(1100, 90);
     }
-    if (skyPlane.pos.y <= ground + 1.0f) {
+    if (skyHasClearedGround && skyPlane.pos.y <= ground + 1.0f) {
       float vSpeed = fwd.y * skyPlane.speed;
       bool safe = nearAirport >= 0 && skyGearDown && vSpeed > -8.0f && fabsf(skyPlane.bank) < 0.35f && fabsf(skyPlane.pitch) < 0.35f;
       if (safe) {
@@ -4004,6 +4038,7 @@ void stepSkyPilotFlight() {
 
   skyRenderScene(cam, fwd, skyFirstPerson);
   skyRenderHud(stalling, pullUp);
+  skyDrawSonicBoomEffect();
   tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
 }
 // ============================================================================
@@ -6749,7 +6784,7 @@ void keyboard() {
   // running and must never leak a Fn press through to it.
   if (fn && !fnLast) {
     if (quickMenuOpen) { quickMenuOpen = false; playExitSound(); closeQuickMenuAnimated(); forceFullRedraw = true; redrawNeeded = true; }
-    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
+    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyEngineToneStop(); } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
   // Opt toggles the same floating quick-launch overlay from any page, any
