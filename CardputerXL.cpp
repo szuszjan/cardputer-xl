@@ -3306,6 +3306,10 @@ bool skyEngineSoundEnabled = true;  // 'm' on the HOME screen, like Kart's M/F
 // of a discrete -1/0/1 one. Throttle/gear/view/back stay on the keyboard.
 bool skyImuControlEnabled = false;
 float skyImuPitchZero = 0, skyImuBankZero = 0;  // "level" reference, captured at takeoff and re-zeroable with Z
+// Pause: the ` key (the Cardputer's Esc-equivalent - it has no dedicated
+// Esc key at all, per its keymap; ` doubles as one) freezes the flight
+// entirely rather than exiting like Fn does everywhere else in the app.
+bool skyPaused = false;
 float skyEngineSmoothedFreq = 0;
 // Discrete throttle notches (W/A step through them) instead of a free-form
 // analog hold, like a real throttle lever's detents: the plane's speed
@@ -3815,6 +3819,7 @@ void startSkyPilotFlight(int modeSelected) {
   skyLastFrameMs = millis();
   skyMissionSuccess = false;
   skyHasClearedGround = false;
+  skyPaused = false;
 
   if (modeSelected == 2) {
     skyMode = SKY_MODE_AIRPORT;
@@ -3889,7 +3894,7 @@ void drawSkyPilotHub() {
   tft.print(skyImuControlEnabled ? "TILT DEVICE FOR PITCH + BANK" : "; . PITCH      , / BANK + TURN");
   tft.setCursor(12, CONTENT_Y + 116); tft.print(skyImuControlEnabled ? "W/A THROTTLE  Q GEAR  V VIEW  Z REZERO" : "W/A THROTTLE  Q GEAR  V VIEW");
   tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 134); tft.print("Controls hold their angle on release.");
-  tft.setCursor(12, CONTENT_Y + 146); tft.print("MED or HIGH throttle needed to take off.");
+  tft.setCursor(12, CONTENT_Y + 146); tft.print("MED/HIGH throttle to take off. ` PAUSES.");
   footer(";/. SELECT  ENTER START  M SOUND  P PLANE  I TILT  FN GAMES");
 }
 
@@ -3905,6 +3910,16 @@ void skyEngineToneUpdate(bool grounded, bool stalling) {
   if (volumeLevel) M5Cardputer.Speaker.tone(skyEngineSmoothedFreq, UINT32_MAX, 3, true);
 }
 void skyEngineToneStop() { M5Cardputer.Speaker.stop(3); skyEngineSmoothedFreq = 0; }
+
+void skyDrawPausedOverlay() {
+  int w = kartCanvas.width(), h = kartCanvas.height();
+  kartCanvas.fillRect(w / 2 - 74, h / 2 - 24, 148, 48, ILI9341_BLACK);
+  kartCanvas.drawRect(w / 2 - 74, h / 2 - 24, 148, 48, ILI9341_WHITE);
+  kartCanvas.setTextSize(2); kartCanvas.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+  kartCanvas.setCursor(w / 2 - 48, h / 2 - 18); kartCanvas.print("PAUSED");
+  kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_LIGHTGREY, ILI9341_BLACK);
+  kartCanvas.setCursor(w / 2 - 60, h / 2 + 6); kartCanvas.print("` RESUME   H EXIT");
+}
 
 // Continuous per-frame flight loop - called unconditionally every loop()
 // iteration (like stepKartRace()), but only actually does anything mid-flight;
@@ -3931,10 +3946,21 @@ void stepSkyPilotFlight() {
   if (dt < 0) dt = 0;
   if (rawDt > 0.001f) { float fps = 1.0f / rawDt; skyFpsSmoothed += (fps - skyFpsSmoothed) * 0.15f; }
 
-  static bool prevH = false, prevQ = false, prevV = false, prevZ = false;
+  static bool prevH = false, prevQ = false, prevV = false, prevZ = false, prevTilde = false;
   bool nowH = M5Cardputer.Keyboard.isKeyPressed('h');
   bool edgeH = nowH && !prevH; prevH = nowH;
-  if (edgeH) { skyEngineToneStop(); skyState = SKY_HOME; redrawNeeded = true; return; }
+  if (edgeH) { skyEngineToneStop(); skyState = SKY_HOME; skyPaused = false; redrawNeeded = true; return; }
+  bool nowTilde = M5Cardputer.Keyboard.isKeyPressed('`');
+  bool edgeTilde = nowTilde && !prevTilde; prevTilde = nowTilde;
+  if (edgeTilde) { skyPaused = !skyPaused; playFunctionSound(); if (skyPaused) skyEngineToneStop(); }
+  if (skyPaused) {
+    // Frozen on purpose: redraw only the pause banner over whatever the
+    // canvas already holds from the last real frame, rather than
+    // re-rendering the scene or advancing dt, so nothing moves at all.
+    skyDrawPausedOverlay();
+    tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+    return;
+  }
   bool nowQ = M5Cardputer.Keyboard.isKeyPressed('q');
   bool edgeQ = nowQ && !prevQ; prevQ = nowQ;
   if (edgeQ) { skyGearDown = !skyGearDown; playFunctionSound(); }
@@ -6908,7 +6934,7 @@ void keyboard() {
   // running and must never leak a Fn press through to it.
   if (fn && !fnLast) {
     if (quickMenuOpen) { quickMenuOpen = false; playExitSound(); closeQuickMenuAnimated(); forceFullRedraw = true; redrawNeeded = true; }
-    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyEngineToneStop(); } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
+    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyEngineToneStop(); skyPaused = false; } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
   // Opt toggles the same floating quick-launch overlay from any page, any
