@@ -3287,9 +3287,18 @@ SkyPilotState skyState = SKY_HOME;
 enum SkyPilotMode { SKY_MODE_FREEROAM, SKY_MODE_AIRPORT };
 SkyPilotMode skyMode = SKY_MODE_FREEROAM;
 // HOME menu selection: 0=free roam/runway start, 1=free roam/airborne start,
-// 2=airport to airport. Kept selected across a RESULTS "fly again" too.
-constexpr int SKY_MODE_OPTION_COUNT = 3;
+// 2=airport to airport, 3=spectate (just watch the AI bots fly, no piloting).
+// Kept selected across a RESULTS "fly again" too.
+constexpr int SKY_MODE_OPTION_COUNT = 4;
 int skyModeSelected = 0;
+// Spectate: the player's own plane is never controlled or rendered - the
+// camera instead chase-follows one of the AI bots (skyWatchIndex, cycled
+// with ,/ in flight). skyPlane's pos/heading/pitch/bank/speed are copied
+// from the watched bot each frame purely so the existing camera-follow,
+// HUD and minimap code (all written against skyPlane) work unchanged.
+bool skySpectating = false;
+int skyWatchIndex = 0;
+int skyPreSpectateModelIndex = 0;  // skyPlaneModelIndex gets overwritten every frame in spectate (see stepSkyPilotFlight) - restored on exit
 // The HOME screen is a 3-stage wizard: MODE -> PLANE (with a live 3D preview
 // of the pick) -> OPTIONS (toggles, plus a START FLIGHT row) -> flight.
 // ENTER advances a stage; FN backs up one (see the GAMEHUB Fn-handler
@@ -3729,6 +3738,10 @@ void skyUpdateBots(float dt) {
 void skyDrawBots(const KartCam& cam) {
   if (!skyAiBotsEnabled) return;
   for (int i = 0; i < SKY_BOT_COUNT; i++) {
+    // In spectate mode the watched bot is already drawn as "the player"
+    // (skyRenderScene's own model call, using skyPlane synced from it each
+    // frame) - drawing it again here would just overlap it with itself.
+    if (skySpectating && i == skyWatchIndex) continue;
     const SkyBot& b = skyBots[i];
     KVec3 fwd{cosf(b.pitch) * sinf(b.heading), sinf(b.pitch), cosf(b.pitch) * cosf(b.heading)};
     KVec3 rel = b.pos - cam.position;
@@ -3843,10 +3856,18 @@ void skyRenderHud(bool stalling, bool pullUp) {
   int hudY = kartCanvas.height() - SKY_HUD_H;
   kartCanvas.fillRect(0, 0, kartCanvas.width() - 58, 22, ILI9341_BLACK);
   kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
-  char buf[48]; snprintf(buf, sizeof(buf), "DIST %d  BEST %d", (int)skyScore, skyBestScore);
+  char buf[48];
+  if (skySpectating) snprintf(buf, sizeof(buf), "SPECTATING");
+  else snprintf(buf, sizeof(buf), "DIST %d  BEST %d", (int)skyScore, skyBestScore);
   kartCanvas.setCursor(3, 2); kartCanvas.print(buf);
-  kartCanvas.setTextColor(skyGearDown ? ILI9341_GREEN : ILI9341_ORANGE, ILI9341_BLACK);
-  kartCanvas.setCursor(3, 12); kartCanvas.print(skyGearDown ? "GEAR DOWN" : "GEAR UP");
+  if (skySpectating) {
+    kartCanvas.setTextColor(ILI9341_GREEN, ILI9341_BLACK);
+    char watchBuf[24]; snprintf(watchBuf, sizeof(watchBuf), "WATCHING %d/%d", skyWatchIndex + 1, SKY_BOT_COUNT);
+    kartCanvas.setCursor(3, 12); kartCanvas.print(watchBuf);
+  } else {
+    kartCanvas.setTextColor(skyGearDown ? ILI9341_GREEN : ILI9341_ORANGE, ILI9341_BLACK);
+    kartCanvas.setCursor(3, 12); kartCanvas.print(skyGearDown ? "GEAR DOWN" : "GEAR UP");
+  }
   if (skyMode == SKY_MODE_AIRPORT && skyTargetAirport >= 0) {
     kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
     kartCanvas.setCursor(72, 12); kartCanvas.print(String("-> ") + skyAirports[skyTargetAirport].name);
@@ -3874,7 +3895,8 @@ void skyRenderHud(bool stalling, bool pullUp) {
 
   float clearance = skyPlane.pos.y - skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
   kartCanvas.setTextColor(ILI9341_ORANGE, ILI9341_BLACK);
-  kartCanvas.setCursor(4, hudY + 3); kartCanvas.print(skyThrottleNames[skyThrottleLevel]);
+  kartCanvas.setCursor(4, hudY + 3);
+  kartCanvas.print(skySpectating ? skyPlaneModels[skyPlaneModelIndex].name : skyThrottleNames[skyThrottleLevel]);
   kartCanvas.setTextColor(clearance < 8.0f ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
   snprintf(buf, sizeof(buf), "%3d", (int)skyPlane.speed); kartCanvas.setCursor(4, hudY + 15); kartCanvas.print(buf);
 
@@ -3937,8 +3959,26 @@ void startSkyPilotFlight(int modeSelected) {
   skyMissionSuccess = false;
   skyHasClearedGround = false;
   skyPaused = false;
+  skySpectating = (modeSelected == 3);
+  skyWatchIndex = 0;
 
-  if (modeSelected == 2) {
+  if (skySpectating) {
+    // Player state barely matters here (never controlled or rendered) - just
+    // needs to be sane for the moment before the spectate branch in
+    // stepSkyPilotFlight() starts overwriting it from the watched bot every
+    // frame. Bots are forced on since this mode has nothing to show without
+    // them, regardless of the OPTIONS toggle.
+    skyPreSpectateModelIndex = skyPlaneModelIndex;
+    skyAiBotsEnabled = true;
+    skyMode = SKY_MODE_FREEROAM;
+    skyTargetAirport = -1;
+    skyGrounded = false;
+    skyHasClearedGround = true;
+    skyGearDown = false;
+    skyPlane.pos = {0, 45, 0};
+    skyPlane.heading = 0;
+    skyPlane.speed = 20.0f;
+  } else if (modeSelected == 2) {
     skyMode = SKY_MODE_AIRPORT;
     skyStartAirport = random(0, SKY_AIRPORT_COUNT);
     do { skyTargetAirport = random(0, SKY_AIRPORT_COUNT); } while (skyTargetAirport == skyStartAirport);
@@ -4040,7 +4080,7 @@ void stepSkyPilotHubPreview() {
 
 void drawSkyPilotHubMode() {
   tft.fillScreen(ui.bg); header("GAMES / SKY PILOT / MODE (1 OF 3)");
-  static const char* modes[SKY_MODE_OPTION_COUNT] = {"FREE ROAM - RUNWAY START", "FREE ROAM - AIRBORNE START", "AIRPORT TO AIRPORT"};
+  static const char* modes[SKY_MODE_OPTION_COUNT] = {"FREE ROAM - RUNWAY START", "FREE ROAM - AIRBORNE START", "AIRPORT TO AIRPORT", "SPECTATE - WATCH BOTS"};
   tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 6); tft.print("BEST DISTANCE  " + String(skyBestScore));
   for (int i = 0; i < SKY_MODE_OPTION_COUNT; ++i) {
     int y = CONTENT_Y + 32 + i * 24; bool sel = i == skyModeSelected; uint16_t bg = sel ? ui.selected : ui.bg;
@@ -4160,7 +4200,7 @@ void stepSkyPilotFlight() {
   static bool prevH = false, prevQ = false, prevV = false, prevZ = false, prevTilde = false;
   bool nowH = M5Cardputer.Keyboard.isKeyPressed('h');
   bool edgeH = nowH && !prevH; prevH = nowH;
-  if (edgeH) { skyEngineToneStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyPaused = false; redrawNeeded = true; return; }
+  if (edgeH) { skyEngineToneStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyPaused = false; if (skySpectating) skyPlaneModelIndex = skyPreSpectateModelIndex; redrawNeeded = true; return; }
   bool nowTilde = M5Cardputer.Keyboard.isKeyPressed('`');
   bool edgeTilde = nowTilde && !prevTilde; prevTilde = nowTilde;
   if (edgeTilde) { skyPaused = !skyPaused; playFunctionSound(); if (skyPaused) skyEngineToneStop(); }
@@ -4181,6 +4221,52 @@ void stepSkyPilotFlight() {
   bool nowZ = M5Cardputer.Keyboard.isKeyPressed('z');
   bool edgeZ = nowZ && !prevZ; prevZ = nowZ;
   if (edgeZ && skyImuControlEnabled) { skyReadImuTilt(skyImuPitchZero, skyImuBankZero); playFunctionSound(); }
+
+  // Spectate: no piloting at all - just cycle which bot to watch, update the
+  // bots, copy the watched bot's state into skyPlane (so the normal
+  // camera-follow/render/HUD code below, all written against skyPlane, works
+  // unchanged), then render and return before any of the player's own
+  // throttle/pitch/bank/physics/landing logic runs.
+  if (skySpectating) {
+    static bool prevComma = false, prevSlash = false;
+    bool nowComma = M5Cardputer.Keyboard.isKeyPressed(',');
+    bool nowSlash = M5Cardputer.Keyboard.isKeyPressed('/');
+    if (nowComma && !prevComma) { skyWatchIndex = (skyWatchIndex + SKY_BOT_COUNT - 1) % SKY_BOT_COUNT; playFunctionSound(); }
+    else if (nowSlash && !prevSlash) { skyWatchIndex = (skyWatchIndex + 1) % SKY_BOT_COUNT; playFunctionSound(); }
+    prevComma = nowComma; prevSlash = nowSlash;
+
+    skyUpdateBots(dt);
+    const SkyBot& watched = skyBots[skyWatchIndex];
+    skyPlane.pos = watched.pos;
+    skyPlane.heading = watched.heading;
+    skyPlane.pitch = watched.pitch;
+    skyPlane.bank = watched.bank;
+    skyPlane.speed = watched.speed;
+    skyPlaneModelIndex = watched.modelIndex;
+    KVec3 fwd{cosf(skyPlane.pitch) * sinf(skyPlane.heading), sinf(skyPlane.pitch), cosf(skyPlane.pitch) * cosf(skyPlane.heading)};
+
+    KartCam cam;
+    if (skyFirstPerson) {
+      KVec3 worldUp{0, 1, 0};
+      KVec3 rightLevel = knormalized(kcross(fwd, worldUp));
+      KVec3 upLevel = kcross(rightLevel, fwd);
+      cam.right = rightLevel * cosf(skyPlane.bank) - upLevel * sinf(skyPlane.bank);
+      cam.up = upLevel * cosf(skyPlane.bank) + rightLevel * sinf(skyPlane.bank);
+      cam.position = skyPlane.pos + fwd * 0.6f + cam.up * 0.35f;
+      cam.forward = fwd;
+      cam.fovY = 75.0f;
+    } else {
+      cam.position = skyPlane.pos - fwd * 6.0f + KVec3{0, 2.2f, 0};
+      cam.forward = knormalized((skyPlane.pos + fwd * 8.0f) - cam.position);
+      cam.right = knormalized(kcross(cam.forward, KVec3{0, 1, 0}));
+      cam.up = kcross(cam.right, cam.forward);
+      cam.fovY = 68.0f;
+    }
+    skyRenderScene(cam, fwd, skyFirstPerson);
+    skyRenderHud(false, false);
+    tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+    return;
+  }
 
   // Pitch/bank input is a continuous [-1,1] signal either way - from the
   // keyboard's discrete -1/0/1, or from how far the device is tilted off
@@ -7517,7 +7603,7 @@ void keyboard() {
   if (fn && !fnLast) {
     if (quickMenuOpen) { quickMenuOpen = false; playExitSound(); closeQuickMenuAnimated(); forceFullRedraw = true; redrawNeeded = true; }
     else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode == 8 && skyState == SKY_HOME && skyHubStage != SkyHubStage::MODE) { skyHubStage = skyHubStage == SkyHubStage::OPTIONS ? SkyHubStage::PLANE : SkyHubStage::MODE; }
-    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyPaused = false; } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
+    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
   // Opt toggles the same floating quick-launch overlay from any page, any
