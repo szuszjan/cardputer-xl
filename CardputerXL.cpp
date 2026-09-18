@@ -5390,7 +5390,13 @@ MiniCamParseState miniCamParseState = MiniCamParseState::SYNC1;
 uint8_t miniCamFrameType;
 uint16_t miniCamFrameLen, miniCamFrameIdx;
 uint8_t miniCamFrameChecksum;
-uint8_t miniCamFrameBuf[MINICAM_PREVIEW_WIRE_W * MINICAM_PREVIEW_LAND_H * 2];  // big enough for the largest frame (preview)
+// The rotation swaps dimensions, so the wire buffer's HEIGHT equals the
+// LAND WIDTH (80), not the land height (60, that's the wire WIDTH's
+// counterpart) - this previously used LAND_H here, undersizing the buffer
+// (7200 bytes instead of the needed 9600) so every real preview frame's
+// length overflowed the parser's own size guard below and got silently
+// resynced away as if corrupt, forever, no matter how good the link was.
+uint8_t miniCamFrameBuf[MINICAM_PREVIEW_WIRE_W * MINICAM_PREVIEW_LAND_W * 2];  // big enough for the largest frame (preview)
 
 // Undoes the CamS3's rotate270CW(): wireW is the received buffer's own width
 // (its height is landW); landW/landH are the desired original, pre-rotation
@@ -5438,7 +5444,7 @@ void miniCamMaintainConnection() {
 }
 
 void miniCamHandleFrame(uint8_t type, const uint8_t* payload, uint16_t len) {
-  if (type == MINICAM_FRAME_PREVIEW && len == MINICAM_PREVIEW_WIRE_W * MINICAM_PREVIEW_LAND_H * 2) {
+  if (type == MINICAM_FRAME_PREVIEW && len == MINICAM_PREVIEW_WIRE_W * MINICAM_PREVIEW_LAND_W * 2) {
     miniCamUnrotate270(payload, MINICAM_PREVIEW_WIRE_W, MINICAM_PREVIEW_LAND_W, MINICAM_PREVIEW_LAND_H, miniCamPreviewLandscape);
     miniCamLastPreviewMs = millis();
     if (miniCamUiMode == MiniCamUiMode::LIVE) miniCamNeedsRedraw = true;
@@ -5455,7 +5461,7 @@ void miniCamHandleFrame(uint8_t type, const uint8_t* payload, uint16_t len) {
   } else if (type == MINICAM_FRAME_STATUS) {
     uint16_t n = min((size_t)len, sizeof(miniCamStatusMsg) - 1);
     memcpy(miniCamStatusMsg, payload, n); miniCamStatusMsg[n] = '\0';
-  } else if (type == MINICAM_FRAME_THUMB && len == 2 + MINICAM_THUMB_WIRE_W * MINICAM_THUMB_LAND_H * 2) {
+  } else if (type == MINICAM_FRAME_THUMB && len == 2 + MINICAM_THUMB_WIRE_W * MINICAM_THUMB_LAND_W * 2) {
     uint16_t num = payload[0] | (payload[1] << 8);
     if (miniCamPendingFetchSlot >= 0 && num == miniCamPendingFetchPhotoNumber) {
       miniCamUnrotate270(payload + 2, MINICAM_THUMB_WIRE_W, MINICAM_THUMB_LAND_W, MINICAM_THUMB_LAND_H, miniCamGalleryThumbs[miniCamPendingFetchSlot]);
