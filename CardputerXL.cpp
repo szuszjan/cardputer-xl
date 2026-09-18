@@ -3793,8 +3793,12 @@ void skyDrawSonicBoomEffect() {
 void skyReadImuTilt(float& pitchAngle, float& bankAngle) {
   M5.Imu.update();
   auto imu = M5.Imu.getImuData();
-  bankAngle = atan2f(imu.accel.y, imu.accel.z);
-  pitchAngle = atan2f(-imu.accel.x, sqrtf(imu.accel.y * imu.accel.y + imu.accel.z * imu.accel.z));
+  // Swapped from the first-pass guess: left/right tilt was coming out as
+  // pitch (up/down) instead of bank, meaning this chip's mounting has X and
+  // Y trading places relative to the initial assumption - X now drives
+  // bank, Y now drives pitch.
+  bankAngle = atan2f(imu.accel.x, imu.accel.z);
+  pitchAngle = atan2f(-imu.accel.y, sqrtf(imu.accel.x * imu.accel.x + imu.accel.z * imu.accel.z));
 }
 
 // modeSelected: 0=free roam from a runway, 1=free roam launched airborne,
