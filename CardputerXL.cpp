@@ -3220,38 +3220,32 @@ void stepKartRace() {
 // have to spare (see the heap-exhaustion comments elsewhere in this file
 // around the Triki graph buffers and NimBLE's lazy init).
 //
-// Fly through a winding chain of rings for score; touching the ground ends
-// the flight. The chase camera deliberately never rolls with the plane -
-// only the plane model itself banks - so the horizon always stays legible on
-// a panel this small, at the cost of not visually "feeling" the bank as
-// strongly as a rolling camera would.
+// Open-world flight over procedural terrain - no bounded track or checkpoint
+// corridor, just a heightfield generated on the fly from world position (see
+// skyTerrainHeight()), so there is nothing to run out of no matter how far
+// the plane travels. Flying into the terrain ends the flight; score is
+// distance flown. Pitch/bank are rate-controlled and HOLD wherever released
+// (a real control surface doesn't self-level), unlike Kart Racer's steering.
+// The chase camera deliberately never rolls with the plane - only the plane
+// model itself banks - so the horizon/instruments stay legible on a panel
+// this small, at the cost of not visually "feeling" the bank as strongly as
+// a rolling camera would.
 // ============================================================================
 enum SkyPilotState { SKY_HOME, SKY_FLYING, SKY_RESULTS };
 SkyPilotState skyState = SKY_HOME;
 
 struct SkyPlane {
-  KVec3 pos{0, 30, 0};
+  KVec3 pos{0, 40, 0};
   float heading = 0, pitch = 0, bank = 0;
   float speed = 20.0f;
   static constexpr float MIN_SPEED = 10.0f, MAX_SPEED = 34.0f;
 };
 SkyPlane skyPlane;
 
-// A ring is stored as an angle pair (like the plane itself) rather than a
-// baked forward vector, so the same heading/pitch math generates both the
-// plane's and the rings' headings consistently.
-struct SkyRing { KVec3 center; float heading, pitch; };
-constexpr int SKY_RING_COUNT = 5;
-constexpr float SKY_RING_RADIUS = 6.5f;
-constexpr float SKY_SEGMENT_LEN = 42.0f;
-constexpr float SKY_MIN_ALT = 12.0f, SKY_MAX_ALT = 65.0f;
-SkyRing skyRings[SKY_RING_COUNT];
-
-int skyScore = 0, skyBestScore = 0;
+float skyScore = 0;      // distance flown this flight, in world units
+int skyBestScore = 0;
 unsigned long skyLastFrameMs = 0;
 bool skyLoadedBest = false;
-
-inline KVec3 skyRingForward(const SkyRing& r) { return {cosf(r.pitch) * sinf(r.heading), sinf(r.pitch), cosf(r.pitch) * cosf(r.heading)}; }
 
 void skyLoadBest() {
   if (skyLoadedBest) return;
@@ -3262,98 +3256,165 @@ void skyLoadBest() {
 }
 void skySaveBest() { preferences.begin("skypilot", false); preferences.putInt("best", skyBestScore); preferences.end(); }
 
-// Builds ring[i] a fixed distance ahead of ring[i-1] (or the plane's current
-// pose for i==0), with a small random turn/climb - a winding corridor the
-// plane must keep steering into, not a straight line of hoops.
-void skyGenerateRing(int i) {
-  KVec3 prevCenter; float prevHeading, prevPitch;
-  if (i == 0) { prevCenter = skyPlane.pos; prevHeading = skyPlane.heading; prevPitch = 0; }
-  else { prevCenter = skyRings[i - 1].center; prevHeading = skyRings[i - 1].heading; prevPitch = skyRings[i - 1].pitch; }
-  float turn = ((random(0, 201) - 100) / 100.0f) * 0.4f;
-  float climb = ((random(0, 201) - 100) / 100.0f) * 0.22f;
-  float heading = prevHeading + turn;
-  float pitch = constrain(prevPitch + climb, -0.4f, 0.4f);
-  KVec3 fwd = {cosf(pitch) * sinf(heading), sinf(pitch), cosf(pitch) * cosf(heading)};
-  KVec3 center = prevCenter + fwd * SKY_SEGMENT_LEN;
-  center.y = constrain(center.y, SKY_MIN_ALT, SKY_MAX_ALT);
-  skyRings[i] = {center, heading, pitch};
+// A handful of stacked sine waves, evaluated directly from world (x,z) with
+// no stored heightmap - an "infinite" terrain that needs no generation step
+// and never runs out, matching the open-world request. Not real noise (no
+// hash/table), just enough layered frequencies to read as rolling hills
+// rather than a single smooth wave.
+float skyTerrainHeight(float x, float z) {
+  float h = 9.0f;
+  h += 11.0f * sinf(x * 0.014f + 1.7f) * cosf(z * 0.011f + 0.4f);
+  h += 6.0f * sinf(x * 0.037f + 0.6f) * sinf(z * 0.041f + 2.6f);
+  h += 3.0f * cosf(x * 0.09f + 3.0f) * cosf(z * 0.085f + 1.1f);
+  return h;
 }
-
-void skyDrawRing(const KartCam& cam, const SkyRing& r, uint16_t col) {
-  KVec3 fwd = skyRingForward(r);
-  KVec3 axis = fabsf(fwd.y) > 0.98f ? KVec3{1, 0, 0} : KVec3{0, 1, 0};
-  KVec3 right = knormalized(kcross(fwd, axis));
-  KVec3 up = kcross(right, fwd);
-  const int SIDES = 10;
-  KVec3 pts[SIDES];
-  for (int i = 0; i < SIDES; ++i) {
-    float a = (2 * KART_PI * i) / SIDES;
-    pts[i] = r.center + right * (cosf(a) * SKY_RING_RADIUS) + up * (sinf(a) * SKY_RING_RADIUS);
-  }
-  for (int i = 0; i < SIDES; ++i) kartDrawSeg(cam, pts[i], pts[(i + 1) % SIDES], col);
-}
-// Concentric range rings + radial spokes on the y=0 plane under the plane's
-// XZ position - a cheap, bounded ground reference instead of tiling terrain.
-void skyDrawGroundGrid(const KartCam& cam) {
-  KVec3 groundCenter{skyPlane.pos.x, 0, skyPlane.pos.z};
-  const int RINGS = 4, SPOKES = 16;
-  for (int ring = 1; ring <= RINGS; ++ring) {
-    float radius = ring * 22.0f;
-    KVec3 prev{};
-    for (int i = 0; i <= SPOKES; ++i) {
-      float a = (2 * KART_PI * i) / SPOKES;
-      KVec3 p = groundCenter + KVec3{cosf(a) * radius, 0, sinf(a) * radius};
-      if (i > 0) kartDrawSeg(cam, prev, p, ILI9341_DARKGREEN);
-      prev = p;
+// A wireframe mesh grid, resampled fresh each frame centered under the
+// plane's ground track - cheap (pure sine evaluation, no storage) and
+// unbounded, instead of a fixed generated track like Kart Racer's.
+void skyDrawTerrain(const KartCam& cam) {
+  constexpr int GRID = 10;
+  constexpr float STEP = 14.0f;
+  static KVec3 pts[GRID + 1][GRID + 1];
+  float baseX = skyPlane.pos.x - (GRID / 2) * STEP;
+  float baseZ = skyPlane.pos.z - (GRID / 2) * STEP;
+  for (int j = 0; j <= GRID; ++j) {
+    for (int i = 0; i <= GRID; ++i) {
+      float x = baseX + i * STEP, z = baseZ + j * STEP;
+      pts[j][i] = {x, skyTerrainHeight(x, z), z};
     }
   }
-  for (int i = 0; i < SPOKES; ++i) {
-    float a = (2 * KART_PI * i) / SPOKES;
-    KVec3 p = groundCenter + KVec3{cosf(a) * (RINGS * 22.0f), 0, sinf(a) * (RINGS * 22.0f)};
-    kartDrawSeg(cam, groundCenter, p, ILI9341_DARKGREEN);
-  }
+  for (int j = 0; j <= GRID; ++j) for (int i = 0; i < GRID; ++i) kartDrawSeg(cam, pts[j][i], pts[j][i + 1], ILI9341_OLIVE);
+  for (int i = 0; i <= GRID; ++i) for (int j = 0; j < GRID; ++j) kartDrawSeg(cam, pts[j][i], pts[j + 1][i], ILI9341_OLIVE);
 }
 // Drawn using the plane's BANKED right/up (unlike the upright chase camera),
-// so the wings visibly tilt even though the camera itself never rolls.
+// so the wings visibly tilt even though the camera itself never rolls. A
+// fuller silhouette than a few crossed lines: a diamond fuselage with a
+// canopy hint, swept/dihedral wings, a tailplane, and a triangular fin.
 void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd) {
   KVec3 worldUp{0, 1, 0};
   KVec3 rightLevel = knormalized(kcross(fwd, worldUp));
   KVec3 upLevel = kcross(rightLevel, fwd);
   KVec3 right = rightLevel * cosf(skyPlane.bank) + upLevel * sinf(skyPlane.bank);
   KVec3 up = upLevel * cosf(skyPlane.bank) - rightLevel * sinf(skyPlane.bank);
-  const float noseLen = 1.4f, tailLen = 1.6f, wingSpan = 2.4f, tailSpan = 1.0f, finHeight = 0.7f;
-  KVec3 nose = skyPlane.pos + fwd * noseLen, tail = skyPlane.pos - fwd * tailLen;
-  KVec3 wingL = skyPlane.pos - right * wingSpan, wingR = skyPlane.pos + right * wingSpan;
-  KVec3 tailL = tail - right * tailSpan, tailR = tail + right * tailSpan;
-  KVec3 finTop = tail + up * finHeight;
-  kartDrawSeg(cam, nose, tail, ILI9341_WHITE);
-  kartDrawSeg(cam, nose, wingL, ILI9341_WHITE); kartDrawSeg(cam, nose, wingR, ILI9341_WHITE);
-  kartDrawSeg(cam, wingL, tail, ILI9341_WHITE); kartDrawSeg(cam, wingR, tail, ILI9341_WHITE);
-  kartDrawSeg(cam, tailL, tailR, ILI9341_LIGHTGREY);
-  kartDrawSeg(cam, tail, finTop, ILI9341_RED);
+  const KVec3& pos = skyPlane.pos;
+  const float noseLen = 2.0f, tailLen = 2.4f, bodyHalfWidth = 0.28f;
+  const float wingSpan = 3.0f, wingSweep = 0.6f, wingChord = 0.9f, dihedral = 0.14f;
+  const float tailSpan = 1.1f, finHeight = 0.9f, finSweep = 0.5f;
+
+  KVec3 nose = pos + fwd * noseLen, tail = pos - fwd * tailLen;
+  KVec3 bodyL = pos - right * bodyHalfWidth, bodyR = pos + right * bodyHalfWidth;
+  KVec3 canopy = pos + fwd * (noseLen * 0.35f) + up * 0.22f;
+
+  KVec3 wingTipL = pos - right * wingSpan - fwd * wingSweep + up * (dihedral * wingSpan);
+  KVec3 wingTipR = pos + right * wingSpan - fwd * wingSweep + up * (dihedral * wingSpan);
+  KVec3 wingBackL = pos - right * bodyHalfWidth - fwd * wingChord;
+  KVec3 wingBackR = pos + right * bodyHalfWidth - fwd * wingChord;
+
+  KVec3 tailplaneRootL = tail - right * bodyHalfWidth * 0.8f, tailplaneRootR = tail + right * bodyHalfWidth * 0.8f;
+  KVec3 tailplaneTipL = tail - right * tailSpan - fwd * 0.15f, tailplaneTipR = tail + right * tailSpan - fwd * 0.15f;
+  KVec3 finTop = tail + up * finHeight - fwd * finSweep * 0.3f, finBack = tail - fwd * finSweep + up * (finHeight * 0.35f);
+
+  kartDrawSeg(cam, nose, bodyL, ILI9341_WHITE); kartDrawSeg(cam, nose, bodyR, ILI9341_WHITE);
+  kartDrawSeg(cam, bodyL, tail, ILI9341_WHITE); kartDrawSeg(cam, bodyR, tail, ILI9341_WHITE);
+  kartDrawSeg(cam, nose, canopy, ILI9341_LIGHTGREY); kartDrawSeg(cam, canopy, bodyL, ILI9341_LIGHTGREY); kartDrawSeg(cam, canopy, bodyR, ILI9341_LIGHTGREY);
+
+  kartDrawSeg(cam, bodyL, wingTipL, ILI9341_WHITE); kartDrawSeg(cam, bodyR, wingTipR, ILI9341_WHITE);
+  kartDrawSeg(cam, wingTipL, wingBackL, ILI9341_WHITE); kartDrawSeg(cam, wingTipR, wingBackR, ILI9341_WHITE);
+  kartDrawSeg(cam, wingBackL, bodyL, ILI9341_WHITE); kartDrawSeg(cam, wingBackR, bodyR, ILI9341_WHITE);
+
+  kartDrawSeg(cam, tailplaneRootL, tailplaneTipL, ILI9341_LIGHTGREY); kartDrawSeg(cam, tailplaneRootR, tailplaneTipR, ILI9341_LIGHTGREY);
+  kartDrawSeg(cam, tailplaneRootL, tailplaneRootR, ILI9341_LIGHTGREY);
+
+  kartDrawSeg(cam, tail, finTop, ILI9341_RED); kartDrawSeg(cam, finTop, finBack, ILI9341_RED); kartDrawSeg(cam, finBack, tail, ILI9341_RED);
 }
 void skyRenderScene(const KartCam& cam, const KVec3& fwd) {
   kartCanvas.fillScreen(ILI9341_BLACK);
   kartDrawSky(cam);
-  skyDrawGroundGrid(cam);
-  for (int i = SKY_RING_COUNT - 1; i >= 0; --i) skyDrawRing(cam, skyRings[i], i == 0 ? ILI9341_YELLOW : ILI9341_CYAN);
+  skyDrawTerrain(cam);
   skyDrawPlaneModel(cam, fwd);
 }
-void skyRenderHud() {
-  kartCanvas.fillRect(0, 0, 140, 46, ILI9341_BLACK);
+// Bottom instrument strip: a rotating/tilting attitude indicator (per-column
+// fill against the tilted horizon line - cheap way to get a properly clipped
+// gauge without true polygon clipping on hardware this small) plus a
+// compass tape, speed and altitude.
+constexpr int SKY_HUD_H = 34;
+void skyDrawAttitudeIndicator(int cx, int cy, int size) {
+  int half = size / 2, x0 = cx - half, y0 = cy - half;
+  // Vertical pixel offset of the horizon at bank=0, scaled so a generous
+  // pitch angle reaches near the gauge edge.
+  float pitchPx = constrain(skyPlane.pitch / 1.4f, -1.0f, 1.0f) * (half * 0.85f);
+  float cosB = cosf(skyPlane.bank), sinB = sinf(skyPlane.bank);
+  // GFXcanvas16 has no color565() helper (only full display drivers do), so
+  // these RGB565 sky-blue/ground-brown values are precomputed by hand.
+  const uint16_t sky = 0x441B, ground = 0x7A85;
+  for (int col = 0; col <= size; ++col) {
+    int x = x0 + col;
+    float lineY;
+    if (fabsf(cosB) < 0.05f) lineY = cy;  // banked ~90 deg: fall back to level, an edge case
+    else lineY = (cy + pitchPx) + (x - cx) * (sinB / cosB);
+    int split = (int)constrain(lineY, (float)y0, (float)(y0 + size));
+    kartCanvas.drawFastVLine(x, y0, split - y0, sky);
+    kartCanvas.drawFastVLine(x, split, (y0 + size) - split, ground);
+  }
+  // Fixed aircraft reference (never rotates) - bank/pitch read as the
+  // horizon moving against this, exactly like a real attitude indicator.
+  kartCanvas.drawFastHLine(cx - half + 2, cy, half - 4, ILI9341_YELLOW);
+  kartCanvas.drawFastHLine(cx + 4, cy, half - 4, ILI9341_YELLOW);
+  kartCanvas.drawRect(x0, y0, size, size, ILI9341_LIGHTGREY);
+}
+void skyDrawCompass(int x0, int y0, int w, int h) {
+  kartCanvas.fillRect(x0, y0, w, h, ILI9341_BLACK);
+  kartCanvas.drawRect(x0, y0, w, h, ILI9341_LIGHTGREY);
+  // Standard compass sense (turning right increases the number), which is
+  // the opposite of this game's internal heading convention - see the
+  // comment on TURN_RATE_PER_BANK in stepSkyPilotFlight().
+  float headingDeg = fmodf(-skyPlane.heading * (180.0f / KART_PI) + 3600.0f, 360.0f);
+  const float degPerPixel = 2.2f;
+  int cx = x0 + w / 2;
+  static const struct { float deg; const char* label; } marks[] = {{0, "N"}, {45, "NE"}, {90, "E"}, {135, "SE"}, {180, "S"}, {225, "SW"}, {270, "W"}, {315, "NW"}};
   kartCanvas.setTextSize(1);
-  char buf[40]; int y = 3;
-  auto line = [&](const char* s, uint16_t col) { kartCanvas.setTextColor(col, ILI9341_BLACK); kartCanvas.setCursor(3, y); kartCanvas.print(s); y += 11; };
-  snprintf(buf, sizeof(buf), "SCORE %d  BEST %d", skyScore, skyBestScore); line(buf, ILI9341_CYAN);
-  snprintf(buf, sizeof(buf), "ALT %d  SPD %d", (int)skyPlane.pos.y, (int)skyPlane.speed); line(buf, ILI9341_WHITE);
-  if (skyPlane.pos.y < 8.0f) line("LOW ALTITUDE!", ILI9341_RED);
+  for (auto& m : marks) {
+    float rel = m.deg - headingDeg;
+    while (rel > 180) rel -= 360;
+    while (rel < -180) rel += 360;
+    int px = cx + (int)(rel / degPerPixel);
+    if (px < x0 + 2 || px > x0 + w - 10) continue;
+    kartCanvas.drawFastVLine(px, y0 + h - 6, 6, ILI9341_WHITE);
+    kartCanvas.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+    kartCanvas.setCursor(px - 3, y0 + 11);
+    kartCanvas.print(m.label);
+  }
+  kartCanvas.fillTriangle(cx - 3, y0 + 1, cx + 3, y0 + 1, cx, y0 + 6, ILI9341_YELLOW);
+  char buf[5]; snprintf(buf, sizeof(buf), "%03d", (int)headingDeg);
+  kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK); kartCanvas.setCursor(cx - 9, y0 + h - 9); kartCanvas.print(buf);
+}
+void skyRenderHud() {
+  int hudY = kartCanvas.height() - SKY_HUD_H;
+  kartCanvas.fillRect(0, 0, 130, 12, ILI9341_BLACK);
+  kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
+  char buf[40]; snprintf(buf, sizeof(buf), "DIST %d  BEST %d", (int)skyScore, skyBestScore);
+  kartCanvas.setCursor(3, 2); kartCanvas.print(buf);
+
+  kartCanvas.fillRect(0, hudY, kartCanvas.width(), SKY_HUD_H, ILI9341_BLACK);
+  kartCanvas.drawFastHLine(0, hudY, kartCanvas.width(), ILI9341_DARKGREY);
+
+  float clearance = skyPlane.pos.y - skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
+  kartCanvas.setTextColor(clearance < 8.0f ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
+  kartCanvas.setCursor(4, hudY + 3); kartCanvas.print("SPD");
+  snprintf(buf, sizeof(buf), "%3d", (int)skyPlane.speed); kartCanvas.setCursor(4, hudY + 15); kartCanvas.print(buf);
+
+  skyDrawAttitudeIndicator(95, hudY + SKY_HUD_H / 2, 30);
+  skyDrawCompass(140, hudY + 2, 100, SKY_HUD_H - 4);
+
+  kartCanvas.setTextColor(clearance < 8.0f ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
+  kartCanvas.setCursor(268, hudY + 3); kartCanvas.print("ALT");
+  snprintf(buf, sizeof(buf), "%4d", (int)skyPlane.pos.y); kartCanvas.setCursor(268, hudY + 15); kartCanvas.print(buf);
 }
 
 void startSkyPilotFlight() {
   skyLoadBest();
   skyPlane = SkyPlane();
-  skyPlane.pos = {0, 30, 0};
-  for (int i = 0; i < SKY_RING_COUNT; ++i) skyGenerateRing(i);
+  skyPlane.pos = {0, 40, 0};
   skyScore = 0;
   skyLastFrameMs = millis();
   skyState = SKY_FLYING;
@@ -3366,16 +3427,18 @@ void drawSkyPilotHub() {
   tft.setTextSize(1);
   if (skyState == SKY_RESULTS) {
     tft.setTextColor(ILI9341_YELLOW, ui.bg); tft.setCursor(12, CONTENT_Y + 10); tft.print("CRASHED");
-    tft.setTextColor(ui.text, ui.bg); tft.setCursor(12, CONTENT_Y + 34); tft.print("RINGS THROUGH  " + String(skyScore));
-    tft.setCursor(12, CONTENT_Y + 52); tft.print("BEST           " + String(skyBestScore));
-    if (skyScore > 0 && skyScore == skyBestScore) { tft.setTextColor(ILI9341_GREEN, ui.bg); tft.setCursor(12, CONTENT_Y + 72); tft.print("NEW BEST!"); }
+    tft.setTextColor(ui.text, ui.bg); tft.setCursor(12, CONTENT_Y + 34); tft.print("DISTANCE  " + String((int)skyScore));
+    tft.setCursor(12, CONTENT_Y + 52); tft.print("BEST      " + String(skyBestScore));
+    if (skyScore > 0 && (int)skyScore == skyBestScore) { tft.setTextColor(ILI9341_GREEN, ui.bg); tft.setCursor(12, CONTENT_Y + 72); tft.print("NEW BEST!"); }
     footer("ENTER FLY AGAIN     FN GAMES");
     return;
   }
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 8); tft.print("FLY THROUGH RINGS - DON'T HIT THE GROUND");
-  tft.setTextColor(ui.text, ui.bg); tft.setCursor(12, CONTENT_Y + 30); tft.print("BEST  " + String(skyBestScore));
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 8); tft.print("OPEN-WORLD FLIGHT - DON'T HIT THE TERRAIN");
+  tft.setTextColor(ui.text, ui.bg); tft.setCursor(12, CONTENT_Y + 30); tft.print("BEST DISTANCE  " + String(skyBestScore));
   tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 60); tft.print("; . PITCH      , / BANK + TURN");
   tft.setCursor(12, CONTENT_Y + 76); tft.print("W THROTTLE UP  A THROTTLE DOWN");
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 96); tft.print("Controls hold their angle - release");
+  tft.setCursor(12, CONTENT_Y + 108); tft.print("to keep the current pitch/bank.");
   footer("ENTER TAKE OFF     FN GAMES");
 }
 
@@ -3407,51 +3470,39 @@ void stepSkyPilotFlight() {
   if (M5Cardputer.Keyboard.isKeyPressed('w')) throttleInput = 1;
   else if (M5Cardputer.Keyboard.isKeyPressed('a')) throttleInput = -1;
 
-  static const float BANK_RATE = 1.9f, BANK_MAX = 0.85f, BANK_RETURN = 1.3f;
-  static const float PITCH_RATE = 1.1f, PITCH_MAX = 0.8f, PITCH_RETURN = 1.0f;
-  static const float TURN_RATE_PER_BANK = 1.35f;
+  // Rate control, not position control: pitch/bank change while a key is
+  // held and simply HOLD wherever they end up on release, like a real
+  // control surface with no auto-level - deliberately no return-to-zero
+  // easing here (an earlier version had one; it read as "arcade car
+  // steering", not flight). Still clamped short of +-90 deg to avoid the
+  // gimbal-lock singularity in the pitch/heading -> forward-vector math
+  // below, not to fake a self-centering feel.
+  static const float BANK_RATE = 1.6f, BANK_MAX = 1.2f;
+  static const float PITCH_RATE = 1.0f, PITCH_MAX = 1.3f;
+  // Turning is coordinated with bank, like a real aircraft (rudder is
+  // implicit) - NOT a separate yaw control. heading -= (not +=) so that a
+  // left bank (negative, from ',') increases heading, which this file's
+  // fwd={sin(heading),...,cos(heading)} convention turns toward the
+  // camera's left - matching Kart Racer's steer sign and fixing a bug
+  // where Sky Pilot originally turned opposite to the bank direction.
+  static const float TURN_RATE_PER_BANK = 1.2f;
   static const float THROTTLE_ACCEL = 9.0f, CRUISE_DECAY = 1.0f;
 
   if (bankInput != 0) skyPlane.bank = constrain(skyPlane.bank + bankInput * BANK_RATE * dt, -BANK_MAX, BANK_MAX);
-  else if (skyPlane.bank > 0) skyPlane.bank = max(0.0f, skyPlane.bank - BANK_RETURN * dt);
-  else if (skyPlane.bank < 0) skyPlane.bank = min(0.0f, skyPlane.bank + BANK_RETURN * dt);
-
   if (pitchInput != 0) skyPlane.pitch = constrain(skyPlane.pitch + pitchInput * PITCH_RATE * dt, -PITCH_MAX, PITCH_MAX);
-  else if (skyPlane.pitch > 0) skyPlane.pitch = max(0.0f, skyPlane.pitch - PITCH_RETURN * dt);
-  else if (skyPlane.pitch < 0) skyPlane.pitch = min(0.0f, skyPlane.pitch + PITCH_RETURN * dt);
-
-  skyPlane.heading += sinf(skyPlane.bank) * TURN_RATE_PER_BANK * dt;
+  skyPlane.heading -= sinf(skyPlane.bank) * TURN_RATE_PER_BANK * dt;
 
   if (throttleInput > 0) skyPlane.speed += THROTTLE_ACCEL * dt;
   else if (throttleInput < 0) skyPlane.speed -= THROTTLE_ACCEL * dt;
   else if (skyPlane.speed > SkyPlane::MIN_SPEED) skyPlane.speed -= CRUISE_DECAY * dt;
   skyPlane.speed = constrain(skyPlane.speed, SkyPlane::MIN_SPEED, SkyPlane::MAX_SPEED);
 
-  KVec3 prevPos = skyPlane.pos;
   KVec3 fwd = {cosf(skyPlane.pitch) * sinf(skyPlane.heading), sinf(skyPlane.pitch), cosf(skyPlane.pitch) * cosf(skyPlane.heading)};
-  skyPlane.pos = skyPlane.pos + fwd * (skyPlane.speed * dt);
+  float moveDist = skyPlane.speed * dt;
+  skyPlane.pos = skyPlane.pos + fwd * moveDist;
+  skyScore += moveDist;
 
-  // Ring collision: did the plane just cross ring[0]'s plane this frame, and
-  // was it within the ring's radius at that crossing? Approximated with the
-  // post-move position rather than the exact crossing point along the
-  // frame's motion - close enough at this speed/frame-rate/ring size.
-  SkyRing& target = skyRings[0];
-  KVec3 ringFwd = skyRingForward(target);
-  float prevSigned = kdot(prevPos - target.center, ringFwd);
-  float nowSigned = kdot(skyPlane.pos - target.center, ringFwd);
-  if (prevSigned < 0 && nowSigned >= 0) {
-    KVec3 axis = fabsf(ringFwd.y) > 0.98f ? KVec3{1, 0, 0} : KVec3{0, 1, 0};
-    KVec3 right = knormalized(kcross(ringFwd, axis));
-    KVec3 up = kcross(right, ringFwd);
-    KVec3 rel = skyPlane.pos - target.center;
-    float lateral = sqrtf(sq(kdot(rel, right)) + sq(kdot(rel, up)));
-    if (lateral <= SKY_RING_RADIUS) { skyScore++; vibrate(20); if (volumeLevel) M5Cardputer.Speaker.tone(920, 70); }
-    else if (volumeLevel) M5Cardputer.Speaker.tone(220, 50);
-    for (int i = 0; i < SKY_RING_COUNT - 1; ++i) skyRings[i] = skyRings[i + 1];
-    skyGenerateRing(SKY_RING_COUNT - 1);
-  }
-
-  bool crashed = skyPlane.pos.y <= 1.5f;
+  bool crashed = skyPlane.pos.y <= skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z) + 1.0f;
 
   KartCam cam;
   cam.position = skyPlane.pos - fwd * 6.0f + KVec3{0, 2.2f, 0};
@@ -3467,7 +3518,7 @@ void stepSkyPilotFlight() {
   if (crashed) {
     vibrate(200);
     if (volumeLevel) { M5Cardputer.Speaker.tone(180, 150); delay(160); M5Cardputer.Speaker.tone(90, 220); }
-    if (skyScore > skyBestScore) { skyBestScore = skyScore; skySaveBest(); }
+    if ((int)skyScore > skyBestScore) { skyBestScore = (int)skyScore; skySaveBest(); }
     skyState = SKY_RESULTS;
     redrawNeeded = true;
   }
