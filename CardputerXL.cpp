@@ -3305,7 +3305,7 @@ int skyPreSpectateModelIndex = 0;  // skyPlaneModelIndex gets overwritten every 
 // special-case) rather than exiting Sky Pilot entirely from PLANE/OPTIONS.
 enum class SkyHubStage { MODE, PLANE, OPTIONS };
 SkyHubStage skyHubStage = SkyHubStage::MODE;
-constexpr int SKY_OPTIONS_COUNT = 5;  // CONTROL, SOUND, RADAR, AI BOTS, START FLIGHT
+constexpr int SKY_OPTIONS_COUNT = 6;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, START FLIGHT
 int skyOptionsSelected = 0;
 
 // Stall/rotate speed, control rates, and throttle targets all now come from
@@ -3411,8 +3411,9 @@ struct SkyBot {
   unsigned long nextTurnAt;
   int modelIndex;
 };
-constexpr int SKY_BOT_COUNT = 4;
-SkyBot skyBots[SKY_BOT_COUNT];
+constexpr int SKY_BOT_MAX = 10;
+SkyBot skyBots[SKY_BOT_MAX];
+int skyBotCount = 4;  // adjustable in OPTIONS ("BOTS COUNT"), 1..SKY_BOT_MAX
 // 'R' on the HOME screen - shows bots (as blips) on the same minimap
 // airports already use, regardless of game mode.
 bool skyRadarEnabled = true;
@@ -3439,13 +3440,20 @@ void skySaveBest() { preferences.begin("skypilot", false); preferences.putInt("b
 // runway-start spawn point. pos.y is a placeholder; the actual runway
 // elevation is wherever skyTerrainHeight() flattens to near it.
 struct SkyAirport { KVec3 pos; float heading; float length, width; const char* name; };
-constexpr int SKY_AIRPORT_COUNT = 5;
+// 8 airports (was 5), spread much further apart (minimum pairwise distance
+// ~780 units, versus ~600-730 before) so Airport-to-Airport draws a real,
+// sustained cross-country flight instead of a short hop - a deliberate
+// difficulty increase, not just more content.
+constexpr int SKY_AIRPORT_COUNT = 8;
 SkyAirport skyAirports[SKY_AIRPORT_COUNT] = {
   {{0, 0, 0}, 0.0f, 110.0f, 16.0f, "ALPHA"},
-  {{560, 0, 460}, 2.1f, 110.0f, 16.0f, "BRAVO"},
-  {{-520, 0, 340}, 4.0f, 110.0f, 16.0f, "CHARLIE"},
-  {{320, 0, -580}, 5.3f, 110.0f, 16.0f, "DELTA"},
-  {{-680, 0, -260}, 1.0f, 110.0f, 16.0f, "ECHO"},
+  {{900, 0, 750}, 2.1f, 110.0f, 16.0f, "BRAVO"},
+  {{-850, 0, 700}, 4.0f, 110.0f, 16.0f, "CHARLIE"},
+  {{700, 0, -900}, 5.3f, 110.0f, 16.0f, "DELTA"},
+  {{-950, 0, -650}, 1.0f, 110.0f, 16.0f, "ECHO"},
+  {{1500, 0, -100}, 3.4f, 110.0f, 16.0f, "FOXTROT"},
+  {{-1450, 0, 200}, 0.7f, 110.0f, 16.0f, "GOLF"},
+  {{150, 0, 1500}, 5.8f, 110.0f, 16.0f, "HOTEL"},
 };
 constexpr float SKY_RUNWAY_ELEVATION = 10.0f;
 // Both fixed airport coordinates happen to sit right where this terrain
@@ -3585,6 +3593,21 @@ void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd, const KVec3& pos, f
     kartDrawSeg(cam, wingTipL, deepL, ILI9341_WHITE); kartDrawSeg(cam, deepL, peakL, ILI9341_WHITE); kartDrawSeg(cam, peakL, notchL, ILI9341_WHITE);
     kartDrawSeg(cam, wingTipR, deepR, ILI9341_WHITE); kartDrawSeg(cam, deepR, peakR, ILI9341_WHITE); kartDrawSeg(cam, peakR, notchR, ILI9341_WHITE);
     kartDrawSeg(cam, notchL, notchR, ILI9341_WHITE);
+    // A flat outline alone reads as a paper cutout - the real B-2 has a
+    // raised dorsal spine along the centerline (the cockpit/fuselage fairing
+    // blended into the wing). A shallow ridge from the nose back to the
+    // trailing edge, with the wing sloping down to each wingtip from it,
+    // gives the silhouette real depth from most viewing angles instead of
+    // being a flat triangle regardless of bank/pitch.
+    float ridgeH = m.bodyHalfWidth * 0.4f;
+    KVec3 ridgeFront = nose - fwd * (m.noseLen * 0.3f) + up * ridgeH;
+    KVec3 ridgeMid = pos + up * (ridgeH * 1.15f);
+    KVec3 ridgeBack = pos - fwd * deepBack + up * (ridgeH * 0.5f);
+    kartDrawSeg(cam, nose, ridgeFront, ILI9341_LIGHTGREY);
+    kartDrawSeg(cam, ridgeFront, ridgeMid, ILI9341_LIGHTGREY);
+    kartDrawSeg(cam, ridgeMid, ridgeBack, ILI9341_LIGHTGREY);
+    kartDrawSeg(cam, ridgeMid, wingTipL, ILI9341_LIGHTGREY);
+    kartDrawSeg(cam, ridgeMid, wingTipR, ILI9341_LIGHTGREY);
     return;
   }
 
@@ -3645,6 +3668,27 @@ void skyDrawRunway(const KartCam& cam, const SkyAirport& a) {
     kartDrawSeg(cam, center + fwd * (t0 * a.length), center + fwd * (t1 * a.length), ILI9341_WHITE);
   }
 }
+// A small control-tower box beside the runway threshold - a flat runway
+// outline alone gave every airport an identical, landmark-free look, hard
+// to tell apart from a distance. Two shaded walls (front lit, side in
+// shadow, for a cheap depth cue) plus a roof and an antenna mast, reusing
+// Kart Racer's kartFillQuad wall-drawing convention.
+void skyDrawAirportBuilding(const KartCam& cam, const SkyAirport& a) {
+  KVec3 fwd{sinf(a.heading), 0, cosf(a.heading)};
+  KVec3 right = knormalized(kcross(fwd, KVec3{0, 1, 0}));
+  KVec3 basePos = a.pos - fwd * (a.length * 0.5f - 6.0f) + right * (a.width * 0.5f + 14.0f);
+  KVec3 base{basePos.x, skyTerrainHeight(basePos.x, basePos.z), basePos.z};
+  const float bw = 7.0f, bd = 7.0f, bh = 16.0f;
+  KVec3 c0 = base - right * (bw * 0.5f) - fwd * (bd * 0.5f);
+  KVec3 c1 = base + right * (bw * 0.5f) - fwd * (bd * 0.5f);
+  KVec3 c2 = base + right * (bw * 0.5f) + fwd * (bd * 0.5f);
+  KVec3 c3 = base - right * (bw * 0.5f) + fwd * (bd * 0.5f);
+  KVec3 up{0, bh, 0};
+  kartFillQuad(cam, c0, c1, c1 + up, c0 + up, ILI9341_LIGHTGREY);
+  kartFillQuad(cam, c1, c2, c2 + up, c1 + up, ILI9341_DARKGREY);
+  kartFillQuad(cam, c0 + up, c1 + up, c2 + up, c3 + up, ILI9341_WHITE);
+  kartDrawSeg(cam, base + up, base + KVec3{0, bh + 6.0f, 0}, ILI9341_RED);
+}
 // A cockpit window frame and dashboard overlay for first-person view -
 // there's no exterior plane model to look at from inside it, so this is
 // what actually sells "you're sitting in the aircraft" instead of a bare
@@ -3693,8 +3737,8 @@ void skyDrawAirportLabels(const KartCam& cam) {
   }
 }
 void skyInitBots() {
-  for (int i = 0; i < SKY_BOT_COUNT; i++) {
-    float ang = (2 * KART_PI * i) / SKY_BOT_COUNT + (random(0, 100) / 100.0f);
+  for (int i = 0; i < skyBotCount; i++) {
+    float ang = (2 * KART_PI * i) / skyBotCount + (random(0, 100) / 100.0f);
     float dist = 120.0f + random(0, 150);
     SkyBot& b = skyBots[i];
     b.pos = {skyPlane.pos.x + cosf(ang) * dist, skyPlane.pos.y + 10.0f + random(0, 20), skyPlane.pos.z + sinf(ang) * dist};
@@ -3714,7 +3758,7 @@ void skyInitBots() {
 void skyUpdateBots(float dt) {
   if (!skyAiBotsEnabled) return;
   unsigned long now = millis();
-  for (int i = 0; i < SKY_BOT_COUNT; i++) {
+  for (int i = 0; i < skyBotCount; i++) {
     SkyBot& b = skyBots[i];
     if (now >= b.nextTurnAt) {
       float dx = skyPlane.pos.x - b.pos.x, dz = skyPlane.pos.z - b.pos.z;
@@ -3748,7 +3792,7 @@ void skyUpdateBots(float dt) {
 }
 void skyDrawBots(const KartCam& cam) {
   if (!skyAiBotsEnabled) return;
-  for (int i = 0; i < SKY_BOT_COUNT; i++) {
+  for (int i = 0; i < skyBotCount; i++) {
     // In spectate mode the watched bot is already drawn as "the player"
     // (skyRenderScene's own model call, using skyPlane synced from it each
     // frame) - drawing it again here would just overlap it with itself.
@@ -3764,7 +3808,7 @@ void skyRenderScene(const KartCam& cam, const KVec3& fwd, bool firstPerson) {
   kartCanvas.fillScreen(ILI9341_BLACK);
   kartDrawSky(cam);
   skyDrawTerrain(cam, fwd);
-  for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) skyDrawRunway(cam, skyAirports[i]);
+  for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) { skyDrawRunway(cam, skyAirports[i]); skyDrawAirportBuilding(cam, skyAirports[i]); }
   if (firstPerson) skyDrawCockpitOverlay(); else skyDrawPlaneModel(cam, fwd, skyPlane.pos, skyPlane.bank, skyPlaneModels[skyPlaneModelIndex]);
   skyDrawBots(cam);
   skyDrawAirportLabels(cam);
@@ -3849,7 +3893,7 @@ void skyDrawMinimap(int x0, int y0, int size) {
     kartCanvas.fillCircle(cx + (int)dx, cy - (int)dz, 2, isTarget ? ILI9341_YELLOW : ILI9341_CYAN);
   }
   if (skyRadarEnabled && skyAiBotsEnabled) {
-    for (int i = 0; i < SKY_BOT_COUNT; ++i) {
+    for (int i = 0; i < skyBotCount; ++i) {
       float dx = (skyBots[i].pos.x - skyPlane.pos.x) / unitsPerPixel;
       float dz = (skyBots[i].pos.z - skyPlane.pos.z) / unitsPerPixel;
       float dist = sqrtf(dx * dx + dz * dz);
@@ -3873,7 +3917,7 @@ void skyRenderHud(bool stalling, bool pullUp) {
   kartCanvas.setCursor(3, 2); kartCanvas.print(buf);
   if (skySpectating) {
     kartCanvas.setTextColor(ILI9341_GREEN, ILI9341_BLACK);
-    char watchBuf[24]; snprintf(watchBuf, sizeof(watchBuf), "WATCHING %d/%d", skyWatchIndex + 1, SKY_BOT_COUNT);
+    char watchBuf[24]; snprintf(watchBuf, sizeof(watchBuf), "WATCHING %d/%d", skyWatchIndex + 1, skyBotCount);
     kartCanvas.setCursor(3, 12); kartCanvas.print(watchBuf);
   } else {
     kartCanvas.setTextColor(skyGearDown ? ILI9341_GREEN : ILI9341_ORANGE, ILI9341_BLACK);
@@ -4118,12 +4162,12 @@ void drawSkyPilotHubPlane() {
 
 void drawSkyPilotHubOptions() {
   tft.fillScreen(ui.bg); header("GAMES / SKY PILOT / OPTIONS (3 OF 3)");
-  static const char* optNames[SKY_OPTIONS_COUNT] = {"CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "START FLIGHT"};
+  static const char* optNames[SKY_OPTIONS_COUNT] = {"CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "START FLIGHT"};
   for (int i = 0; i < SKY_OPTIONS_COUNT; ++i) {
-    int y = CONTENT_Y + 16 + i * 28; bool sel = i == skyOptionsSelected; uint16_t bg = sel ? ui.selected : ui.bg;
-    if (sel) tft.fillRoundRect(8, y - 4, 304, 20, 4, bg);
+    int y = CONTENT_Y + 14 + i * 24; bool sel = i == skyOptionsSelected; uint16_t bg = sel ? ui.selected : ui.bg;
+    if (sel) tft.fillRoundRect(8, y - 4, 304, 19, 4, bg);
     tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  ");
-    if (i == 4) {
+    if (i == 5) {
       tft.setTextColor(sel ? ILI9341_GREEN : ui.dim, bg); tft.print("START FLIGHT");
       continue;
     }
@@ -4131,12 +4175,13 @@ void drawSkyPilotHubOptions() {
     String val = i == 0 ? (skyImuControlEnabled ? "TILT" : "KEYS")
                : i == 1 ? (skyEngineSoundEnabled ? "ON" : "OFF")
                : i == 2 ? (skyRadarEnabled ? "ON" : "OFF")
-                        : (skyAiBotsEnabled ? "ON" : "OFF");
+               : i == 3 ? (skyAiBotsEnabled ? "ON" : "OFF")
+                        : String(skyBotCount);
     tft.setTextColor(sel ? ui.text : ui.accent, bg); tft.setCursor(240, y); tft.print(val);
   }
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 150);
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 180);
   tft.print("Controls hold their angle. MED/HIGH throttle to take off.");
-  footer(";/. SELECT     ENTER TOGGLE/START     FN BACK");
+  footer(";/. SELECT  ,/ ADJUST  ENTER TOGGLE/START  FN BACK");
 }
 
 void drawSkyPilotHub() {
@@ -4242,8 +4287,8 @@ void stepSkyPilotFlight() {
     static bool prevComma = false, prevSlash = false;
     bool nowComma = M5Cardputer.Keyboard.isKeyPressed(',');
     bool nowSlash = M5Cardputer.Keyboard.isKeyPressed('/');
-    if (nowComma && !prevComma) { skyWatchIndex = (skyWatchIndex + SKY_BOT_COUNT - 1) % SKY_BOT_COUNT; playFunctionSound(); }
-    else if (nowSlash && !prevSlash) { skyWatchIndex = (skyWatchIndex + 1) % SKY_BOT_COUNT; playFunctionSound(); }
+    if (nowComma && !prevComma) { skyWatchIndex = (skyWatchIndex + skyBotCount - 1) % skyBotCount; playFunctionSound(); }
+    else if (nowSlash && !prevSlash) { skyWatchIndex = (skyWatchIndex + 1) % skyBotCount; playFunctionSound(); }
     prevComma = nowComma; prevSlash = nowSlash;
 
     skyUpdateBots(dt);
@@ -8012,14 +8057,19 @@ void keyboard() {
           for (char c : k.word) {
             if (c == ';') { skyOptionsSelected = (skyOptionsSelected + SKY_OPTIONS_COUNT - 1) % SKY_OPTIONS_COUNT; redrawNeeded = true; }
             else if (c == '.') { skyOptionsSelected = (skyOptionsSelected + 1) % SKY_OPTIONS_COUNT; redrawNeeded = true; }
+            // BOTS COUNT is a range, not a toggle - ,/ / adjust it directly
+            // (same convention as the PLANE stage cycling the plane model)
+            // instead of ENTER stepping through 10 values one at a time.
+            else if (skyOptionsSelected == 4 && c == ',') { skyBotCount = max(1, skyBotCount - 1); playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 4 && c == '/') { skyBotCount = min(SKY_BOT_MAX, skyBotCount + 1); playFunctionSound(); redrawNeeded = true; }
           }
           if (k.enter) {
-            if (skyOptionsSelected == 4) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
+            if (skyOptionsSelected == 5) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
             if (skyOptionsSelected == 0) skyImuControlEnabled = !skyImuControlEnabled;
             else if (skyOptionsSelected == 1) skyEngineSoundEnabled = !skyEngineSoundEnabled;
             else if (skyOptionsSelected == 2) skyRadarEnabled = !skyRadarEnabled;
-            else skyAiBotsEnabled = !skyAiBotsEnabled;
-            playFunctionSound(); redrawNeeded = true;
+            else if (skyOptionsSelected == 3) skyAiBotsEnabled = !skyAiBotsEnabled;
+            if (skyOptionsSelected != 4) { playFunctionSound(); redrawNeeded = true; }
           }
         }
       } else if (k.enter && skyState == SKY_RESULTS) {
