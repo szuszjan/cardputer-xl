@@ -305,6 +305,8 @@ void stepSkyPilotFlight();
 void autoConnectWifi();
 void miniCamJoinNetwork();
 void miniCamLeaveNetwork();
+void miniCamAllocBuffers();
+void miniCamFreeBuffers();
 void drawMiniCam();
 void stepMiniCam();
 void drawDeviceCheck();
@@ -3287,6 +3289,14 @@ SkyPilotMode skyMode = SKY_MODE_FREEROAM;
 // 2=airport to airport. Kept selected across a RESULTS "fly again" too.
 constexpr int SKY_MODE_OPTION_COUNT = 3;
 int skyModeSelected = 0;
+// The HOME screen is a 3-stage wizard: MODE -> PLANE (with a live 3D preview
+// of the pick) -> OPTIONS (toggles, plus a START FLIGHT row) -> flight.
+// ENTER advances a stage; FN backs up one (see the GAMEHUB Fn-handler
+// special-case) rather than exiting Sky Pilot entirely from PLANE/OPTIONS.
+enum class SkyHubStage { MODE, PLANE, OPTIONS };
+SkyHubStage skyHubStage = SkyHubStage::MODE;
+constexpr int SKY_OPTIONS_COUNT = 5;  // CONTROL, SOUND, RADAR, AI BOTS, START FLIGHT
+int skyOptionsSelected = 0;
 
 // Stall/rotate speed, control rates, and throttle targets all now come from
 // the selected SkyPlaneModelParams (skyPlaneModels[skyPlaneModelIndex]) -
@@ -3393,6 +3403,7 @@ SkyBot skyBots[SKY_BOT_COUNT];
 // 'R' on the HOME screen - shows bots (as blips) on the same minimap
 // airports already use, regardless of game mode.
 bool skyRadarEnabled = true;
+bool skyAiBotsEnabled = true;  // 'B' (or the OPTIONS stage) - bots stop updating/drawing when off
 
 float skyScore = 0;      // distance flown this flight, in world units
 int skyBestScore = 0;
@@ -3680,6 +3691,7 @@ void skyInitBots() {
 // top of the pitch-based avoidance guarantees a bot can never visibly clip
 // through terrain even if its climb response lags behind fast-rising ground.
 void skyUpdateBots(float dt) {
+  if (!skyAiBotsEnabled) return;
   unsigned long now = millis();
   for (int i = 0; i < SKY_BOT_COUNT; i++) {
     SkyBot& b = skyBots[i];
@@ -3714,6 +3726,7 @@ void skyUpdateBots(float dt) {
   }
 }
 void skyDrawBots(const KartCam& cam) {
+  if (!skyAiBotsEnabled) return;
   for (int i = 0; i < SKY_BOT_COUNT; i++) {
     const SkyBot& b = skyBots[i];
     KVec3 fwd{cosf(b.pitch) * sinf(b.heading), sinf(b.pitch), cosf(b.pitch) * cosf(b.heading)};
@@ -3810,7 +3823,7 @@ void skyDrawMinimap(int x0, int y0, int size) {
     bool isTarget = skyMode == SKY_MODE_AIRPORT && i == skyTargetAirport;
     kartCanvas.fillCircle(cx + (int)dx, cy - (int)dz, 2, isTarget ? ILI9341_YELLOW : ILI9341_CYAN);
   }
-  if (skyRadarEnabled) {
+  if (skyRadarEnabled && skyAiBotsEnabled) {
     for (int i = 0; i < SKY_BOT_COUNT; ++i) {
       float dx = (skyBots[i].pos.x - skyPlane.pos.x) / unitsPerPixel;
       float dz = (skyBots[i].pos.z - skyPlane.pos.z) / unitsPerPixel;
@@ -3963,12 +3976,93 @@ void startSkyPilotFlight(int modeSelected) {
   skyState = SKY_FLYING;
 }
 
+// A static 3/4-view showcase for the PLANE stage of the HOME wizard - a
+// fixed camera/pose (not the flight's own moving camera or the player's
+// actual bank/pitch), reusing skyDrawPlaneModel()/kartCanvas exactly like
+// the live flight view does, just invoked from the menu instead. No
+// animation (no continuous stepper exists for the HOME screen the way
+// stepSkyPilotFlight() drives the live view), so it only needs to redraw
+// when the picked plane actually changes.
+void skyDrawPlanePreviewScene() {
+  int w = kartCanvas.width(), h = kartCanvas.height();
+  kartCanvas.fillScreen(ILI9341_NAVY);
+  kartCanvas.fillRect(0, h * 2 / 3, w, h / 3, ILI9341_DARKGREEN);
+
+  KVec3 showcasePos{0, 0, 0};
+  float heading = 0.8f, pitch = 0.08f, bank = 0.28f;
+  KVec3 fwd{cosf(pitch) * sinf(heading), sinf(pitch), cosf(pitch) * cosf(heading)};
+  KVec3 worldUp{0, 1, 0};
+  KVec3 camRight = knormalized(kcross(fwd, worldUp));
+
+  KartCam cam;
+  cam.position = showcasePos - fwd * 7.0f + worldUp * 1.4f - camRight * 2.2f;
+  cam.forward = knormalized(showcasePos - cam.position);
+  cam.right = knormalized(kcross(cam.forward, worldUp));
+  cam.up = kcross(cam.right, cam.forward);
+  cam.fovY = 55.0f;
+
+  skyDrawPlaneModel(cam, fwd, showcasePos, bank, skyPlaneModels[skyPlaneModelIndex]);
+}
+
+void drawSkyPilotHubMode() {
+  tft.fillScreen(ui.bg); header("GAMES / SKY PILOT / MODE (1 OF 3)");
+  static const char* modes[SKY_MODE_OPTION_COUNT] = {"FREE ROAM - RUNWAY START", "FREE ROAM - AIRBORNE START", "AIRPORT TO AIRPORT"};
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 6); tft.print("BEST DISTANCE  " + String(skyBestScore));
+  for (int i = 0; i < SKY_MODE_OPTION_COUNT; ++i) {
+    int y = CONTENT_Y + 32 + i * 24; bool sel = i == skyModeSelected; uint16_t bg = sel ? ui.selected : ui.bg;
+    if (sel) tft.fillRoundRect(8, y - 4, 304, 19, 4, bg);
+    tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  "); tft.print(modes[i]);
+  }
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 130); tft.print("Step 1 of 3 - how you start the flight.");
+  footer(";/. SELECT     ENTER NEXT     FN GAMES");
+}
+
+// The 3D preview fills the whole canvas as a backdrop, so header()/footer()
+// are called AFTER blitting it - they simply paint over the strips they own,
+// same trick the flight HUD uses over the live scene. Plane name/special use
+// the preview's own navy sky colour as their print background instead of a
+// separate box, since both sit over that region regardless of which plane
+// is picked (see skyDrawPlanePreviewScene()'s fixed layout).
+void drawSkyPilotHubPlane() {
+  skyDrawPlanePreviewScene();
+  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  header("GAMES / SKY PILOT / PLANE (2 OF 3)");
+  const SkyPlaneModelParams& picked = skyPlaneModels[skyPlaneModelIndex];
+  tft.setTextSize(2); tft.setTextColor(ILI9341_WHITE, ILI9341_NAVY);
+  tft.setCursor(10, CONTENT_Y + 6); tft.print(picked.name);
+  tft.setTextSize(1); tft.setTextColor(ILI9341_YELLOW, ILI9341_NAVY);
+  tft.setCursor(10, CONTENT_Y + 28); tft.print(picked.special);
+  footer(",/ CHANGE PLANE     ENTER NEXT     FN BACK");
+}
+
+void drawSkyPilotHubOptions() {
+  tft.fillScreen(ui.bg); header("GAMES / SKY PILOT / OPTIONS (3 OF 3)");
+  static const char* optNames[SKY_OPTIONS_COUNT] = {"CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "START FLIGHT"};
+  for (int i = 0; i < SKY_OPTIONS_COUNT; ++i) {
+    int y = CONTENT_Y + 16 + i * 28; bool sel = i == skyOptionsSelected; uint16_t bg = sel ? ui.selected : ui.bg;
+    if (sel) tft.fillRoundRect(8, y - 4, 304, 20, 4, bg);
+    tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  ");
+    if (i == 4) {
+      tft.setTextColor(sel ? ILI9341_GREEN : ui.dim, bg); tft.print("START FLIGHT");
+      continue;
+    }
+    tft.print(optNames[i]);
+    String val = i == 0 ? (skyImuControlEnabled ? "TILT" : "KEYS")
+               : i == 1 ? (skyEngineSoundEnabled ? "ON" : "OFF")
+               : i == 2 ? (skyRadarEnabled ? "ON" : "OFF")
+                        : (skyAiBotsEnabled ? "ON" : "OFF");
+    tft.setTextColor(sel ? ui.text : ui.accent, bg); tft.setCursor(240, y); tft.print(val);
+  }
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 150);
+  tft.print("Controls hold their angle. MED/HIGH throttle to take off.");
+  footer(";/. SELECT     ENTER TOGGLE/START     FN BACK");
+}
+
 void drawSkyPilotHub() {
   lastDrawnGameMode = gameMode;
   skyLoadBest();
-  tft.fillScreen(ui.bg); header("GAMES / SKY PILOT");
-  tft.setTextSize(1);
   if (skyState == SKY_RESULTS) {
+    tft.fillScreen(ui.bg); header("GAMES / SKY PILOT");
     bool win = skyMode == SKY_MODE_AIRPORT && skyMissionSuccess;
     String headline = win ? ("LANDED AT " + String(skyAirports[skyTargetAirport].name))
                            : (skyMode == SKY_MODE_AIRPORT ? String("MISSION FAILED") : String("CRASHED"));
@@ -3980,28 +4074,9 @@ void drawSkyPilotHub() {
     footer("ENTER FLY AGAIN     FN GAMES");
     return;
   }
-  static const char* modes[SKY_MODE_OPTION_COUNT] = {"FREE ROAM - RUNWAY START", "FREE ROAM - AIRBORNE START", "AIRPORT TO AIRPORT"};
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 4); tft.print("BEST DISTANCE  " + String(skyBestScore));
-  tft.setTextColor(skyEngineSoundEnabled ? ILI9341_GREEN : ui.dim, ui.bg); tft.setCursor(190, CONTENT_Y + 4);
-  tft.print(String("ENGINE SOUND ") + (skyEngineSoundEnabled ? "ON" : "OFF"));
-  for (int i = 0; i < SKY_MODE_OPTION_COUNT; ++i) {
-    int y = CONTENT_Y + 24 + i * 20; bool sel = i == skyModeSelected; uint16_t bg = sel ? ui.selected : ui.bg;
-    if (sel) tft.fillRoundRect(8, y - 3, 304, 16, 4, bg);
-    tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  "); tft.print(modes[i]);
-  }
-  const SkyPlaneModelParams& picked = skyPlaneModels[skyPlaneModelIndex];
-  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 72); tft.print(String("PLANE  ") + picked.name + "  (P TO CHANGE)");
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 84); tft.print(String("Special: ") + picked.special);
-  tft.setTextColor(skyImuControlEnabled ? ILI9341_GREEN : ui.dim, ui.bg); tft.setCursor(190, CONTENT_Y + 84);
-  tft.print(String("CONTROL ") + (skyImuControlEnabled ? "TILT" : "KEYS") + " (I)");
-  tft.setTextColor(skyRadarEnabled ? ILI9341_GREEN : ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 96);
-  tft.print(String("RADAR ") + (skyRadarEnabled ? "ON" : "OFF") + " (R) - shows AI traffic on the map");
-  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 108);
-  tft.print(skyImuControlEnabled ? "TILT DEVICE FOR PITCH + BANK" : "; . PITCH      , / BANK + TURN");
-  tft.setCursor(12, CONTENT_Y + 120); tft.print(skyImuControlEnabled ? "W/A THROTTLE  Q GEAR  V VIEW  Z REZERO" : "W/A THROTTLE  Q GEAR  V VIEW");
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 138); tft.print("Controls hold their angle on release.");
-  tft.setCursor(12, CONTENT_Y + 150); tft.print("MED/HIGH throttle to take off. ` PAUSES.");
-  footer(";/. SELECT  ENTER START  M SOUND  P PLANE  I TILT  R RADAR  FN GAMES");
+  if (skyHubStage == SkyHubStage::PLANE) drawSkyPilotHubPlane();
+  else if (skyHubStage == SkyHubStage::OPTIONS) drawSkyPilotHubOptions();
+  else drawSkyPilotHubMode();
 }
 
 // Continuous engine drone on its own speaker channel (Kart Racer's engine
@@ -4055,7 +4130,7 @@ void stepSkyPilotFlight() {
   static bool prevH = false, prevQ = false, prevV = false, prevZ = false, prevTilde = false;
   bool nowH = M5Cardputer.Keyboard.isKeyPressed('h');
   bool edgeH = nowH && !prevH; prevH = nowH;
-  if (edgeH) { skyEngineToneStop(); skyState = SKY_HOME; skyPaused = false; redrawNeeded = true; return; }
+  if (edgeH) { skyEngineToneStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyPaused = false; redrawNeeded = true; return; }
   bool nowTilde = M5Cardputer.Keyboard.isKeyPressed('`');
   bool edgeTilde = nowTilde && !prevTilde; prevTilde = nowTilde;
   if (edgeTilde) { skyPaused = !skyPaused; playFunctionSound(); if (skyPaused) skyEngineToneStop(); }
@@ -5472,8 +5547,15 @@ unsigned long miniCamLastErrorMs = 0;
 char miniCamStatusMsg[80] = "";
 bool miniCamNeedsRedraw = true;
 
-uint16_t miniCamPreviewLandscape[MINICAM_PREVIEW_LAND_W * MINICAM_PREVIEW_LAND_H];
-uint16_t miniCamGalleryThumbs[MINICAM_GALLERY_MAX][MINICAM_THUMB_LAND_W * MINICAM_THUMB_LAND_H];
+// These used to be permanent static arrays (~75KB combined), which - on top
+// of kartCanvas's own ~150KB heap allocation for Sky Pilot/Kart Racer -
+// fragmented the internal RAM badly enough that kartCanvas's malloc started
+// silently failing at boot (buffer==nullptr, crashing the first unguarded
+// GFXcanvas16 draw call that touched it - see miniCamAllocBuffers()). MiniCam
+// is used rarely and never concurrently with the 3D games, so these are now
+// malloc'd on demand when the app is actually opened and freed on exit.
+uint16_t* miniCamPreviewLandscape = nullptr;
+uint16_t* miniCamGalleryThumbs[MINICAM_GALLERY_MAX] = {nullptr};
 bool miniCamGalleryLoaded[MINICAM_GALLERY_MAX];
 int miniCamPendingFetchSlot = -1;
 uint16_t miniCamPendingFetchPhotoNumber = 0;
@@ -5493,7 +5575,8 @@ uint8_t miniCamFrameChecksum;
 // (7200 bytes instead of the needed 9600) so every real preview frame's
 // length overflowed the parser's own size guard below and got silently
 // resynced away as if corrupt, forever, no matter how good the link was.
-uint8_t miniCamFrameBuf[MINICAM_PREVIEW_WIRE_W * MINICAM_PREVIEW_LAND_W * 2];  // big enough for the largest frame (preview)
+constexpr size_t MINICAM_FRAME_BUF_SIZE = MINICAM_PREVIEW_WIRE_W * MINICAM_PREVIEW_LAND_W * 2;  // big enough for the largest frame (preview)
+uint8_t* miniCamFrameBuf = nullptr;  // malloc'd in miniCamAllocBuffers(); size is MINICAM_FRAME_BUF_SIZE, not sizeof(this pointer)
 
 // Undoes the CamS3's rotate270CW(): wireW is the received buffer's own width
 // (its height is landW); landW/landH are the desired original, pre-rotation
@@ -5512,6 +5595,7 @@ void miniCamUnrotate270(const uint8_t* wireBytes, int wireW, int landW, int land
 void miniCamJoinNetwork() {
   if (miniCamJoined) return;
   miniCamJoined = true;
+  miniCamAllocBuffers();
   WiFi.mode(WIFI_STA);
   WiFi.begin(MINICAM_AP_SSID, MINICAM_AP_PASSWORD);
   miniCamLastConnectAttemptMs = millis();
@@ -5529,6 +5613,7 @@ void miniCamLeaveNetwork() {
   miniCamJoined = false;
   if (miniCamClient.connected()) miniCamClient.stop();
   autoConnectWifi();  // rejoin the saved home network
+  miniCamFreeBuffers();
 }
 
 void miniCamMaintainConnection() {
@@ -5579,7 +5664,7 @@ void miniCamPollNet() {
       case MiniCamParseState::LEN_LO: miniCamFrameLen = b; miniCamParseState = MiniCamParseState::LEN_HI; break;
       case MiniCamParseState::LEN_HI:
         miniCamFrameLen |= (b << 8); miniCamFrameIdx = 0; miniCamFrameChecksum = 0;
-        miniCamParseState = (miniCamFrameLen == 0 || miniCamFrameLen > sizeof(miniCamFrameBuf)) ? MiniCamParseState::SYNC1 : MiniCamParseState::PAYLOAD;
+        miniCamParseState = (miniCamFrameLen == 0 || miniCamFrameLen > MINICAM_FRAME_BUF_SIZE) ? MiniCamParseState::SYNC1 : MiniCamParseState::PAYLOAD;
         break;
       case MiniCamParseState::PAYLOAD:
         miniCamFrameBuf[miniCamFrameIdx++] = b; miniCamFrameChecksum += b;
@@ -5630,7 +5715,7 @@ void miniCamSendCapture() {
 // size. A small reusable row-band buffer (2560 bytes) does the 4x scale
 // rather than a full 320x240 framebuffer (150KB - a real budget concern
 // after this file's own heap-exhaustion history), one source row at a time.
-uint16_t miniCamBandBuf[320 * 4];
+uint16_t* miniCamBandBuf = nullptr;  // malloc'd in miniCamAllocBuffers(), 320*4 pixels
 void miniCamBlitPreview() {
   for (int sy = 0; sy < MINICAM_PREVIEW_LAND_H; sy++) {
     for (int sx = 0; sx < MINICAM_PREVIEW_LAND_W; sx++) {
@@ -5682,7 +5767,28 @@ constexpr int MINICAM_CELL_W = 320 / 3, MINICAM_CELL_H = (240 - 20) / 3;
 constexpr int MINICAM_THUMB_SCALE = 3;
 constexpr int MINICAM_PHOTO_W = MINICAM_THUMB_LAND_W * MINICAM_THUMB_SCALE, MINICAM_PHOTO_H = MINICAM_THUMB_LAND_H * MINICAM_THUMB_SCALE;
 constexpr int MINICAM_THUMB_BUF_CELLS = MINICAM_PHOTO_W * MINICAM_PHOTO_H;  // 45600, comfortably covers the gallery cell size too
-uint16_t miniCamCellBuf[MINICAM_THUMB_BUF_CELLS];
+uint16_t* miniCamCellBuf = nullptr;  // malloc'd in miniCamAllocBuffers()
+
+// Buffers above are all malloc'd here (once, on open) instead of being
+// permanent static arrays - see miniCamPreviewLandscape's own comment for
+// why: their combined ~75KB of static RAM was fragmenting the internal heap
+// badly enough to fail kartCanvas's own ~150KB allocation for Sky Pilot/Kart
+// Racer at boot. Guarded so a second open (miniCamJoined already false->true
+// transition) doesn't leak the previous allocation.
+void miniCamAllocBuffers() {
+  if (!miniCamPreviewLandscape) miniCamPreviewLandscape = (uint16_t*)malloc(MINICAM_PREVIEW_LAND_W * MINICAM_PREVIEW_LAND_H * sizeof(uint16_t));
+  for (int i = 0; i < MINICAM_GALLERY_MAX; i++) if (!miniCamGalleryThumbs[i]) miniCamGalleryThumbs[i] = (uint16_t*)malloc(MINICAM_THUMB_LAND_W * MINICAM_THUMB_LAND_H * sizeof(uint16_t));
+  if (!miniCamFrameBuf) miniCamFrameBuf = (uint8_t*)malloc(MINICAM_FRAME_BUF_SIZE);
+  if (!miniCamCellBuf) miniCamCellBuf = (uint16_t*)malloc(MINICAM_THUMB_BUF_CELLS * sizeof(uint16_t));
+  if (!miniCamBandBuf) miniCamBandBuf = (uint16_t*)malloc(320 * 4 * sizeof(uint16_t));
+}
+void miniCamFreeBuffers() {
+  free(miniCamPreviewLandscape); miniCamPreviewLandscape = nullptr;
+  for (int i = 0; i < MINICAM_GALLERY_MAX; i++) { free(miniCamGalleryThumbs[i]); miniCamGalleryThumbs[i] = nullptr; }
+  free(miniCamFrameBuf); miniCamFrameBuf = nullptr;
+  free(miniCamCellBuf); miniCamCellBuf = nullptr;
+  free(miniCamBandBuf); miniCamBandBuf = nullptr;
+}
 void miniCamDrawThumbCell(int x, int y, int w, int h, const uint16_t* thumb) {
   for (int cy = 0; cy < h; cy++) {
     int sy = cy * MINICAM_THUMB_LAND_H / h;
@@ -7380,7 +7486,8 @@ void keyboard() {
   // running and must never leak a Fn press through to it.
   if (fn && !fnLast) {
     if (quickMenuOpen) { quickMenuOpen = false; playExitSound(); closeQuickMenuAnimated(); forceFullRedraw = true; redrawNeeded = true; }
-    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyEngineToneStop(); skyPaused = false; } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
+    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode == 8 && skyState == SKY_HOME && skyHubStage != SkyHubStage::MODE) { skyHubStage = skyHubStage == SkyHubStage::OPTIONS ? SkyHubStage::PLANE : SkyHubStage::MODE; }
+    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyPaused = false; } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
   // Opt toggles the same floating quick-launch overlay from any page, any
@@ -7664,7 +7771,7 @@ void keyboard() {
         else if (gameMenuSelected == 4) { gameMode = 5; startMinesweeperGame(); }
         else if (gameMenuSelected == 5) { gameMode = 6; startBreakoutGame(); }
         else if (gameMenuSelected == 6) { gameMode = 7; startTetrisGame(); }
-        else { gameMode = 8; skyState = SKY_HOME; }
+        else { gameMode = 8; skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; }
         playEnterSound(); redrawNeeded = true;
       }
       return;
@@ -7751,18 +7858,46 @@ void keyboard() {
     if (gameMode == 8) {
       // SKY_FLYING input (including gear) is polled directly in
       // stepSkyPilotFlight() every frame, not through this per-event
-      // handler - HOME only needs mode selection, RESULTS just a restart.
+      // handler. HOME is a 3-stage wizard (MODE -> PLANE -> OPTIONS, see
+      // SkyHubStage) with ENTER advancing a stage and FN backing up one
+      // (handled in the global Fn special-case); the old direct M/P/I/R
+      // toggle shortcuts still work from any stage too, for muscle memory.
       if (skyState == SKY_HOME) {
         for (char c : k.word) {
-          if (c == ';') { skyModeSelected = (skyModeSelected + SKY_MODE_OPTION_COUNT - 1) % SKY_MODE_OPTION_COUNT; redrawNeeded = true; }
-          else if (c == '.') { skyModeSelected = (skyModeSelected + 1) % SKY_MODE_OPTION_COUNT; redrawNeeded = true; }
-          else if (c == 'm') { skyEngineSoundEnabled = !skyEngineSoundEnabled; playFunctionSound(); redrawNeeded = true; }
+          if (c == 'm') { skyEngineSoundEnabled = !skyEngineSoundEnabled; playFunctionSound(); redrawNeeded = true; }
           else if (c == 'p') { skyPlaneModelIndex = (skyPlaneModelIndex + 1) % SKY_PLANE_MODEL_COUNT; playFunctionSound(); redrawNeeded = true; }
           else if (c == 'i') { skyImuControlEnabled = !skyImuControlEnabled; playFunctionSound(); redrawNeeded = true; }
           else if (c == 'r') { skyRadarEnabled = !skyRadarEnabled; playFunctionSound(); redrawNeeded = true; }
         }
+        if (skyHubStage == SkyHubStage::MODE) {
+          for (char c : k.word) {
+            if (c == ';') { skyModeSelected = (skyModeSelected + SKY_MODE_OPTION_COUNT - 1) % SKY_MODE_OPTION_COUNT; redrawNeeded = true; }
+            else if (c == '.') { skyModeSelected = (skyModeSelected + 1) % SKY_MODE_OPTION_COUNT; redrawNeeded = true; }
+          }
+          if (k.enter) { skyHubStage = SkyHubStage::PLANE; playEnterSound(); redrawNeeded = true; }
+        } else if (skyHubStage == SkyHubStage::PLANE) {
+          for (char c : k.word) {
+            if (c == ',') { skyPlaneModelIndex = (skyPlaneModelIndex + SKY_PLANE_MODEL_COUNT - 1) % SKY_PLANE_MODEL_COUNT; redrawNeeded = true; }
+            else if (c == '/') { skyPlaneModelIndex = (skyPlaneModelIndex + 1) % SKY_PLANE_MODEL_COUNT; redrawNeeded = true; }
+          }
+          if (k.enter) { skyHubStage = SkyHubStage::OPTIONS; playEnterSound(); redrawNeeded = true; }
+        } else {  // OPTIONS
+          for (char c : k.word) {
+            if (c == ';') { skyOptionsSelected = (skyOptionsSelected + SKY_OPTIONS_COUNT - 1) % SKY_OPTIONS_COUNT; redrawNeeded = true; }
+            else if (c == '.') { skyOptionsSelected = (skyOptionsSelected + 1) % SKY_OPTIONS_COUNT; redrawNeeded = true; }
+          }
+          if (k.enter) {
+            if (skyOptionsSelected == 4) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
+            if (skyOptionsSelected == 0) skyImuControlEnabled = !skyImuControlEnabled;
+            else if (skyOptionsSelected == 1) skyEngineSoundEnabled = !skyEngineSoundEnabled;
+            else if (skyOptionsSelected == 2) skyRadarEnabled = !skyRadarEnabled;
+            else skyAiBotsEnabled = !skyAiBotsEnabled;
+            playFunctionSound(); redrawNeeded = true;
+          }
+        }
+      } else if (k.enter && skyState == SKY_RESULTS) {
+        playEnterSound(); startSkyPilotFlight(skyModeSelected);
       }
-      if (k.enter && (skyState == SKY_HOME || skyState == SKY_RESULTS)) { playEnterSound(); startSkyPilotFlight(skyModeSelected); }
       return;
     }
     if (gameMode == 1) {
