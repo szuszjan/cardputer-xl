@@ -3437,18 +3437,20 @@ void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd, const SkyPlaneModel
   const KVec3& pos = skyPlane.pos;
 
   if (m.flyingWing) {
-    // A single wide swept wing blending straight into the body, with no
-    // separate fuselage/tailplane/fin - the B-2's defining silhouette.
+    // The B-2's real silhouette is one continuous broad triangle/arrowhead -
+    // a straight leading-edge sweep from the nose straight out to each
+    // wingtip, with no separate fuselage/tailplane/fin at all. An earlier
+    // version routed the leading edge through a separate "body" point
+    // first, which put a kink in it and broke the clean triangle into
+    // more of a kite/hexagon - nose and wingtips are now the only three
+    // leading-edge points, plus a shallow center notch on the trailing
+    // edge (a simplified stand-in for the real aircraft's sawtooth edge).
     KVec3 nose = pos + fwd * m.noseLen;
-    KVec3 bodyL = pos - right * m.bodyHalfWidth, bodyR = pos + right * m.bodyHalfWidth;
     KVec3 wingTipL = pos - right * m.wingSpan - fwd * m.wingSweep, wingTipR = pos + right * m.wingSpan - fwd * m.wingSweep;
-    KVec3 wingTrailL = wingTipL - fwd * (m.wingChord * 0.4f), wingTrailR = wingTipR - fwd * (m.wingChord * 0.4f);
-    KVec3 trailL = pos - right * m.bodyHalfWidth - fwd * m.tailLen, trailR = pos + right * m.bodyHalfWidth - fwd * m.tailLen;
-    kartDrawSeg(cam, nose, bodyL, ILI9341_WHITE); kartDrawSeg(cam, nose, bodyR, ILI9341_WHITE);
-    kartDrawSeg(cam, bodyL, wingTipL, ILI9341_WHITE); kartDrawSeg(cam, bodyR, wingTipR, ILI9341_WHITE);
-    kartDrawSeg(cam, wingTipL, wingTrailL, ILI9341_WHITE); kartDrawSeg(cam, wingTipR, wingTrailR, ILI9341_WHITE);
-    kartDrawSeg(cam, wingTrailL, trailL, ILI9341_WHITE); kartDrawSeg(cam, wingTrailR, trailR, ILI9341_WHITE);
-    kartDrawSeg(cam, trailL, trailR, ILI9341_WHITE);
+    KVec3 notchL = pos - right * m.bodyHalfWidth - fwd * m.tailLen, notchR = pos + right * m.bodyHalfWidth - fwd * m.tailLen;
+    kartDrawSeg(cam, nose, wingTipL, ILI9341_WHITE); kartDrawSeg(cam, nose, wingTipR, ILI9341_WHITE);
+    kartDrawSeg(cam, wingTipL, notchL, ILI9341_WHITE); kartDrawSeg(cam, wingTipR, notchR, ILI9341_WHITE);
+    kartDrawSeg(cam, notchL, notchR, ILI9341_WHITE);
     return;
   }
 
@@ -3884,11 +3886,18 @@ void stepSkyPilotFlight() {
   // throttle the effective target during a climb still sits well above
   // stall speed, and only low throttle or a very sustained climb can drag
   // it down near stall - a deliberate risk, not an inevitable one.
+  // Both penalties are FRACTIONS of this plane's own top speed, not a fixed
+  // unit amount - a flat penalty hit slow/low-power planes (Bush Plane's
+  // 22-unit HIGH target, say) far harder than fast ones (Blackbird's 70),
+  // so the exact same "pitch up with gear still down" that a fighter jet
+  // shrugs off could wipe a bush plane's effective target to zero and stall
+  // it within a couple of seconds of leaving a short runway - the opposite
+  // of what a short-field plane is supposed to be good at.
   static const float SPEED_APPROACH_RATE = 7.0f;
-  constexpr float SKY_CLIMB_TARGET_LOSS = 14.0f, SKY_GEAR_TARGET_LOSS = 6.0f;
-  float climbPenalty = skyGrounded ? 0.0f : sinf(skyPlane.pitch) * SKY_CLIMB_TARGET_LOSS;
-  float gearPenalty = (skyGearDown && !skyGrounded) ? SKY_GEAR_TARGET_LOSS : 0.0f;
+  constexpr float SKY_CLIMB_TARGET_FRACTION = 0.20f, SKY_GEAR_TARGET_FRACTION = 0.05f;
   float maxSpeed = model.throttleTargets[SKY_THROTTLE_LEVELS - 1];
+  float climbPenalty = skyGrounded ? 0.0f : sinf(skyPlane.pitch) * maxSpeed * SKY_CLIMB_TARGET_FRACTION;
+  float gearPenalty = (skyGearDown && !skyGrounded) ? maxSpeed * SKY_GEAR_TARGET_FRACTION : 0.0f;
   float effectiveTarget = max(0.0f, model.throttleTargets[skyThrottleLevel] - climbPenalty - gearPenalty);
   if (skyPlane.speed < effectiveTarget) skyPlane.speed = min(skyPlane.speed + SPEED_APPROACH_RATE * dt, effectiveTarget);
   else if (skyPlane.speed > effectiveTarget) skyPlane.speed = max(skyPlane.speed - SPEED_APPROACH_RATE * dt, effectiveTarget);
