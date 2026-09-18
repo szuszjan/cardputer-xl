@@ -2858,11 +2858,28 @@ static void kartDrawSeg(const KartCam& cam, const KVec3& a, const KVec3& b, uint
   KVec3 pa = a, pb = b;
   float za = kdot(pa - cam.position, cam.forward), zb = kdot(pb - cam.position, cam.forward);
   if (za < NEAR_Z && zb < NEAR_Z) return;  // fully behind the camera
-  if (za < NEAR_Z) pa = pa + (pb - pa) * ((NEAR_Z - za) / (zb - za));
-  else if (zb < NEAR_Z) pb = pb + (pa - pb) * ((NEAR_Z - zb) / (za - zb));
+  // t is bounded in [0,1] algebraically, but a hard clamp costs nothing and
+  // guarantees a degenerate near-zero denominator (both points landing
+  // almost exactly on the near plane) can never produce a wild extrapolated
+  // point - projected to a huge/garbage screen coordinate, that's both a
+  // stray line across the display AND a very slow Bresenham draw for it.
+  if (za < NEAR_Z) pa = pa + (pb - pa) * constrain((NEAR_Z - za) / (zb - za), 0.0f, 1.0f);
+  else if (zb < NEAR_Z) pb = pb + (pa - pb) * constrain((NEAR_Z - zb) / (za - zb), 0.0f, 1.0f);
   int ax, ay, bx, by;
   if (!cam.project(pa, kartCanvas.width(), kartCanvas.height(), ax, ay)) return;
   if (!cam.project(pb, kartCanvas.width(), kartCanvas.height(), bx, by)) return;
+  // A point sitting right at (or clipped to) the near plane can still
+  // perspective-project to a huge screen coordinate if it has real lateral
+  // offset from the view axis - f/cz blows up as cz->NEAR_Z for anything
+  // not dead-center, with no logic error involved at all. Reject rather
+  // than draw: GFXcanvas16's drawLine has no pre-clip, so a wild coordinate
+  // here means Bresenham steps through a huge, mostly off-canvas run before
+  // writePixel's own per-pixel bounds check discards each one - a stray
+  // line shooting across the display AND a real per-frame cost, for a
+  // segment that's grazing the view frustum edge-on and barely visible
+  // anyway.
+  constexpr int SCREEN_MARGIN = 1000;
+  if (abs(ax) > SCREEN_MARGIN || abs(ay) > SCREEN_MARGIN || abs(bx) > SCREEN_MARGIN || abs(by) > SCREEN_MARGIN) return;
   kartCanvas.drawLine(ax, ay, bx, by, col);
 }
 static void kartFillQuad(const KartCam& cam, const KVec3& a, const KVec3& b, const KVec3& c, const KVec3& d, uint16_t col) {
