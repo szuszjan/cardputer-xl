@@ -3371,7 +3371,10 @@ const SkyPlaneModelParams skyPlaneModels[SKY_PLANE_MODEL_COUNT] = {
   {"TRAINER",       "BALANCED - LEARN HERE", 2.0f,2.4f,0.28f,  3.0f,0.6f,0.9f,0.14f,   1.1f,0.9f,0.5f,      false,false,false,     12.0f,16.0f,  0.55f,1.4f, 0.42f,1.1f,  {0,14,24,34}},
   {"F-16 FALCON",   "FIGHTER AGILITY",       2.2f,1.6f,0.22f,  2.0f,1.0f,0.7f,0.05f,   0.8f,1.1f,0.6f,      false,false,false,     14.0f,18.0f,  1.00f,2.2f, 0.75f,1.8f,  {0,16,30,44}},
   {"SR-71 BLACKBIRD","SUPERSONIC",           3.0f,3.2f,0.20f,  1.8f,1.4f,1.0f,0.00f,   0.5f,0.6f,0.3f,      false,false,false,     16.0f,22.0f,  0.50f,1.2f, 0.40f,1.0f,  {0,20,40,70}},
-  {"B-2 SPIRIT",    "LOW-SPEED STABILITY",   1.0f,1.0f,1.00f,  4.0f,1.4f,1.1f,0.00f,   0.0f,0.0f,0.0f,      true, false,false,     8.0f, 14.0f,  0.40f,1.0f, 0.30f,0.8f,  {0,12,20,28}},
+  // noseLen 2.97 (not a round number): the flyingWing branch's leading-edge
+  // apex angle at the nose is 2*atan(wingSpan/(noseLen+wingSweep)) - solved
+  // for an 85 degree apex (real B-2's sharp point) at this wingSpan/wingSweep.
+  {"B-2 SPIRIT",    "LOW-SPEED STABILITY",   2.97f,1.0f,1.00f,  4.0f,1.4f,1.1f,0.00f,   0.0f,0.0f,0.0f,      true, false,false,     8.0f, 14.0f,  0.40f,1.0f, 0.30f,0.8f,  {0,12,20,28}},
   {"BOEING 737",    "AUTOPILOT TRIM",        2.2f,2.6f,0.40f,  3.2f,0.8f,1.0f,0.10f,   1.3f,1.1f,0.6f,      false,true, true,      13.0f,19.0f,  0.35f,1.0f, 0.30f,0.9f,  {0,16,26,36}},
   // stall/rotate gap was only 2 (7/9) - every other plane keeps a 4-6 unit
   // gap; that thin a margin meant it lifted off right at the edge of a
@@ -3561,15 +3564,23 @@ void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd, const KVec3& pos, f
     // The B-2's real silhouette is one continuous broad triangle/arrowhead
     // leading edge (nose straight out to each wingtip, no separate
     // fuselage/tailplane/fin at all) PLUS its signature double-sawtooth
-    // ("W") trailing edge - a single flat notch read as a plain hexagon,
-    // not a B-2. Per side: wingtip (shallow) -> deep notch -> shallow peak
-    // -> the center notch, alternating depth twice for a real zigzag.
+    // ("W"/"vvvv") trailing edge. Per side: wingtip and the inner tooth tip
+    // both sit on the SHALLOW line (shallowBack); the outer notch and the
+    // center notch both sit on the DEEP line (deepBack, further back by
+    // tailLen) - alternating shallow/deep/shallow/deep is what actually
+    // reads as a zigzag. The previous version used wingSweep for the
+    // wingtip's depth but tailLen (a SMALLER number for this plane) for the
+    // "deep" notch, so the trailing edge only ever swept monotonically
+    // forward from wingtip to center - a single flat chevron ("/-\"), never
+    // an alternating one.
     KVec3 nose = pos + fwd * m.noseLen;
-    KVec3 wingTipL = pos - right * m.wingSpan - fwd * m.wingSweep, wingTipR = pos + right * m.wingSpan - fwd * m.wingSweep;
-    float midSpan = (m.wingSpan + m.bodyHalfWidth) * 0.5f;
-    KVec3 deepL = pos - right * midSpan - fwd * m.tailLen, deepR = pos + right * midSpan - fwd * m.tailLen;
-    KVec3 peakL = pos - right * (midSpan * 0.65f) - fwd * (m.wingSweep * 0.6f), peakR = pos + right * (midSpan * 0.65f) - fwd * (m.wingSweep * 0.6f);
-    KVec3 notchL = pos - right * m.bodyHalfWidth - fwd * (m.tailLen * 0.7f), notchR = pos + right * m.bodyHalfWidth - fwd * (m.tailLen * 0.7f);
+    float shallowBack = m.wingSweep, deepBack = m.wingSweep + m.tailLen;
+    KVec3 wingTipL = pos - right * m.wingSpan - fwd * shallowBack, wingTipR = pos + right * m.wingSpan - fwd * shallowBack;
+    float outerSpan = (m.wingSpan + m.bodyHalfWidth) * 0.5f;
+    float innerSpan = m.bodyHalfWidth + (outerSpan - m.bodyHalfWidth) * 0.45f;
+    KVec3 deepL = pos - right * outerSpan - fwd * deepBack, deepR = pos + right * outerSpan - fwd * deepBack;
+    KVec3 peakL = pos - right * innerSpan - fwd * shallowBack, peakR = pos + right * innerSpan - fwd * shallowBack;
+    KVec3 notchL = pos - right * m.bodyHalfWidth - fwd * deepBack, notchR = pos + right * m.bodyHalfWidth - fwd * deepBack;
     kartDrawSeg(cam, nose, wingTipL, ILI9341_WHITE); kartDrawSeg(cam, nose, wingTipR, ILI9341_WHITE);
     kartDrawSeg(cam, wingTipL, deepL, ILI9341_WHITE); kartDrawSeg(cam, deepL, peakL, ILI9341_WHITE); kartDrawSeg(cam, peakL, notchL, ILI9341_WHITE);
     kartDrawSeg(cam, wingTipR, deepR, ILI9341_WHITE); kartDrawSeg(cam, deepR, peakR, ILI9341_WHITE); kartDrawSeg(cam, peakR, notchR, ILI9341_WHITE);
