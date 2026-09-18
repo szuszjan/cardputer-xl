@@ -3242,15 +3242,13 @@ SkyPilotMode skyMode = SKY_MODE_FREEROAM;
 constexpr int SKY_MODE_OPTION_COUNT = 3;
 int skyModeSelected = 0;
 
+// Stall/rotate speed, control rates, and throttle targets all now come from
+// the selected SkyPlaneModelParams (skyPlaneModels[skyPlaneModelIndex]) -
+// they vary per aircraft, so they don't belong as fixed members here.
 struct SkyPlane {
   KVec3 pos{0, 40, 0};
   float heading = 0, pitch = 0, bank = 0;
   float speed = 20.0f;
-  // MIN_SPEED (idle-cruise floor) sits just above STALL_SPEED (see
-  // stepSkyPilotFlight()) so coasting with no throttle settles into normal
-  // flight, not a permanent stall - only active braking or a sustained climb
-  // bleeds below it.
-  static constexpr float MIN_SPEED = 14.0f, MAX_SPEED = 34.0f;
 };
 SkyPlane skyPlane;
 bool skyGrounded = true;    // wheels on the runway (taxi/takeoff roll, or after landing)
@@ -3272,8 +3270,37 @@ float skyEngineSmoothedFreq = 0;
 // accelerating without bound for as long as a key is held.
 constexpr int SKY_THROTTLE_LEVELS = 4;
 const char* skyThrottleNames[SKY_THROTTLE_LEVELS] = {"OFF", "LOW", "MED", "HIGH"};
-const float skyThrottleTargetSpeed[SKY_THROTTLE_LEVELS] = {0.0f, 14.0f, 24.0f, 34.0f};
 int skyThrottleLevel = 0;
+
+// Six selectable aircraft ('P' on the HOME screen), each with its own
+// silhouette (flyingWing/twinNacelle pick a structurally different draw
+// path in skyDrawPlaneModel, not just resized numbers) and its own flight
+// characteristics/"special thing", rather than one fixed plane.
+struct SkyPlaneModelParams {
+  const char* name;
+  const char* special;
+  float noseLen, tailLen, bodyHalfWidth;
+  float wingSpan, wingSweep, wingChord, dihedral;
+  float tailSpan, finHeight, finSweep;
+  bool flyingWing, twinNacelle, autoLevelAssist;
+  float stallSpeed, rotateSpeed;
+  float bankRateMax, bankAccel, pitchRateMax, pitchAccel;
+  float throttleTargets[SKY_THROTTLE_LEVELS];
+};
+constexpr int SKY_PLANE_MODEL_COUNT = 6;
+const SkyPlaneModelParams skyPlaneModels[SKY_PLANE_MODEL_COUNT] = {
+  // name,          special,                noseLen,tailLen,bodyHW, wingSpan,wingSweep,wingChord,dihedral, tailSpan,finH,finSweep, flyingWing,twinNacelle,autoLevel, stall,rotate, bankRateMax,bankAccel,pitchRateMax,pitchAccel, throttles{OFF,LOW,MED,HIGH}
+  {"TRAINER",       "BALANCED - LEARN HERE", 2.0f,2.4f,0.28f,  3.0f,0.6f,0.9f,0.14f,   1.1f,0.9f,0.5f,      false,false,false,     12.0f,16.0f,  0.55f,1.4f, 0.42f,1.1f,  {0,14,24,34}},
+  {"F-16 FALCON",   "FIGHTER AGILITY",       2.2f,1.6f,0.22f,  2.0f,1.0f,0.7f,0.05f,   0.8f,1.1f,0.6f,      false,false,false,     14.0f,18.0f,  1.00f,2.2f, 0.75f,1.8f,  {0,16,30,44}},
+  {"SR-71 BLACKBIRD","SUPERSONIC",           3.0f,3.2f,0.20f,  1.8f,1.4f,1.0f,0.00f,   0.5f,0.6f,0.3f,      false,false,false,     16.0f,22.0f,  0.50f,1.2f, 0.40f,1.0f,  {0,20,40,70}},
+  {"B-2 SPIRIT",    "LOW-SPEED STABILITY",   1.0f,1.0f,1.00f,  4.0f,1.4f,1.1f,0.00f,   0.0f,0.0f,0.0f,      true, false,false,     8.0f, 14.0f,  0.40f,1.0f, 0.30f,0.8f,  {0,12,20,28}},
+  {"BOEING 737",    "AUTOPILOT TRIM",        2.2f,2.6f,0.40f,  3.2f,0.8f,1.0f,0.10f,   1.3f,1.1f,0.6f,      false,true, true,      13.0f,19.0f,  0.35f,1.0f, 0.30f,0.9f,  {0,16,26,36}},
+  {"BUSH PLANE",    "SHORT TAKEOFF",         1.6f,1.8f,0.25f,  3.4f,0.2f,0.8f,0.20f,   0.9f,0.8f,0.4f,      false,false,false,     7.0f, 9.0f,   0.50f,1.3f, 0.40f,1.0f,  {0,10,16,22}},
+};
+int skyPlaneModelIndex = 0;
+constexpr float SKY_SOUND_BARRIER = 45.0f;
+bool skyWasSupersonic = false;
+unsigned long skyBoomFlashUntil = 0;
 
 float skyScore = 0;      // distance flown this flight, in world units
 int skyBestScore = 0;
@@ -3391,10 +3418,13 @@ void skyDrawTerrain(const KartCam& cam, const KVec3& fwd) {
   for (int i = 0; i <= GRID; ++i) for (int j = 0; j < GRID; ++j) kartDrawSeg(cam, pts[j][i], pts[j + 1][i], ILI9341_OLIVE);
 }
 // Drawn using the plane's BANKED right/up (unlike the upright chase camera),
-// so the wings visibly tilt even though the camera itself never rolls. A
-// fuller silhouette than a few crossed lines: a diamond fuselage with a
-// canopy hint, swept/dihedral wings, a tailplane, and a triangular fin.
-void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd) {
+// so the wings visibly tilt even though the camera itself never rolls.
+// Parameterized by the selected SkyPlaneModelParams so each of the 6
+// aircraft actually looks different, not just resized numbers on the same
+// shape: flyingWing (B-2) takes a structurally different path with no
+// separate fuselage/tail/fin at all, and twinNacelle (737) adds a pair of
+// underwing engine pods on top of the conventional layout.
+void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd, const SkyPlaneModelParams& m) {
   KVec3 worldUp{0, 1, 0};
   KVec3 rightLevel = knormalized(kcross(fwd, worldUp));
   KVec3 upLevel = kcross(rightLevel, fwd);
@@ -3405,22 +3435,35 @@ void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd) {
   KVec3 right = rightLevel * cosf(skyPlane.bank) - upLevel * sinf(skyPlane.bank);
   KVec3 up = upLevel * cosf(skyPlane.bank) + rightLevel * sinf(skyPlane.bank);
   const KVec3& pos = skyPlane.pos;
-  const float noseLen = 2.0f, tailLen = 2.4f, bodyHalfWidth = 0.28f;
-  const float wingSpan = 3.0f, wingSweep = 0.6f, wingChord = 0.9f, dihedral = 0.14f;
-  const float tailSpan = 1.1f, finHeight = 0.9f, finSweep = 0.5f;
 
-  KVec3 nose = pos + fwd * noseLen, tail = pos - fwd * tailLen;
-  KVec3 bodyL = pos - right * bodyHalfWidth, bodyR = pos + right * bodyHalfWidth;
-  KVec3 canopy = pos + fwd * (noseLen * 0.35f) + up * 0.22f;
+  if (m.flyingWing) {
+    // A single wide swept wing blending straight into the body, with no
+    // separate fuselage/tailplane/fin - the B-2's defining silhouette.
+    KVec3 nose = pos + fwd * m.noseLen;
+    KVec3 bodyL = pos - right * m.bodyHalfWidth, bodyR = pos + right * m.bodyHalfWidth;
+    KVec3 wingTipL = pos - right * m.wingSpan - fwd * m.wingSweep, wingTipR = pos + right * m.wingSpan - fwd * m.wingSweep;
+    KVec3 wingTrailL = wingTipL - fwd * (m.wingChord * 0.4f), wingTrailR = wingTipR - fwd * (m.wingChord * 0.4f);
+    KVec3 trailL = pos - right * m.bodyHalfWidth - fwd * m.tailLen, trailR = pos + right * m.bodyHalfWidth - fwd * m.tailLen;
+    kartDrawSeg(cam, nose, bodyL, ILI9341_WHITE); kartDrawSeg(cam, nose, bodyR, ILI9341_WHITE);
+    kartDrawSeg(cam, bodyL, wingTipL, ILI9341_WHITE); kartDrawSeg(cam, bodyR, wingTipR, ILI9341_WHITE);
+    kartDrawSeg(cam, wingTipL, wingTrailL, ILI9341_WHITE); kartDrawSeg(cam, wingTipR, wingTrailR, ILI9341_WHITE);
+    kartDrawSeg(cam, wingTrailL, trailL, ILI9341_WHITE); kartDrawSeg(cam, wingTrailR, trailR, ILI9341_WHITE);
+    kartDrawSeg(cam, trailL, trailR, ILI9341_WHITE);
+    return;
+  }
 
-  KVec3 wingTipL = pos - right * wingSpan - fwd * wingSweep + up * (dihedral * wingSpan);
-  KVec3 wingTipR = pos + right * wingSpan - fwd * wingSweep + up * (dihedral * wingSpan);
-  KVec3 wingBackL = pos - right * bodyHalfWidth - fwd * wingChord;
-  KVec3 wingBackR = pos + right * bodyHalfWidth - fwd * wingChord;
+  KVec3 nose = pos + fwd * m.noseLen, tail = pos - fwd * m.tailLen;
+  KVec3 bodyL = pos - right * m.bodyHalfWidth, bodyR = pos + right * m.bodyHalfWidth;
+  KVec3 canopy = pos + fwd * (m.noseLen * 0.35f) + up * 0.22f;
 
-  KVec3 tailplaneRootL = tail - right * bodyHalfWidth * 0.8f, tailplaneRootR = tail + right * bodyHalfWidth * 0.8f;
-  KVec3 tailplaneTipL = tail - right * tailSpan - fwd * 0.15f, tailplaneTipR = tail + right * tailSpan - fwd * 0.15f;
-  KVec3 finTop = tail + up * finHeight - fwd * finSweep * 0.3f, finBack = tail - fwd * finSweep + up * (finHeight * 0.35f);
+  KVec3 wingTipL = pos - right * m.wingSpan - fwd * m.wingSweep + up * (m.dihedral * m.wingSpan);
+  KVec3 wingTipR = pos + right * m.wingSpan - fwd * m.wingSweep + up * (m.dihedral * m.wingSpan);
+  KVec3 wingBackL = pos - right * m.bodyHalfWidth - fwd * m.wingChord;
+  KVec3 wingBackR = pos + right * m.bodyHalfWidth - fwd * m.wingChord;
+
+  KVec3 tailplaneRootL = tail - right * m.bodyHalfWidth * 0.8f, tailplaneRootR = tail + right * m.bodyHalfWidth * 0.8f;
+  KVec3 tailplaneTipL = tail - right * m.tailSpan - fwd * 0.15f, tailplaneTipR = tail + right * m.tailSpan - fwd * 0.15f;
+  KVec3 finTop = tail + up * m.finHeight - fwd * m.finSweep * 0.3f, finBack = tail - fwd * m.finSweep + up * (m.finHeight * 0.35f);
 
   kartDrawSeg(cam, nose, bodyL, ILI9341_WHITE); kartDrawSeg(cam, nose, bodyR, ILI9341_WHITE);
   kartDrawSeg(cam, bodyL, tail, ILI9341_WHITE); kartDrawSeg(cam, bodyR, tail, ILI9341_WHITE);
@@ -3434,6 +3477,17 @@ void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd) {
   kartDrawSeg(cam, tailplaneRootL, tailplaneRootR, ILI9341_LIGHTGREY);
 
   kartDrawSeg(cam, tail, finTop, ILI9341_RED); kartDrawSeg(cam, finTop, finBack, ILI9341_RED); kartDrawSeg(cam, finBack, tail, ILI9341_RED);
+
+  if (m.twinNacelle) {
+    // A pair of underwing engine pods - the 737's twin-engine silhouette,
+    // instead of a fighter's single fuselage-mounted intake.
+    KVec3 nacelleL = pos - right * (m.wingSpan * 0.45f) - fwd * 0.2f - up * 0.15f;
+    KVec3 nacelleR = pos + right * (m.wingSpan * 0.45f) - fwd * 0.2f - up * 0.15f;
+    kartDrawSeg(cam, nacelleL, nacelleL - fwd * 0.5f, ILI9341_DARKGREY);
+    kartDrawSeg(cam, nacelleR, nacelleR - fwd * 0.5f, ILI9341_DARKGREY);
+    kartDrawSeg(cam, nacelleL, wingBackL, ILI9341_DARKGREY);
+    kartDrawSeg(cam, nacelleR, wingBackR, ILI9341_DARKGREY);
+  }
 }
 // A runway outline plus dashed centerline and a threshold stripe, drawn over
 // the terrain's flattened landing pad - the flattening alone made a runway
@@ -3484,7 +3538,7 @@ void skyRenderScene(const KartCam& cam, const KVec3& fwd, bool firstPerson) {
   kartDrawSky(cam);
   skyDrawTerrain(cam, fwd);
   for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) skyDrawRunway(cam, skyAirports[i]);
-  if (firstPerson) skyDrawCockpitOverlay(); else skyDrawPlaneModel(cam, fwd);
+  if (firstPerson) skyDrawCockpitOverlay(); else skyDrawPlaneModel(cam, fwd, skyPlaneModels[skyPlaneModelIndex]);
 }
 // Bottom instrument strip: a rotating/tilting attitude indicator (per-column
 // fill against the tilted horizon line - cheap way to get a properly clipped
@@ -3597,6 +3651,12 @@ void skyRenderHud(bool stalling, bool pullUp) {
     kartCanvas.print("PULL UP");
     kartCanvas.setTextSize(1);
   }
+  if (millis() < skyBoomFlashUntil) {
+    kartCanvas.setTextSize(2); kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
+    kartCanvas.setCursor(kartCanvas.width() / 2 - 78, kartCanvas.height() / 2 + 10);
+    kartCanvas.print("SONIC BOOM");
+    kartCanvas.setTextSize(1);
+  }
 
   kartCanvas.fillRect(0, hudY, kartCanvas.width(), SKY_HUD_H, ILI9341_BLACK);
   kartCanvas.drawFastHLine(0, hudY, kartCanvas.width(), ILI9341_DARKGREY);
@@ -3622,6 +3682,8 @@ void startSkyPilotFlight(int modeSelected) {
   skyPlane = SkyPlane();
   skyBankRateCur = skyPitchRateCur = 0;
   skyWasStalling = false;
+  skyWasSupersonic = false;
+  skyBoomFlashUntil = 0;
   skyScore = 0;
   skyLastFrameMs = millis();
   skyMissionSuccess = false;
@@ -3685,15 +3747,15 @@ void drawSkyPilotHub() {
     if (sel) tft.fillRoundRect(8, y - 3, 304, 16, 4, bg);
     tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  "); tft.print(modes[i]);
   }
-  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 100); tft.print("; . PITCH      , / BANK + TURN");
-  tft.setCursor(12, CONTENT_Y + 114); tft.print("W/A THROTTLE (4 STEPS)  Q GEAR  V VIEW");
+  const SkyPlaneModelParams& picked = skyPlaneModels[skyPlaneModelIndex];
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 72); tft.print(String("PLANE  ") + picked.name + "  (P TO CHANGE)");
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 84); tft.print(String("Special: ") + picked.special);
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 104); tft.print("; . PITCH      , / BANK + TURN");
+  tft.setCursor(12, CONTENT_Y + 116); tft.print("W/A THROTTLE  Q GEAR  V VIEW");
   tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 134); tft.print("Controls hold their angle on release.");
   tft.setCursor(12, CONTENT_Y + 146); tft.print("MED or HIGH throttle needed to take off.");
-  footer(";/. SELECT   ENTER START   M SOUND   FN GAMES");
+  footer(";/. SELECT  ENTER START  M SOUND  P PLANE  FN GAMES");
 }
-
-constexpr float SKY_STALL_SPEED = 12.0f;
-constexpr float SKY_ROTATE_SPEED = 16.0f;  // ground speed needed before the nose can lift off
 
 // Continuous engine drone on its own speaker channel (Kart Racer's engine
 // tone uses channel 2 and its music/fx use 0/1 - channel 3 keeps Sky Pilot
@@ -3757,21 +3819,12 @@ void stepSkyPilotFlight() {
   bool edgeA = nowA && !prevA; prevA = nowA;
   if (edgeA) skyThrottleLevel = max(skyThrottleLevel - 1, 0);
 
-  bool stalling = !skyGrounded && skyPlane.speed < SKY_STALL_SPEED;
+  const SkyPlaneModelParams& model = skyPlaneModels[skyPlaneModelIndex];
+  bool stalling = !skyGrounded && skyPlane.speed < model.stallSpeed;
   if (stalling && (now - skyLastStallBeepAt > 450 || !skyWasStalling)) {
     skyLastStallBeepAt = now; vibrate(40); if (volumeLevel) M5Cardputer.Speaker.tone(160, 90);
   }
   skyWasStalling = stalling;
-
-  // Speed chases whichever target the current throttle notch implies,
-  // plus a small extra drag from the gear hanging in the airstream - the
-  // same lever that's required for a safe landing also costs you cruise
-  // speed if you forget to raise it after takeoff.
-  static const float SPEED_APPROACH_RATE = 7.0f, GEAR_DRAG = 1.4f;
-  float throttleTarget = skyThrottleTargetSpeed[skyThrottleLevel];
-  if (skyPlane.speed < throttleTarget) skyPlane.speed = min(skyPlane.speed + SPEED_APPROACH_RATE * dt, throttleTarget);
-  else if (skyPlane.speed > throttleTarget) skyPlane.speed = max(skyPlane.speed - SPEED_APPROACH_RATE * dt, throttleTarget);
-  if (skyGearDown && !skyGrounded) skyPlane.speed -= GEAR_DRAG * dt;
 
   if (skyGrounded) {
     // Ground roll: locked to the runway heading - a real aircraft can't
@@ -3779,7 +3832,7 @@ void stepSkyPilotFlight() {
     // rotate the nose up.
     skyPlane.bank = 0;
     skyBankRateCur = skyPitchRateCur = 0;
-    if (pitchInput > 0 && skyPlane.speed >= SKY_ROTATE_SPEED) skyPlane.pitch = min(skyPlane.pitch + 0.6f * dt, 0.3f);
+    if (pitchInput > 0 && skyPlane.speed >= model.rotateSpeed) skyPlane.pitch = min(skyPlane.pitch + 0.6f * dt, 0.3f);
     else skyPlane.pitch = max(skyPlane.pitch - 0.6f * dt, 0.0f);
   } else {
     // Pitch/bank are rate-controlled with their OWN acceleration (not just a
@@ -3787,10 +3840,10 @@ void stepSkyPilotFlight() {
     // down like a real control surface has inertia, instead of snapping to
     // full deflection - this is what made the earlier version feel twitchy.
     // Releasing the key decelerates the RATE, not the angle, so the plane
-    // still holds whatever attitude it ends up at.
+    // still holds whatever attitude it ends up at. Rates/accel come from the
+    // selected plane's model - a fighter rolls much faster than a bomber.
     float controlScale = stalling ? 0.4f : 1.0f;
-    static const float BANK_RATE_MAX = 0.55f, BANK_ACCEL = 1.4f, BANK_MAX = 1.2f;
-    static const float PITCH_RATE_MAX = 0.42f, PITCH_ACCEL = 1.1f, PITCH_MAX = 1.3f;
+    constexpr float BANK_MAX = 1.2f, PITCH_MAX = 1.3f;
     // Turning is coordinated with bank, like a real aircraft (rudder is
     // implicit) - NOT a separate yaw control. heading -= (not +=) so that a
     // left bank (negative, from ',') increases heading, which this file's
@@ -3798,26 +3851,58 @@ void stepSkyPilotFlight() {
     // camera's left, matching Kart Racer's steer sign.
     static const float TURN_RATE_PER_BANK = 1.2f;
 
-    float bankTargetRate = bankInput * BANK_RATE_MAX * controlScale;
-    if (skyBankRateCur < bankTargetRate) skyBankRateCur = min(skyBankRateCur + BANK_ACCEL * dt, bankTargetRate);
-    else if (skyBankRateCur > bankTargetRate) skyBankRateCur = max(skyBankRateCur - BANK_ACCEL * dt, bankTargetRate);
+    float bankTargetRate = bankInput * model.bankRateMax * controlScale;
+    if (skyBankRateCur < bankTargetRate) skyBankRateCur = min(skyBankRateCur + model.bankAccel * dt, bankTargetRate);
+    else if (skyBankRateCur > bankTargetRate) skyBankRateCur = max(skyBankRateCur - model.bankAccel * dt, bankTargetRate);
+    // The 737's "AUTOPILOT TRIM" special: a wing-leveler that eases bank
+    // toward 0 whenever the pilot isn't actively commanding a turn, unlike
+    // every other plane which just holds whatever bank it's left at.
+    if (model.autoLevelAssist && bankInput == 0) skyPlane.bank = skyPlane.bank > 0 ? max(0.0f, skyPlane.bank - 0.3f * dt) : min(0.0f, skyPlane.bank + 0.3f * dt);
     skyPlane.bank = constrain(skyPlane.bank + skyBankRateCur * dt, -BANK_MAX, BANK_MAX);
 
-    float pitchTargetRate = pitchInput * PITCH_RATE_MAX * controlScale;
-    if (skyPitchRateCur < pitchTargetRate) skyPitchRateCur = min(skyPitchRateCur + PITCH_ACCEL * dt, pitchTargetRate);
-    else if (skyPitchRateCur > pitchTargetRate) skyPitchRateCur = max(skyPitchRateCur - PITCH_ACCEL * dt, pitchTargetRate);
+    float pitchTargetRate = pitchInput * model.pitchRateMax * controlScale;
+    if (skyPitchRateCur < pitchTargetRate) skyPitchRateCur = min(skyPitchRateCur + model.pitchAccel * dt, pitchTargetRate);
+    else if (skyPitchRateCur > pitchTargetRate) skyPitchRateCur = max(skyPitchRateCur - model.pitchAccel * dt, pitchTargetRate);
     skyPlane.pitch = constrain(skyPlane.pitch + skyPitchRateCur * dt, -PITCH_MAX, PITCH_MAX);
     if (stalling) skyPlane.pitch = max(skyPlane.pitch - 0.5f * dt, -PITCH_MAX);  // the nose drops on its own
 
     skyPlane.heading -= sinf(skyPlane.bank) * TURN_RATE_PER_BANK * dt;
-
-    // Climbing trades speed for altitude and diving trades back, like real
-    // energy conservation - also what makes a sustained climb bleed into a
-    // stall instead of stalling being reachable only by braking.
-    constexpr float SKY_CLIMB_SPEED_LOSS = 6.0f;
-    skyPlane.speed -= sinf(skyPlane.pitch) * SKY_CLIMB_SPEED_LOSS * dt;
   }
-  skyPlane.speed = constrain(skyPlane.speed, 0.0f, SkyPlane::MAX_SPEED);
+
+  // Speed chases a TARGET derived from the throttle notch, reduced by
+  // climbing (energy conservation - diving gives some back via the same
+  // term going negative) and by the gear hanging in the airstream. This
+  // used to be a flat subtraction applied on top of an independent
+  // throttle-chase, which for a sustained climb near cruise speed was only
+  // barely (and fragile-ly) countered by the chase term once already at
+  // target - combined with gear drag right after a takeoff roll (gear
+  // starts down and there's no reason a player would already have retracted
+  // it), a normal climb-out could out-drain the chase entirely and stall
+  // just a few seconds after liftoff, with almost no altitude to recover in
+  // - exactly "pitching up crashes into the ground". Folding climb/gear
+  // into the TARGET instead makes the whole thing self-limiting: at high
+  // throttle the effective target during a climb still sits well above
+  // stall speed, and only low throttle or a very sustained climb can drag
+  // it down near stall - a deliberate risk, not an inevitable one.
+  static const float SPEED_APPROACH_RATE = 7.0f;
+  constexpr float SKY_CLIMB_TARGET_LOSS = 14.0f, SKY_GEAR_TARGET_LOSS = 6.0f;
+  float climbPenalty = skyGrounded ? 0.0f : sinf(skyPlane.pitch) * SKY_CLIMB_TARGET_LOSS;
+  float gearPenalty = (skyGearDown && !skyGrounded) ? SKY_GEAR_TARGET_LOSS : 0.0f;
+  float maxSpeed = model.throttleTargets[SKY_THROTTLE_LEVELS - 1];
+  float effectiveTarget = max(0.0f, model.throttleTargets[skyThrottleLevel] - climbPenalty - gearPenalty);
+  if (skyPlane.speed < effectiveTarget) skyPlane.speed = min(skyPlane.speed + SPEED_APPROACH_RATE * dt, effectiveTarget);
+  else if (skyPlane.speed > effectiveTarget) skyPlane.speed = max(skyPlane.speed - SPEED_APPROACH_RATE * dt, effectiveTarget);
+  skyPlane.speed = constrain(skyPlane.speed, 0.0f, maxSpeed);
+
+  // The Blackbird's "SUPERSONIC" special: crossing the sound barrier gets a
+  // one-shot sonic boom (haptic thump, tone burst, a brief HUD flash) - only
+  // it can realistically reach this speed, but the check itself is generic.
+  bool supersonic = skyPlane.speed >= SKY_SOUND_BARRIER;
+  if (supersonic && !skyWasSupersonic) {
+    vibrate(150); if (volumeLevel) { M5Cardputer.Speaker.tone(1400, 60); delay(40); M5Cardputer.Speaker.tone(200, 140); }
+    skyBoomFlashUntil = now + 900;
+  }
+  skyWasSupersonic = supersonic;
 
   KVec3 fwd = {cosf(skyPlane.pitch) * sinf(skyPlane.heading), sinf(skyPlane.pitch), cosf(skyPlane.pitch) * cosf(skyPlane.heading)};
   float moveDist = skyPlane.speed * dt;
@@ -3828,7 +3913,7 @@ void stepSkyPilotFlight() {
   bool pullUp = false;
   if (skyGrounded) {
     skyPlane.pos.y = skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
-    if (skyPlane.pitch > 0.08f && skyPlane.speed >= SKY_ROTATE_SPEED) { skyGrounded = false; vibrate(15); }  // liftoff
+    if (skyPlane.pitch > 0.08f && skyPlane.speed >= model.rotateSpeed) { skyGrounded = false; vibrate(15); }  // liftoff
   } else {
     float ground = skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
     int nearAirport = -1;
@@ -7032,6 +7117,7 @@ void keyboard() {
           if (c == ';') { skyModeSelected = (skyModeSelected + SKY_MODE_OPTION_COUNT - 1) % SKY_MODE_OPTION_COUNT; redrawNeeded = true; }
           else if (c == '.') { skyModeSelected = (skyModeSelected + 1) % SKY_MODE_OPTION_COUNT; redrawNeeded = true; }
           else if (c == 'm') { skyEngineSoundEnabled = !skyEngineSoundEnabled; playFunctionSound(); redrawNeeded = true; }
+          else if (c == 'p') { skyPlaneModelIndex = (skyPlaneModelIndex + 1) % SKY_PLANE_MODEL_COUNT; playFunctionSound(); redrawNeeded = true; }
         }
       }
       if (k.enter && (skyState == SKY_HOME || skyState == SKY_RESULTS)) { playEnterSound(); startSkyPilotFlight(skyModeSelected); }
