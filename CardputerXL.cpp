@@ -3376,6 +3376,24 @@ unsigned long skyBoomFlashUntil = 0;
 // between itself and the ground at least once since the last liftoff.
 bool skyHasClearedGround = false;
 
+// AI traffic: simple wandering planes with basic terrain avoidance, no
+// collision with the player (visual/radar only) - not simulated with the
+// player's own rate-controlled/stalling flight model, just a direct
+// heading/pitch ease toward a periodically-changing target, which is
+// plenty for background traffic that isn't meant to be flown against.
+struct SkyBot {
+  KVec3 pos;
+  float heading, pitch, bank, speed;
+  float targetHeading;
+  unsigned long nextTurnAt;
+  int modelIndex;
+};
+constexpr int SKY_BOT_COUNT = 4;
+SkyBot skyBots[SKY_BOT_COUNT];
+// 'R' on the HOME screen - shows bots (as blips) on the same minimap
+// airports already use, regardless of game mode.
+bool skyRadarEnabled = true;
+
 float skyScore = 0;      // distance flown this flight, in world units
 int skyBestScore = 0;
 unsigned long skyLastFrameMs = 0;
@@ -3504,7 +3522,10 @@ void skyDrawTerrain(const KartCam& cam, const KVec3& fwd) {
 // shape: flyingWing (B-2) takes a structurally different path with no
 // separate fuselage/tail/fin at all, and twinNacelle (737) adds a pair of
 // underwing engine pods on top of the conventional layout.
-void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd, const SkyPlaneModelParams& m) {
+// pos/bank are explicit parameters (not read from the global skyPlane)
+// specifically so this same function can draw AI bots too, not just the
+// player's own aircraft.
+void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd, const KVec3& pos, float bank, const SkyPlaneModelParams& m) {
   KVec3 worldUp{0, 1, 0};
   KVec3 rightLevel = knormalized(kcross(fwd, worldUp));
   KVec3 upLevel = kcross(rightLevel, fwd);
@@ -3512,9 +3533,8 @@ void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd, const SkyPlaneModel
   // wingtip down and the left one up to visually match the actual turn (see
   // TURN_RATE_PER_BANK's sign in stepSkyPilotFlight()); the previous version
   // had this backwards, so the model banked opposite to the way it turned.
-  KVec3 right = rightLevel * cosf(skyPlane.bank) - upLevel * sinf(skyPlane.bank);
-  KVec3 up = upLevel * cosf(skyPlane.bank) + rightLevel * sinf(skyPlane.bank);
-  const KVec3& pos = skyPlane.pos;
+  KVec3 right = rightLevel * cosf(bank) - upLevel * sinf(bank);
+  KVec3 up = upLevel * cosf(bank) + rightLevel * sinf(bank);
 
   if (m.flyingWing) {
     // The B-2's real silhouette is one continuous broad triangle/arrowhead
@@ -3640,12 +3660,75 @@ void skyDrawAirportLabels(const KartCam& cam) {
     kartCanvas.setCursor(sx - textW / 2, sy - 8); kartCanvas.print(skyAirports[i].name);
   }
 }
+void skyInitBots() {
+  for (int i = 0; i < SKY_BOT_COUNT; i++) {
+    float ang = (2 * KART_PI * i) / SKY_BOT_COUNT + (random(0, 100) / 100.0f);
+    float dist = 120.0f + random(0, 150);
+    SkyBot& b = skyBots[i];
+    b.pos = {skyPlane.pos.x + cosf(ang) * dist, skyPlane.pos.y + 10.0f + random(0, 20), skyPlane.pos.z + sinf(ang) * dist};
+    b.heading = (random(0, 628)) / 100.0f;
+    b.pitch = 0; b.bank = 0;
+    b.speed = 14.0f + random(0, 10);
+    b.targetHeading = b.heading;
+    b.nextTurnAt = millis() + 3000 + random(0, 4000);
+    b.modelIndex = (i + 1) % SKY_PLANE_MODEL_COUNT;  // never TRAINER (0) - keeps the player's own plane visually distinct if it's selected
+  }
+}
+// Direct heading/pitch easing toward a periodically-changing target, not the
+// player's rate-controlled/stalling model - background traffic doesn't need
+// to be flown against, just present and plausible. A hard altitude floor on
+// top of the pitch-based avoidance guarantees a bot can never visibly clip
+// through terrain even if its climb response lags behind fast-rising ground.
+void skyUpdateBots(float dt) {
+  unsigned long now = millis();
+  for (int i = 0; i < SKY_BOT_COUNT; i++) {
+    SkyBot& b = skyBots[i];
+    if (now >= b.nextTurnAt) {
+      float dx = skyPlane.pos.x - b.pos.x, dz = skyPlane.pos.z - b.pos.z;
+      if (sqrtf(dx * dx + dz * dz) > 1400.0f) {
+        b.targetHeading = atan2f(dx, dz);  // strayed too far - head back toward the player's area
+      } else {
+        b.targetHeading = b.heading + ((random(0, 200) - 100) / 100.0f) * 1.5f;
+      }
+      b.nextTurnAt = now + 3000 + random(0, 4000);
+    }
+
+    float diff = b.targetHeading - b.heading;
+    while (diff > KART_PI) diff -= 2 * KART_PI;
+    while (diff < -KART_PI) diff += 2 * KART_PI;
+    float turnDir = diff > 0 ? 1.0f : (diff < 0 ? -1.0f : 0.0f);
+    b.heading += turnDir * min(0.5f * dt, fabsf(diff));
+    // Matches the player's own sign convention (heading -= sin(bank)*rate) -
+    // heading increasing corresponds to negative bank.
+    float targetBank = fabsf(diff) > 0.03f ? -turnDir * 0.5f : 0.0f;
+    b.bank += (targetBank - b.bank) * min(1.0f, 3.0f * dt);
+
+    float ground = skyTerrainHeight(b.pos.x, b.pos.z);
+    float clearance = b.pos.y - ground;
+    float targetPitch = clearance < 25.0f ? 0.4f : 0.0f;
+    b.pitch += (targetPitch - b.pitch) * min(1.0f, 1.5f * dt);
+
+    KVec3 fwd{cosf(b.pitch) * sinf(b.heading), sinf(b.pitch), cosf(b.pitch) * cosf(b.heading)};
+    b.pos = b.pos + fwd * (b.speed * dt);
+    if (b.pos.y < ground + 3.0f) b.pos.y = ground + 3.0f;  // hard floor, belt-and-suspenders on top of the pitch avoidance above
+  }
+}
+void skyDrawBots(const KartCam& cam) {
+  for (int i = 0; i < SKY_BOT_COUNT; i++) {
+    const SkyBot& b = skyBots[i];
+    KVec3 fwd{cosf(b.pitch) * sinf(b.heading), sinf(b.pitch), cosf(b.pitch) * cosf(b.heading)};
+    KVec3 rel = b.pos - cam.position;
+    if (kdot(rel, rel) > 700.0f * 700.0f) continue;  // far enough to skip drawing - not worth the segments
+    skyDrawPlaneModel(cam, fwd, b.pos, b.bank, skyPlaneModels[b.modelIndex]);
+  }
+}
 void skyRenderScene(const KartCam& cam, const KVec3& fwd, bool firstPerson) {
   kartCanvas.fillScreen(ILI9341_BLACK);
   kartDrawSky(cam);
   skyDrawTerrain(cam, fwd);
   for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) skyDrawRunway(cam, skyAirports[i]);
-  if (firstPerson) skyDrawCockpitOverlay(); else skyDrawPlaneModel(cam, fwd, skyPlaneModels[skyPlaneModelIndex]);
+  if (firstPerson) skyDrawCockpitOverlay(); else skyDrawPlaneModel(cam, fwd, skyPlane.pos, skyPlane.bank, skyPlaneModels[skyPlaneModelIndex]);
+  skyDrawBots(cam);
   skyDrawAirportLabels(cam);
 }
 // Bottom instrument strip: a rotating/tilting attitude indicator (per-column
@@ -3726,6 +3809,15 @@ void skyDrawMinimap(int x0, int y0, int size) {
     if (dist > maxR && dist > 0.001f) { float s = maxR / dist; dx *= s; dz *= s; }
     bool isTarget = skyMode == SKY_MODE_AIRPORT && i == skyTargetAirport;
     kartCanvas.fillCircle(cx + (int)dx, cy - (int)dz, 2, isTarget ? ILI9341_YELLOW : ILI9341_CYAN);
+  }
+  if (skyRadarEnabled) {
+    for (int i = 0; i < SKY_BOT_COUNT; ++i) {
+      float dx = (skyBots[i].pos.x - skyPlane.pos.x) / unitsPerPixel;
+      float dz = (skyBots[i].pos.z - skyPlane.pos.z) / unitsPerPixel;
+      float dist = sqrtf(dx * dx + dz * dz);
+      if (dist > maxR && dist > 0.001f) { float s = maxR / dist; dx *= s; dz *= s; }
+      kartCanvas.fillCircle(cx + (int)dx, cy - (int)dz, 1, ILI9341_ORANGE);
+    }
   }
   // Heading arrow: a direct top-down projection of the real flight direction
   // (not the compass's display-negated heading, which only exists to make
@@ -3867,6 +3959,7 @@ void startSkyPilotFlight(int modeSelected) {
   // However the device happens to be held right now becomes "level" for
   // this flight - re-zeroable in the air with Z if it drifts.
   if (skyImuControlEnabled) skyReadImuTilt(skyImuPitchZero, skyImuBankZero);
+  skyInitBots();
   skyState = SKY_FLYING;
 }
 
@@ -3901,12 +3994,14 @@ void drawSkyPilotHub() {
   tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 84); tft.print(String("Special: ") + picked.special);
   tft.setTextColor(skyImuControlEnabled ? ILI9341_GREEN : ui.dim, ui.bg); tft.setCursor(190, CONTENT_Y + 84);
   tft.print(String("CONTROL ") + (skyImuControlEnabled ? "TILT" : "KEYS") + " (I)");
-  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 104);
+  tft.setTextColor(skyRadarEnabled ? ILI9341_GREEN : ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 96);
+  tft.print(String("RADAR ") + (skyRadarEnabled ? "ON" : "OFF") + " (R) - shows AI traffic on the map");
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 108);
   tft.print(skyImuControlEnabled ? "TILT DEVICE FOR PITCH + BANK" : "; . PITCH      , / BANK + TURN");
-  tft.setCursor(12, CONTENT_Y + 116); tft.print(skyImuControlEnabled ? "W/A THROTTLE  Q GEAR  V VIEW  Z REZERO" : "W/A THROTTLE  Q GEAR  V VIEW");
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 134); tft.print("Controls hold their angle on release.");
-  tft.setCursor(12, CONTENT_Y + 146); tft.print("MED/HIGH throttle to take off. ` PAUSES.");
-  footer(";/. SELECT  ENTER START  M SOUND  P PLANE  I TILT  FN GAMES");
+  tft.setCursor(12, CONTENT_Y + 120); tft.print(skyImuControlEnabled ? "W/A THROTTLE  Q GEAR  V VIEW  Z REZERO" : "W/A THROTTLE  Q GEAR  V VIEW");
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 138); tft.print("Controls hold their angle on release.");
+  tft.setCursor(12, CONTENT_Y + 150); tft.print("MED/HIGH throttle to take off. ` PAUSES.");
+  footer(";/. SELECT  ENTER START  M SOUND  P PLANE  I TILT  R RADAR  FN GAMES");
 }
 
 // Continuous engine drone on its own speaker channel (Kart Racer's engine
@@ -4176,6 +4271,8 @@ void stepSkyPilotFlight() {
     lastEngineRumbleAt = now;
     vibrate((uint16_t)constrain(skyPlane.speed * 0.3f, 2.0f, 10.0f));
   }
+
+  skyUpdateBots(dt);
 
   KartCam cam;
   if (skyFirstPerson) {
@@ -7662,6 +7759,7 @@ void keyboard() {
           else if (c == 'm') { skyEngineSoundEnabled = !skyEngineSoundEnabled; playFunctionSound(); redrawNeeded = true; }
           else if (c == 'p') { skyPlaneModelIndex = (skyPlaneModelIndex + 1) % SKY_PLANE_MODEL_COUNT; playFunctionSound(); redrawNeeded = true; }
           else if (c == 'i') { skyImuControlEnabled = !skyImuControlEnabled; playFunctionSound(); redrawNeeded = true; }
+          else if (c == 'r') { skyRadarEnabled = !skyRadarEnabled; playFunctionSound(); redrawNeeded = true; }
         }
       }
       if (k.enter && (skyState == SKY_HOME || skyState == SKY_RESULTS)) { playEnterSound(); startSkyPilotFlight(skyModeSelected); }
