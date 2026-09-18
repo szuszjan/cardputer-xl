@@ -3299,6 +3299,13 @@ int skyStartAirport = 0;     // departure airport for AIRPORT TO AIRPORT (random
 bool skyMissionSuccess = false;
 bool skyFirstPerson = false;   // 'v' during flight, like Kart Racer's own toggle
 bool skyEngineSoundEnabled = true;  // 'm' on the HOME screen, like Kart's M/F
+// 'i' on the HOME screen: tilt the Cardputer itself for pitch/bank instead
+// of ;/./,//, using the ADV's built-in IMU (accelerometer) as a gravity-
+// referenced tilt sensor - fed into the SAME rate-target-with-inertia model
+// keyboard input already drives, just as a continuous [-1,1] signal instead
+// of a discrete -1/0/1 one. Throttle/gear/view/back stay on the keyboard.
+bool skyImuControlEnabled = false;
+float skyImuPitchZero = 0, skyImuBankZero = 0;  // "level" reference, captured at takeoff and re-zeroable with Z
 float skyEngineSmoothedFreq = 0;
 // Discrete throttle notches (W/A step through them) instead of a free-form
 // analog hold, like a real throttle lever's detents: the plane's speed
@@ -3595,12 +3602,36 @@ void skyDrawCockpitOverlay() {
   kartCanvas.fillRect(w / 2 - 16, sillTop + 4, 6, 11, TRIM);
   kartCanvas.fillRect(w / 2 + 10, sillTop + 4, 6, 11, TRIM);
 }
+// Airport name tags floating above each runway, world-space text projected
+// straight onto the canvas at the airport's screen position - only in
+// AIRPORT TO AIRPORT, where knowing which airport is which (the departure,
+// the destination, or neither) actually matters; freeroam has no
+// destination to distinguish, so labeling every airport there would just be
+// clutter. The destination and departure are colour-coded differently from
+// any other airport that happens to be in view.
+void skyDrawAirportLabels(const KartCam& cam) {
+  if (skyMode != SKY_MODE_AIRPORT) return;
+  for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) {
+    KVec3 labelPos{skyAirports[i].pos.x, skyTerrainHeight(skyAirports[i].pos.x, skyAirports[i].pos.z) + 18.0f, skyAirports[i].pos.z};
+    KVec3 rel = labelPos - cam.position;
+    if (sqrtf(kdot(rel, rel)) > 900.0f) continue;  // too far to be legible - skip rather than clutter
+    int sx, sy;
+    if (!cam.project(labelPos, kartCanvas.width(), kartCanvas.height(), sx, sy)) continue;
+    if (sx < -40 || sx > kartCanvas.width() + 40 || sy < -20 || sy > kartCanvas.height() + 20) continue;
+    uint16_t col = i == skyTargetAirport ? ILI9341_YELLOW : (i == skyStartAirport ? ILI9341_CYAN : ILI9341_LIGHTGREY);
+    int textW = (int)strlen(skyAirports[i].name) * 6;
+    kartCanvas.fillRect(sx - textW / 2 - 2, sy - 9, textW + 4, 10, ILI9341_BLACK);
+    kartCanvas.setTextSize(1); kartCanvas.setTextColor(col, ILI9341_BLACK);
+    kartCanvas.setCursor(sx - textW / 2, sy - 8); kartCanvas.print(skyAirports[i].name);
+  }
+}
 void skyRenderScene(const KartCam& cam, const KVec3& fwd, bool firstPerson) {
   kartCanvas.fillScreen(ILI9341_BLACK);
   kartDrawSky(cam);
   skyDrawTerrain(cam, fwd);
   for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) skyDrawRunway(cam, skyAirports[i]);
   if (firstPerson) skyDrawCockpitOverlay(); else skyDrawPlaneModel(cam, fwd, skyPlaneModels[skyPlaneModelIndex]);
+  skyDrawAirportLabels(cam);
 }
 // Bottom instrument strip: a rotating/tilting attitude indicator (per-column
 // fill against the tilted horizon line - cheap way to get a properly clipped
@@ -3750,6 +3781,22 @@ void skyDrawSonicBoomEffect() {
   kartCanvas.drawCircle(cx, cy, r2, ILI9341_LIGHTGREY);
 }
 
+// Gravity-referenced tilt angles from the ADV's built-in accelerometer -
+// bankAngle from left/right tilt, pitchAngle from forward/back tilt. Uses
+// accel rather than integrating gyro specifically so there's no drift to
+// correct for: holding the device at a fixed tilt gives a fixed reading.
+// The exact axis/sign mapping depends on how the IMU chip is mounted
+// relative to how the device is held, which isn't documented anywhere in
+// this codebase - this is a first-pass guess (a fairly standard
+// flat-with-screen-up convention); expect to flip a sign or swap an axis
+// once flown for real.
+void skyReadImuTilt(float& pitchAngle, float& bankAngle) {
+  M5.Imu.update();
+  auto imu = M5.Imu.getImuData();
+  bankAngle = atan2f(imu.accel.y, imu.accel.z);
+  pitchAngle = atan2f(-imu.accel.x, sqrtf(imu.accel.y * imu.accel.y + imu.accel.z * imu.accel.z));
+}
+
 // modeSelected: 0=free roam from a runway, 1=free roam launched airborne,
 // 2=airport to airport (a random distinct start/destination pair from the
 // airport pool, picked fresh each flight).
@@ -3798,6 +3845,9 @@ void startSkyPilotFlight(int modeSelected) {
       skyPlane.speed = 0;
     }
   }
+  // However the device happens to be held right now becomes "level" for
+  // this flight - re-zeroable in the air with Z if it drifts.
+  if (skyImuControlEnabled) skyReadImuTilt(skyImuPitchZero, skyImuBankZero);
   skyState = SKY_FLYING;
 }
 
@@ -3830,11 +3880,14 @@ void drawSkyPilotHub() {
   const SkyPlaneModelParams& picked = skyPlaneModels[skyPlaneModelIndex];
   tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 72); tft.print(String("PLANE  ") + picked.name + "  (P TO CHANGE)");
   tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 84); tft.print(String("Special: ") + picked.special);
-  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 104); tft.print("; . PITCH      , / BANK + TURN");
-  tft.setCursor(12, CONTENT_Y + 116); tft.print("W/A THROTTLE  Q GEAR  V VIEW");
+  tft.setTextColor(skyImuControlEnabled ? ILI9341_GREEN : ui.dim, ui.bg); tft.setCursor(190, CONTENT_Y + 84);
+  tft.print(String("CONTROL ") + (skyImuControlEnabled ? "TILT" : "KEYS") + " (I)");
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 104);
+  tft.print(skyImuControlEnabled ? "TILT DEVICE FOR PITCH + BANK" : "; . PITCH      , / BANK + TURN");
+  tft.setCursor(12, CONTENT_Y + 116); tft.print(skyImuControlEnabled ? "W/A THROTTLE  Q GEAR  V VIEW  Z REZERO" : "W/A THROTTLE  Q GEAR  V VIEW");
   tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 134); tft.print("Controls hold their angle on release.");
   tft.setCursor(12, CONTENT_Y + 146); tft.print("MED or HIGH throttle needed to take off.");
-  footer(";/. SELECT  ENTER START  M SOUND  P PLANE  FN GAMES");
+  footer(";/. SELECT  ENTER START  M SOUND  P PLANE  I TILT  FN GAMES");
 }
 
 // Continuous engine drone on its own speaker channel (Kart Racer's engine
@@ -3875,7 +3928,7 @@ void stepSkyPilotFlight() {
   if (dt < 0) dt = 0;
   if (rawDt > 0.001f) { float fps = 1.0f / rawDt; skyFpsSmoothed += (fps - skyFpsSmoothed) * 0.15f; }
 
-  static bool prevH = false, prevQ = false, prevV = false;
+  static bool prevH = false, prevQ = false, prevV = false, prevZ = false;
   bool nowH = M5Cardputer.Keyboard.isKeyPressed('h');
   bool edgeH = nowH && !prevH; prevH = nowH;
   if (edgeH) { skyEngineToneStop(); skyState = SKY_HOME; redrawNeeded = true; return; }
@@ -3885,12 +3938,27 @@ void stepSkyPilotFlight() {
   bool nowV = M5Cardputer.Keyboard.isKeyPressed('v');
   bool edgeV = nowV && !prevV; prevV = nowV;
   if (edgeV) skyFirstPerson = !skyFirstPerson;
+  bool nowZ = M5Cardputer.Keyboard.isKeyPressed('z');
+  bool edgeZ = nowZ && !prevZ; prevZ = nowZ;
+  if (edgeZ && skyImuControlEnabled) { skyReadImuTilt(skyImuPitchZero, skyImuBankZero); playFunctionSound(); }
 
-  int pitchInput = 0, bankInput = 0;
-  if (M5Cardputer.Keyboard.isKeyPressed(';')) pitchInput = 1;
-  else if (M5Cardputer.Keyboard.isKeyPressed('.')) pitchInput = -1;
-  if (M5Cardputer.Keyboard.isKeyPressed(',')) bankInput = -1;
-  else if (M5Cardputer.Keyboard.isKeyPressed('/')) bankInput = 1;
+  // Pitch/bank input is a continuous [-1,1] signal either way - from the
+  // keyboard's discrete -1/0/1, or from how far the device is tilted off
+  // its zeroed reference - fed into the exact same rate-target-with-inertia
+  // model below, just from a different source.
+  float pitchInput = 0, bankInput = 0;
+  if (skyImuControlEnabled) {
+    float pitchAngle, bankAngle;
+    skyReadImuTilt(pitchAngle, bankAngle);
+    constexpr float TILT_MAX = 0.5f;  // ~29 degrees of tilt for full deflection
+    pitchInput = constrain((pitchAngle - skyImuPitchZero) / TILT_MAX, -1.0f, 1.0f);
+    bankInput = constrain((bankAngle - skyImuBankZero) / TILT_MAX, -1.0f, 1.0f);
+  } else {
+    if (M5Cardputer.Keyboard.isKeyPressed(';')) pitchInput = 1;
+    else if (M5Cardputer.Keyboard.isKeyPressed('.')) pitchInput = -1;
+    if (M5Cardputer.Keyboard.isKeyPressed(',')) bankInput = -1;
+    else if (M5Cardputer.Keyboard.isKeyPressed('/')) bankInput = 1;
+  }
   // Throttle is 4 discrete notches (OFF/LOW/MED/HIGH), not a free-form
   // hold - W/A step one notch at a time, like a real lever's detents.
   static bool prevW = false, prevA = false;
@@ -3939,7 +4007,9 @@ void stepSkyPilotFlight() {
     // The 737's "AUTOPILOT TRIM" special: a wing-leveler that eases bank
     // toward 0 whenever the pilot isn't actively commanding a turn, unlike
     // every other plane which just holds whatever bank it's left at.
-    if (model.autoLevelAssist && bankInput == 0) skyPlane.bank = skyPlane.bank > 0 ? max(0.0f, skyPlane.bank - 0.3f * dt) : min(0.0f, skyPlane.bank + 0.3f * dt);
+    // Epsilon rather than == 0: tilt input is a continuous analog value and
+    // is very unlikely to land on exact zero, unlike the keyboard's -1/0/1.
+    if (model.autoLevelAssist && fabsf(bankInput) < 0.05f) skyPlane.bank = skyPlane.bank > 0 ? max(0.0f, skyPlane.bank - 0.3f * dt) : min(0.0f, skyPlane.bank + 0.3f * dt);
     skyPlane.bank = constrain(skyPlane.bank + skyBankRateCur * dt, -BANK_MAX, BANK_MAX);
 
     float pitchTargetRate = pitchInput * model.pitchRateMax * controlScale;
@@ -7213,6 +7283,7 @@ void keyboard() {
           else if (c == '.') { skyModeSelected = (skyModeSelected + 1) % SKY_MODE_OPTION_COUNT; redrawNeeded = true; }
           else if (c == 'm') { skyEngineSoundEnabled = !skyEngineSoundEnabled; playFunctionSound(); redrawNeeded = true; }
           else if (c == 'p') { skyPlaneModelIndex = (skyPlaneModelIndex + 1) % SKY_PLANE_MODEL_COUNT; playFunctionSound(); redrawNeeded = true; }
+          else if (c == 'i') { skyImuControlEnabled = !skyImuControlEnabled; playFunctionSound(); redrawNeeded = true; }
         }
       }
       if (k.enter && (skyState == SKY_HOME || skyState == SKY_RESULTS)) { playEnterSound(); startSkyPilotFlight(skyModeSelected); }
