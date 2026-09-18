@@ -299,6 +299,8 @@ void drawGridHuntGrid();
 void drawKartHub();
 void startKartRace(int level);
 void stepKartRace();
+void drawSkyPilotHub();
+void stepSkyPilotFlight();
 void drawDeviceCheck();
 void drawQRToolsPlus();
 void drawMiniPaint();
@@ -681,16 +683,16 @@ String pendingWebAction = "";
 String calcInput = "0", calcStatus = "Enter numbers, then + - * /"; float calcTotal = 0; char calcOp = 0; bool calcNew = true;
 int diceValue = 1, randomValue = 0;
 bool coinHeads = true;
-// GAMES contains seven small, self-contained offline games. Snake/Grid
-// Hunt/2048/Minesweeper/Breakout/Tetris state stays in RAM, so a reboot
-// always starts fresh; Kart Racer's best-lap times and each of the other
-// six's own high score persist to flash (see kartLoadBestLap/kartSaveBestLap
-// and each game's own load/save pair, all sharing the `preferences` object
-// under their own namespace the same way).
-constexpr int GAME_COUNT = 7;
-const char* GAME_NAMES[GAME_COUNT] = {"SNAKE", "GRID HUNT", "KART RACER", "2048", "MINESWEEPER", "BREAKOUT", "TETRIS"};
+// GAMES contains eight small, self-contained offline games. Snake/Grid
+// Hunt state stays in RAM, so a reboot always starts fresh; Kart Racer's
+// best-lap times and each of the other games' own high score/best persist
+// to flash (see kartLoadBestLap/kartSaveBestLap, skyLoadBest/skySaveBest,
+// and each other game's own load/save pair, all sharing the `preferences`
+// object under their own namespace the same way).
+constexpr int GAME_COUNT = 8;
+const char* GAME_NAMES[GAME_COUNT] = {"SNAKE", "GRID HUNT", "KART RACER", "2048", "MINESWEEPER", "BREAKOUT", "TETRIS", "SKY PILOT"};
 int gameMenuSelected = 0; // index into GAME_NAMES
-int gameMode = 0;         // 0 menu, 1 Snake, 2 Grid Hunt, 3 Kart Racer, 4 2048, 5 Minesweeper, 6 Breakout, 7 Tetris
+int gameMode = 0;         // 0 menu, 1 Snake, 2 Grid Hunt, 3 Kart Racer, 4 2048, 5 Minesweeper, 6 Breakout, 7 Tetris, 8 Sky Pilot
 // Mirrors lastDrawnPage's role, one level down: refreshLocalPage() only calls
 // the full drawGameHub() (fillScreen + header/footer) when the submode itself
 // just changed; staying within a submode uses the bounded per-submode redraw
@@ -3209,6 +3211,269 @@ void stepKartRace() {
 }
 // ============================================================================
 
+// ============================================================================
+// ---- SKY PILOT (gameMode 8): an arcade flight sim reusing Kart Racer's ----
+// wireframe 3D engine above (KVec3 math, KartCam's generic project(),
+// kartCanvas, kartDrawSeg()/kartDrawSky()) instead of standing up a second
+// one. Only one 3D game is ever on screen at a time, and a second full-size
+// GFXcanvas16 would cost another ~150KB of static RAM this ESP32-S3 doesn't
+// have to spare (see the heap-exhaustion comments elsewhere in this file
+// around the Triki graph buffers and NimBLE's lazy init).
+//
+// Fly through a winding chain of rings for score; touching the ground ends
+// the flight. The chase camera deliberately never rolls with the plane -
+// only the plane model itself banks - so the horizon always stays legible on
+// a panel this small, at the cost of not visually "feeling" the bank as
+// strongly as a rolling camera would.
+// ============================================================================
+enum SkyPilotState { SKY_HOME, SKY_FLYING, SKY_RESULTS };
+SkyPilotState skyState = SKY_HOME;
+
+struct SkyPlane {
+  KVec3 pos{0, 30, 0};
+  float heading = 0, pitch = 0, bank = 0;
+  float speed = 20.0f;
+  static constexpr float MIN_SPEED = 10.0f, MAX_SPEED = 34.0f;
+};
+SkyPlane skyPlane;
+
+// A ring is stored as an angle pair (like the plane itself) rather than a
+// baked forward vector, so the same heading/pitch math generates both the
+// plane's and the rings' headings consistently.
+struct SkyRing { KVec3 center; float heading, pitch; };
+constexpr int SKY_RING_COUNT = 5;
+constexpr float SKY_RING_RADIUS = 6.5f;
+constexpr float SKY_SEGMENT_LEN = 42.0f;
+constexpr float SKY_MIN_ALT = 12.0f, SKY_MAX_ALT = 65.0f;
+SkyRing skyRings[SKY_RING_COUNT];
+
+int skyScore = 0, skyBestScore = 0;
+unsigned long skyLastFrameMs = 0;
+bool skyLoadedBest = false;
+
+inline KVec3 skyRingForward(const SkyRing& r) { return {cosf(r.pitch) * sinf(r.heading), sinf(r.pitch), cosf(r.pitch) * cosf(r.heading)}; }
+
+void skyLoadBest() {
+  if (skyLoadedBest) return;
+  preferences.begin("skypilot", true);
+  skyBestScore = preferences.getInt("best", 0);
+  preferences.end();
+  skyLoadedBest = true;
+}
+void skySaveBest() { preferences.begin("skypilot", false); preferences.putInt("best", skyBestScore); preferences.end(); }
+
+// Builds ring[i] a fixed distance ahead of ring[i-1] (or the plane's current
+// pose for i==0), with a small random turn/climb - a winding corridor the
+// plane must keep steering into, not a straight line of hoops.
+void skyGenerateRing(int i) {
+  KVec3 prevCenter; float prevHeading, prevPitch;
+  if (i == 0) { prevCenter = skyPlane.pos; prevHeading = skyPlane.heading; prevPitch = 0; }
+  else { prevCenter = skyRings[i - 1].center; prevHeading = skyRings[i - 1].heading; prevPitch = skyRings[i - 1].pitch; }
+  float turn = ((random(0, 201) - 100) / 100.0f) * 0.4f;
+  float climb = ((random(0, 201) - 100) / 100.0f) * 0.22f;
+  float heading = prevHeading + turn;
+  float pitch = constrain(prevPitch + climb, -0.4f, 0.4f);
+  KVec3 fwd = {cosf(pitch) * sinf(heading), sinf(pitch), cosf(pitch) * cosf(heading)};
+  KVec3 center = prevCenter + fwd * SKY_SEGMENT_LEN;
+  center.y = constrain(center.y, SKY_MIN_ALT, SKY_MAX_ALT);
+  skyRings[i] = {center, heading, pitch};
+}
+
+void skyDrawRing(const KartCam& cam, const SkyRing& r, uint16_t col) {
+  KVec3 fwd = skyRingForward(r);
+  KVec3 axis = fabsf(fwd.y) > 0.98f ? KVec3{1, 0, 0} : KVec3{0, 1, 0};
+  KVec3 right = knormalized(kcross(fwd, axis));
+  KVec3 up = kcross(right, fwd);
+  const int SIDES = 10;
+  KVec3 pts[SIDES];
+  for (int i = 0; i < SIDES; ++i) {
+    float a = (2 * KART_PI * i) / SIDES;
+    pts[i] = r.center + right * (cosf(a) * SKY_RING_RADIUS) + up * (sinf(a) * SKY_RING_RADIUS);
+  }
+  for (int i = 0; i < SIDES; ++i) kartDrawSeg(cam, pts[i], pts[(i + 1) % SIDES], col);
+}
+// Concentric range rings + radial spokes on the y=0 plane under the plane's
+// XZ position - a cheap, bounded ground reference instead of tiling terrain.
+void skyDrawGroundGrid(const KartCam& cam) {
+  KVec3 groundCenter{skyPlane.pos.x, 0, skyPlane.pos.z};
+  const int RINGS = 4, SPOKES = 16;
+  for (int ring = 1; ring <= RINGS; ++ring) {
+    float radius = ring * 22.0f;
+    KVec3 prev{};
+    for (int i = 0; i <= SPOKES; ++i) {
+      float a = (2 * KART_PI * i) / SPOKES;
+      KVec3 p = groundCenter + KVec3{cosf(a) * radius, 0, sinf(a) * radius};
+      if (i > 0) kartDrawSeg(cam, prev, p, ILI9341_DARKGREEN);
+      prev = p;
+    }
+  }
+  for (int i = 0; i < SPOKES; ++i) {
+    float a = (2 * KART_PI * i) / SPOKES;
+    KVec3 p = groundCenter + KVec3{cosf(a) * (RINGS * 22.0f), 0, sinf(a) * (RINGS * 22.0f)};
+    kartDrawSeg(cam, groundCenter, p, ILI9341_DARKGREEN);
+  }
+}
+// Drawn using the plane's BANKED right/up (unlike the upright chase camera),
+// so the wings visibly tilt even though the camera itself never rolls.
+void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd) {
+  KVec3 worldUp{0, 1, 0};
+  KVec3 rightLevel = knormalized(kcross(fwd, worldUp));
+  KVec3 upLevel = kcross(rightLevel, fwd);
+  KVec3 right = rightLevel * cosf(skyPlane.bank) + upLevel * sinf(skyPlane.bank);
+  KVec3 up = upLevel * cosf(skyPlane.bank) - rightLevel * sinf(skyPlane.bank);
+  const float noseLen = 1.4f, tailLen = 1.6f, wingSpan = 2.4f, tailSpan = 1.0f, finHeight = 0.7f;
+  KVec3 nose = skyPlane.pos + fwd * noseLen, tail = skyPlane.pos - fwd * tailLen;
+  KVec3 wingL = skyPlane.pos - right * wingSpan, wingR = skyPlane.pos + right * wingSpan;
+  KVec3 tailL = tail - right * tailSpan, tailR = tail + right * tailSpan;
+  KVec3 finTop = tail + up * finHeight;
+  kartDrawSeg(cam, nose, tail, ILI9341_WHITE);
+  kartDrawSeg(cam, nose, wingL, ILI9341_WHITE); kartDrawSeg(cam, nose, wingR, ILI9341_WHITE);
+  kartDrawSeg(cam, wingL, tail, ILI9341_WHITE); kartDrawSeg(cam, wingR, tail, ILI9341_WHITE);
+  kartDrawSeg(cam, tailL, tailR, ILI9341_LIGHTGREY);
+  kartDrawSeg(cam, tail, finTop, ILI9341_RED);
+}
+void skyRenderScene(const KartCam& cam, const KVec3& fwd) {
+  kartCanvas.fillScreen(ILI9341_BLACK);
+  kartDrawSky(cam);
+  skyDrawGroundGrid(cam);
+  for (int i = SKY_RING_COUNT - 1; i >= 0; --i) skyDrawRing(cam, skyRings[i], i == 0 ? ILI9341_YELLOW : ILI9341_CYAN);
+  skyDrawPlaneModel(cam, fwd);
+}
+void skyRenderHud() {
+  kartCanvas.fillRect(0, 0, 140, 46, ILI9341_BLACK);
+  kartCanvas.setTextSize(1);
+  char buf[40]; int y = 3;
+  auto line = [&](const char* s, uint16_t col) { kartCanvas.setTextColor(col, ILI9341_BLACK); kartCanvas.setCursor(3, y); kartCanvas.print(s); y += 11; };
+  snprintf(buf, sizeof(buf), "SCORE %d  BEST %d", skyScore, skyBestScore); line(buf, ILI9341_CYAN);
+  snprintf(buf, sizeof(buf), "ALT %d  SPD %d", (int)skyPlane.pos.y, (int)skyPlane.speed); line(buf, ILI9341_WHITE);
+  if (skyPlane.pos.y < 8.0f) line("LOW ALTITUDE!", ILI9341_RED);
+}
+
+void startSkyPilotFlight() {
+  skyLoadBest();
+  skyPlane = SkyPlane();
+  skyPlane.pos = {0, 30, 0};
+  for (int i = 0; i < SKY_RING_COUNT; ++i) skyGenerateRing(i);
+  skyScore = 0;
+  skyLastFrameMs = millis();
+  skyState = SKY_FLYING;
+}
+
+void drawSkyPilotHub() {
+  lastDrawnGameMode = gameMode;
+  skyLoadBest();
+  tft.fillScreen(ui.bg); header("GAMES / SKY PILOT");
+  tft.setTextSize(1);
+  if (skyState == SKY_RESULTS) {
+    tft.setTextColor(ILI9341_YELLOW, ui.bg); tft.setCursor(12, CONTENT_Y + 10); tft.print("CRASHED");
+    tft.setTextColor(ui.text, ui.bg); tft.setCursor(12, CONTENT_Y + 34); tft.print("RINGS THROUGH  " + String(skyScore));
+    tft.setCursor(12, CONTENT_Y + 52); tft.print("BEST           " + String(skyBestScore));
+    if (skyScore > 0 && skyScore == skyBestScore) { tft.setTextColor(ILI9341_GREEN, ui.bg); tft.setCursor(12, CONTENT_Y + 72); tft.print("NEW BEST!"); }
+    footer("ENTER FLY AGAIN     FN GAMES");
+    return;
+  }
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 8); tft.print("FLY THROUGH RINGS - DON'T HIT THE GROUND");
+  tft.setTextColor(ui.text, ui.bg); tft.setCursor(12, CONTENT_Y + 30); tft.print("BEST  " + String(skyBestScore));
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 60); tft.print("; . PITCH      , / BANK + TURN");
+  tft.setCursor(12, CONTENT_Y + 76); tft.print("W THROTTLE UP  A THROTTLE DOWN");
+  footer("ENTER TAKE OFF     FN GAMES");
+}
+
+// Continuous per-frame flight loop - called unconditionally every loop()
+// iteration (like stepKartRace()), but only actually does anything mid-flight;
+// it renders the full-screen 3D view itself and bypasses the header/footer
+// redrawNeeded/draw() machinery entirely for that, the same way Kart does.
+void stepSkyPilotFlight() {
+  if (page != GAMEHUB || gameMode != 8) return;
+  if (skyState != SKY_FLYING) return;
+  if (quickMenuOpen) return;
+
+  unsigned long now = millis();
+  float dt = (now - skyLastFrameMs) / 1000.0f;
+  skyLastFrameMs = now;
+  if (dt > 0.1f) dt = 0.1f;
+  if (dt < 0) dt = 0;
+
+  static bool prevH = false;
+  bool nowH = M5Cardputer.Keyboard.isKeyPressed('h');
+  bool edgeH = nowH && !prevH; prevH = nowH;
+  if (edgeH) { skyState = SKY_HOME; redrawNeeded = true; return; }
+
+  int pitchInput = 0, bankInput = 0, throttleInput = 0;
+  if (M5Cardputer.Keyboard.isKeyPressed(';')) pitchInput = 1;
+  else if (M5Cardputer.Keyboard.isKeyPressed('.')) pitchInput = -1;
+  if (M5Cardputer.Keyboard.isKeyPressed(',')) bankInput = -1;
+  else if (M5Cardputer.Keyboard.isKeyPressed('/')) bankInput = 1;
+  if (M5Cardputer.Keyboard.isKeyPressed('w')) throttleInput = 1;
+  else if (M5Cardputer.Keyboard.isKeyPressed('a')) throttleInput = -1;
+
+  static const float BANK_RATE = 1.9f, BANK_MAX = 0.85f, BANK_RETURN = 1.3f;
+  static const float PITCH_RATE = 1.1f, PITCH_MAX = 0.8f, PITCH_RETURN = 1.0f;
+  static const float TURN_RATE_PER_BANK = 1.35f;
+  static const float THROTTLE_ACCEL = 9.0f, CRUISE_DECAY = 1.0f;
+
+  if (bankInput != 0) skyPlane.bank = constrain(skyPlane.bank + bankInput * BANK_RATE * dt, -BANK_MAX, BANK_MAX);
+  else if (skyPlane.bank > 0) skyPlane.bank = max(0.0f, skyPlane.bank - BANK_RETURN * dt);
+  else if (skyPlane.bank < 0) skyPlane.bank = min(0.0f, skyPlane.bank + BANK_RETURN * dt);
+
+  if (pitchInput != 0) skyPlane.pitch = constrain(skyPlane.pitch + pitchInput * PITCH_RATE * dt, -PITCH_MAX, PITCH_MAX);
+  else if (skyPlane.pitch > 0) skyPlane.pitch = max(0.0f, skyPlane.pitch - PITCH_RETURN * dt);
+  else if (skyPlane.pitch < 0) skyPlane.pitch = min(0.0f, skyPlane.pitch + PITCH_RETURN * dt);
+
+  skyPlane.heading += sinf(skyPlane.bank) * TURN_RATE_PER_BANK * dt;
+
+  if (throttleInput > 0) skyPlane.speed += THROTTLE_ACCEL * dt;
+  else if (throttleInput < 0) skyPlane.speed -= THROTTLE_ACCEL * dt;
+  else if (skyPlane.speed > SkyPlane::MIN_SPEED) skyPlane.speed -= CRUISE_DECAY * dt;
+  skyPlane.speed = constrain(skyPlane.speed, SkyPlane::MIN_SPEED, SkyPlane::MAX_SPEED);
+
+  KVec3 prevPos = skyPlane.pos;
+  KVec3 fwd = {cosf(skyPlane.pitch) * sinf(skyPlane.heading), sinf(skyPlane.pitch), cosf(skyPlane.pitch) * cosf(skyPlane.heading)};
+  skyPlane.pos = skyPlane.pos + fwd * (skyPlane.speed * dt);
+
+  // Ring collision: did the plane just cross ring[0]'s plane this frame, and
+  // was it within the ring's radius at that crossing? Approximated with the
+  // post-move position rather than the exact crossing point along the
+  // frame's motion - close enough at this speed/frame-rate/ring size.
+  SkyRing& target = skyRings[0];
+  KVec3 ringFwd = skyRingForward(target);
+  float prevSigned = kdot(prevPos - target.center, ringFwd);
+  float nowSigned = kdot(skyPlane.pos - target.center, ringFwd);
+  if (prevSigned < 0 && nowSigned >= 0) {
+    KVec3 axis = fabsf(ringFwd.y) > 0.98f ? KVec3{1, 0, 0} : KVec3{0, 1, 0};
+    KVec3 right = knormalized(kcross(ringFwd, axis));
+    KVec3 up = kcross(right, ringFwd);
+    KVec3 rel = skyPlane.pos - target.center;
+    float lateral = sqrtf(sq(kdot(rel, right)) + sq(kdot(rel, up)));
+    if (lateral <= SKY_RING_RADIUS) { skyScore++; vibrate(20); if (volumeLevel) M5Cardputer.Speaker.tone(920, 70); }
+    else if (volumeLevel) M5Cardputer.Speaker.tone(220, 50);
+    for (int i = 0; i < SKY_RING_COUNT - 1; ++i) skyRings[i] = skyRings[i + 1];
+    skyGenerateRing(SKY_RING_COUNT - 1);
+  }
+
+  bool crashed = skyPlane.pos.y <= 1.5f;
+
+  KartCam cam;
+  cam.position = skyPlane.pos - fwd * 6.0f + KVec3{0, 2.2f, 0};
+  cam.forward = knormalized((skyPlane.pos + fwd * 8.0f) - cam.position);
+  cam.right = knormalized(kcross(cam.forward, KVec3{0, 1, 0}));
+  cam.up = kcross(cam.right, cam.forward);
+  cam.fovY = 68.0f;
+
+  skyRenderScene(cam, fwd);
+  skyRenderHud();
+  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+
+  if (crashed) {
+    vibrate(200);
+    if (volumeLevel) { M5Cardputer.Speaker.tone(180, 150); delay(160); M5Cardputer.Speaker.tone(90, 220); }
+    if (skyScore > skyBestScore) { skyBestScore = skyScore; skySaveBest(); }
+    skyState = SKY_RESULTS;
+    redrawNeeded = true;
+  }
+}
+// ============================================================================
+
 // Bounded redraws for the two submodes that don't already manage their own
 // incremental updates (Snake draws its own moved cells directly in
 // stepSnakeGame(); Kart's live view bypasses this file's redraw machinery
@@ -4336,6 +4601,7 @@ void stepTrikiScope() {
 void drawGameHub() {
   lastDrawnGameMode = gameMode;
   if (gameMode == 3) { drawKartHub(); return; }
+  if (gameMode == 8) { drawSkyPilotHub(); return; }
   tft.fillScreen(ui.bg);
   String title = gameMode == 0 ? "GAMES" : String("GAMES / ") + GAME_NAMES[gameMode - 1];
   header(title.c_str());
@@ -5726,6 +5992,9 @@ void refreshLocalPage() {
       // continuous play does - these are just a defensive fallback.
       else if (gameMode == 6) drawBreakout();
       else if (gameMode == 7) drawTetris();
+      // Sky Pilot's live flight bypasses redrawNeeded from stepSkyPilotFlight()
+      // like Kart does; this only matters for its HOME/RESULTS sub-screens.
+      else if (gameMode == 8) drawSkyPilotHub();
       break;
     case DICERANDOM:
       tft.fillRect(12, CONTENT_Y + 25, 296, 130, ui.bg);
@@ -5946,7 +6215,7 @@ void keyboard() {
   // running and must never leak a Fn press through to it.
   if (fn && !fnLast) {
     if (quickMenuOpen) { quickMenuOpen = false; playExitSound(); closeQuickMenuAnimated(); forceFullRedraw = true; redrawNeeded = true; }
-    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
+    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
   // Opt toggles the same floating quick-launch overlay from any page, any
@@ -6229,7 +6498,8 @@ void keyboard() {
         else if (gameMenuSelected == 3) { gameMode = 4; startG2048Game(); }
         else if (gameMenuSelected == 4) { gameMode = 5; startMinesweeperGame(); }
         else if (gameMenuSelected == 5) { gameMode = 6; startBreakoutGame(); }
-        else { gameMode = 7; startTetrisGame(); }
+        else if (gameMenuSelected == 6) { gameMode = 7; startTetrisGame(); }
+        else { gameMode = 8; skyState = SKY_HOME; }
         playEnterSound(); redrawNeeded = true;
       }
       return;
@@ -6311,6 +6581,13 @@ void keyboard() {
         else if (c == 'f') { kartFxEnabled = !kartFxEnabled; kartMusicSetEnabled(kartMusicEnabled, kartFxEnabled); redrawNeeded = true; }
       }
       if (k.enter) { playEnterSound(); startKartRace(kartSelectedLevel); return; }
+      return;
+    }
+    if (gameMode == 8) {
+      // SKY_FLYING input is polled directly in stepSkyPilotFlight() every
+      // frame, not through this per-event handler - HOME/RESULTS only need
+      // a single ENTER to (re)start the flight.
+      if (k.enter && (skyState == SKY_HOME || skyState == SKY_RESULTS)) { playEnterSound(); startSkyPilotFlight(); }
       return;
     }
     if (gameMode == 1) {
@@ -6616,6 +6893,7 @@ void loop() {
   stepKartRace();
   stepBreakoutGame();
   stepTetrisGame();
+  stepSkyPilotFlight();
   stepTrikiScope();
   // One 16th-note per tick. The grid is refreshed only on the new playhead
   // position rather than continuously redrawing a full screen.
