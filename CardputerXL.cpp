@@ -300,6 +300,7 @@ void drawKartHub();
 void startKartRace(int level);
 void stepKartRace();
 void drawSkyPilotHub();
+void startSkyPilotFlight(int modeSelected);
 void stepSkyPilotFlight();
 void drawDeviceCheck();
 void drawQRToolsPlus();
@@ -3220,27 +3221,48 @@ void stepKartRace() {
 // have to spare (see the heap-exhaustion comments elsewhere in this file
 // around the Triki graph buffers and NimBLE's lazy init).
 //
-// Open-world flight over procedural terrain - no bounded track or checkpoint
-// corridor, just a heightfield generated on the fly from world position (see
+// Open-world flight over procedural terrain - no bounded track, just a
+// heightfield generated on the fly from world position (see
 // skyTerrainHeight()), so there is nothing to run out of no matter how far
-// the plane travels. Flying into the terrain ends the flight; score is
-// distance flown. Pitch/bank are rate-controlled and HOLD wherever released
-// (a real control surface doesn't self-level), unlike Kart Racer's steering.
-// The chase camera deliberately never rolls with the plane - only the plane
-// model itself banks - so the horizon/instruments stay legible on a panel
-// this small, at the cost of not visually "feeling" the bank as strongly as
-// a rolling camera would.
+// the plane travels. Pitch/bank are rate-controlled (with acceleration, so
+// they ramp rather than snap) and HOLD wherever released - a real control
+// surface doesn't self-level, unlike Kart Racer's steering. The chase camera
+// deliberately never rolls with the plane - only the plane model itself
+// banks - so the horizon/instruments stay legible on a panel this small.
+// Three ways to fly: FREE ROAM from a runway, FREE ROAM launched already
+// airborne, or AIRPORT TO AIRPORT (take off, navigate to the other airport,
+// land with the gear down to complete it).
 // ============================================================================
 enum SkyPilotState { SKY_HOME, SKY_FLYING, SKY_RESULTS };
 SkyPilotState skyState = SKY_HOME;
+enum SkyPilotMode { SKY_MODE_FREEROAM, SKY_MODE_AIRPORT };
+SkyPilotMode skyMode = SKY_MODE_FREEROAM;
+// HOME menu selection: 0=free roam/runway start, 1=free roam/airborne start,
+// 2=airport to airport. Kept selected across a RESULTS "fly again" too.
+constexpr int SKY_MODE_OPTION_COUNT = 3;
+int skyModeSelected = 0;
 
 struct SkyPlane {
   KVec3 pos{0, 40, 0};
   float heading = 0, pitch = 0, bank = 0;
   float speed = 20.0f;
-  static constexpr float MIN_SPEED = 10.0f, MAX_SPEED = 34.0f;
+  // MIN_SPEED (idle-cruise floor) sits just above STALL_SPEED (see
+  // stepSkyPilotFlight()) so coasting with no throttle settles into normal
+  // flight, not a permanent stall - only active braking or a sustained climb
+  // bleeds below it.
+  static constexpr float MIN_SPEED = 14.0f, MAX_SPEED = 34.0f;
 };
 SkyPlane skyPlane;
+bool skyGrounded = true;    // wheels on the runway (taxi/takeoff roll, or after landing)
+bool skyGearDown = true;
+// Current angular velocities for the pitch/bank acceleration model - see the
+// comment in stepSkyPilotFlight(). Persist across frames so releasing a key
+// decelerates the RATE (not the angle), matching "hold wherever released".
+float skyBankRateCur = 0, skyPitchRateCur = 0;
+bool skyWasStalling = false;
+unsigned long skyLastStallBeepAt = 0;
+int skyTargetAirport = -1;   // airport index for AIRPORT TO AIRPORT; -1 = free roam
+bool skyMissionSuccess = false;
 
 float skyScore = 0;      // distance flown this flight, in world units
 int skyBestScore = 0;
@@ -3256,27 +3278,54 @@ void skyLoadBest() {
 }
 void skySaveBest() { preferences.begin("skypilot", false); preferences.putInt("best", skyBestScore); preferences.end(); }
 
+// Two fixed airports - a start and a destination for AIRPORT TO AIRPORT, and
+// the freeroam runway-start spawn point. pos.y is a placeholder; the actual
+// runway elevation is wherever skyTerrainHeight() flattens to near it.
+struct SkyAirport { KVec3 pos; float heading; float length, width; const char* name; };
+constexpr int SKY_AIRPORT_COUNT = 2;
+SkyAirport skyAirports[SKY_AIRPORT_COUNT] = {
+  {{0, 0, 0}, 0.0f, 70.0f, 12.0f, "ALPHA"},
+  {{560, 0, 460}, 2.1f, 70.0f, 12.0f, "BRAVO"},
+};
+constexpr float SKY_RUNWAY_ELEVATION = 10.0f;
+constexpr float SKY_RUNWAY_FLATTEN_RADIUS = 90.0f;
+
 // A handful of stacked sine waves, evaluated directly from world (x,z) with
 // no stored heightmap - an "infinite" terrain that needs no generation step
-// and never runs out, matching the open-world request. Not real noise (no
-// hash/table), just enough layered frequencies to read as rolling hills
-// rather than a single smooth wave.
+// and never runs out. The two big terms are clamped to their positive half
+// (max(0, ...)) so distinct mountain masses rise from flatter plains instead
+// of everywhere being smoothly (and gently) undulating - real obstacles to
+// climb over or steer around, not just scenery.
 float skyTerrainHeight(float x, float z) {
-  float h = 9.0f;
-  h += 11.0f * sinf(x * 0.014f + 1.7f) * cosf(z * 0.011f + 0.4f);
-  h += 6.0f * sinf(x * 0.037f + 0.6f) * sinf(z * 0.041f + 2.6f);
-  h += 3.0f * cosf(x * 0.09f + 3.0f) * cosf(z * 0.085f + 1.1f);
+  float h = 10.0f;
+  h += 34.0f * max(0.0f, sinf(x * 0.0055f + 1.7f) * cosf(z * 0.0048f + 0.4f));
+  h += 20.0f * max(0.0f, sinf(x * 0.013f + 0.6f) * sinf(z * 0.015f + 2.6f));
+  h += 5.0f * cosf(x * 0.05f + 3.0f) * cosf(z * 0.045f + 1.1f);
+  // Flatten a landing pad around each airport, blending smoothly into the
+  // surrounding terrain at the flatten radius - can't land on bumpy ground.
+  for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) {
+    float dx = x - skyAirports[i].pos.x, dz = z - skyAirports[i].pos.z;
+    float d = sqrtf(dx * dx + dz * dz);
+    if (d < SKY_RUNWAY_FLATTEN_RADIUS) {
+      float t = d / SKY_RUNWAY_FLATTEN_RADIUS;
+      float smooth = t * t * (3 - 2 * t);
+      h = SKY_RUNWAY_ELEVATION * (1 - smooth) + h * smooth;
+    }
+  }
   return h;
 }
-// A wireframe mesh grid, resampled fresh each frame centered under the
-// plane's ground track - cheap (pure sine evaluation, no storage) and
+// A wireframe mesh grid, resampled fresh each frame and biased ahead of the
+// plane (where it matters for spotting terrain to dodge) rather than
+// centered symmetrically - cheap (pure sine evaluation, no storage) and
 // unbounded, instead of a fixed generated track like Kart Racer's.
-void skyDrawTerrain(const KartCam& cam) {
-  constexpr int GRID = 10;
-  constexpr float STEP = 14.0f;
+void skyDrawTerrain(const KartCam& cam, const KVec3& fwd) {
+  constexpr int GRID = 16;
+  constexpr float STEP = 22.0f;
   static KVec3 pts[GRID + 1][GRID + 1];
-  float baseX = skyPlane.pos.x - (GRID / 2) * STEP;
-  float baseZ = skyPlane.pos.z - (GRID / 2) * STEP;
+  KVec3 groundFwd = knormalized(KVec3{fwd.x, 0, fwd.z});
+  KVec3 center = skyPlane.pos + groundFwd * (GRID * STEP * 0.28f);
+  float baseX = center.x - (GRID / 2) * STEP;
+  float baseZ = center.z - (GRID / 2) * STEP;
   for (int j = 0; j <= GRID; ++j) {
     for (int i = 0; i <= GRID; ++i) {
       float x = baseX + i * STEP, z = baseZ + j * STEP;
@@ -3294,8 +3343,12 @@ void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd) {
   KVec3 worldUp{0, 1, 0};
   KVec3 rightLevel = knormalized(kcross(fwd, worldUp));
   KVec3 upLevel = kcross(rightLevel, fwd);
-  KVec3 right = rightLevel * cosf(skyPlane.bank) + upLevel * sinf(skyPlane.bank);
-  KVec3 up = upLevel * cosf(skyPlane.bank) - rightLevel * sinf(skyPlane.bank);
+  // NOTE: -sin/+sin (not +sin/-sin) - a positive bank must roll the RIGHT
+  // wingtip down and the left one up to visually match the actual turn (see
+  // TURN_RATE_PER_BANK's sign in stepSkyPilotFlight()); the previous version
+  // had this backwards, so the model banked opposite to the way it turned.
+  KVec3 right = rightLevel * cosf(skyPlane.bank) - upLevel * sinf(skyPlane.bank);
+  KVec3 up = upLevel * cosf(skyPlane.bank) + rightLevel * sinf(skyPlane.bank);
   const KVec3& pos = skyPlane.pos;
   const float noseLen = 2.0f, tailLen = 2.4f, bodyHalfWidth = 0.28f;
   const float wingSpan = 3.0f, wingSweep = 0.6f, wingChord = 0.9f, dihedral = 0.14f;
@@ -3330,7 +3383,7 @@ void skyDrawPlaneModel(const KartCam& cam, const KVec3& fwd) {
 void skyRenderScene(const KartCam& cam, const KVec3& fwd) {
   kartCanvas.fillScreen(ILI9341_BLACK);
   kartDrawSky(cam);
-  skyDrawTerrain(cam);
+  skyDrawTerrain(cam, fwd);
   skyDrawPlaneModel(cam, fwd);
 }
 // Bottom instrument strip: a rotating/tilting attitude indicator (per-column
@@ -3388,12 +3441,48 @@ void skyDrawCompass(int x0, int y0, int w, int h) {
   char buf[5]; snprintf(buf, sizeof(buf), "%03d", (int)headingDeg);
   kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK); kartCanvas.setCursor(cx - 9, y0 + h - 9); kartCanvas.print(buf);
 }
-void skyRenderHud() {
+// A small fixed-scale radar: the plane always sits at the center (a north-up
+// map, not heading-up, since the compass strip already covers "which way am
+// I facing" - this one is for "where is everything else"), with airports as
+// blips pinned to the edge when out of range so their direction is never
+// lost even far from either of them.
+void skyDrawMinimap(int x0, int y0, int size) {
+  kartCanvas.fillRect(x0, y0, size, size, ILI9341_BLACK);
+  kartCanvas.drawRect(x0, y0, size, size, ILI9341_DARKGREY);
+  const float unitsPerPixel = 9.0f;
+  int cx = x0 + size / 2, cy = y0 + size / 2;
+  float maxR = size / 2.0f - 3.0f;
+  for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) {
+    float dx = (skyAirports[i].pos.x - skyPlane.pos.x) / unitsPerPixel;
+    float dz = (skyAirports[i].pos.z - skyPlane.pos.z) / unitsPerPixel;
+    float dist = sqrtf(dx * dx + dz * dz);
+    if (dist > maxR && dist > 0.001f) { float s = maxR / dist; dx *= s; dz *= s; }
+    bool isTarget = skyMode == SKY_MODE_AIRPORT && i == skyTargetAirport;
+    kartCanvas.fillCircle(cx + (int)dx, cy - (int)dz, 2, isTarget ? ILI9341_YELLOW : ILI9341_CYAN);
+  }
+  // Heading arrow: a direct top-down projection of the real flight direction
+  // (not the compass's display-negated heading, which only exists to make
+  // the compass NUMBER read in the standard clockwise sense).
+  float ax = sinf(skyPlane.heading), az = cosf(skyPlane.heading);
+  kartCanvas.drawLine(cx - (int)(ax * 4), cy + (int)(az * 4), cx + (int)(ax * 7), cy - (int)(az * 7), ILI9341_WHITE);
+}
+void skyRenderHud(bool stalling) {
   int hudY = kartCanvas.height() - SKY_HUD_H;
-  kartCanvas.fillRect(0, 0, 130, 12, ILI9341_BLACK);
+  kartCanvas.fillRect(0, 0, kartCanvas.width() - 58, 22, ILI9341_BLACK);
   kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
-  char buf[40]; snprintf(buf, sizeof(buf), "DIST %d  BEST %d", (int)skyScore, skyBestScore);
+  char buf[48]; snprintf(buf, sizeof(buf), "DIST %d  BEST %d", (int)skyScore, skyBestScore);
   kartCanvas.setCursor(3, 2); kartCanvas.print(buf);
+  kartCanvas.setTextColor(skyGearDown ? ILI9341_GREEN : ILI9341_ORANGE, ILI9341_BLACK);
+  kartCanvas.setCursor(3, 12); kartCanvas.print(skyGearDown ? "GEAR DOWN" : "GEAR UP");
+  if (skyMode == SKY_MODE_AIRPORT && skyTargetAirport >= 0) {
+    kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+    kartCanvas.setCursor(72, 12); kartCanvas.print(String("-> ") + skyAirports[skyTargetAirport].name);
+  }
+  if (stalling) {
+    kartCanvas.setTextColor((millis() / 250) % 2 ? ILI9341_RED : ILI9341_YELLOW, ILI9341_BLACK);
+    kartCanvas.setCursor(kartCanvas.width() / 2 - 40, 2); kartCanvas.print("STALL");
+  }
+  skyDrawMinimap(kartCanvas.width() - 54, 2, 52);
 
   kartCanvas.fillRect(0, hudY, kartCanvas.width(), SKY_HUD_H, ILI9341_BLACK);
   kartCanvas.drawFastHLine(0, hudY, kartCanvas.width(), ILI9341_DARKGREY);
@@ -3411,12 +3500,44 @@ void skyRenderHud() {
   snprintf(buf, sizeof(buf), "%4d", (int)skyPlane.pos.y); kartCanvas.setCursor(268, hudY + 15); kartCanvas.print(buf);
 }
 
-void startSkyPilotFlight() {
+// modeSelected: 0=free roam from a runway, 1=free roam launched airborne,
+// 2=airport to airport (Alpha -> Bravo).
+void startSkyPilotFlight(int modeSelected) {
   skyLoadBest();
   skyPlane = SkyPlane();
-  skyPlane.pos = {0, 40, 0};
+  skyBankRateCur = skyPitchRateCur = 0;
+  skyWasStalling = false;
   skyScore = 0;
   skyLastFrameMs = millis();
+  skyMissionSuccess = false;
+
+  if (modeSelected == 2) {
+    skyMode = SKY_MODE_AIRPORT;
+    skyTargetAirport = 1;
+    skyGrounded = true;
+    skyGearDown = true;
+    const SkyAirport& a = skyAirports[0];
+    skyPlane.pos = {a.pos.x, skyTerrainHeight(a.pos.x, a.pos.z), a.pos.z};
+    skyPlane.heading = a.heading;
+    skyPlane.speed = 0;
+  } else {
+    skyMode = SKY_MODE_FREEROAM;
+    skyTargetAirport = -1;
+    if (modeSelected == 1) {
+      skyGrounded = false;
+      skyGearDown = false;
+      skyPlane.pos = {0, 45, 0};
+      skyPlane.heading = 0;
+      skyPlane.speed = 20.0f;
+    } else {
+      skyGrounded = true;
+      skyGearDown = true;
+      const SkyAirport& a = skyAirports[0];
+      skyPlane.pos = {a.pos.x, skyTerrainHeight(a.pos.x, a.pos.z), a.pos.z};
+      skyPlane.heading = a.heading;
+      skyPlane.speed = 0;
+    }
+  }
   skyState = SKY_FLYING;
 }
 
@@ -3426,21 +3547,33 @@ void drawSkyPilotHub() {
   tft.fillScreen(ui.bg); header("GAMES / SKY PILOT");
   tft.setTextSize(1);
   if (skyState == SKY_RESULTS) {
-    tft.setTextColor(ILI9341_YELLOW, ui.bg); tft.setCursor(12, CONTENT_Y + 10); tft.print("CRASHED");
+    bool win = skyMode == SKY_MODE_AIRPORT && skyMissionSuccess;
+    String headline = win ? ("LANDED AT " + String(skyAirports[skyTargetAirport].name))
+                           : (skyMode == SKY_MODE_AIRPORT ? String("MISSION FAILED") : String("CRASHED"));
+    tft.setTextColor(win ? ILI9341_GREEN : ILI9341_YELLOW, ui.bg); tft.setCursor(12, CONTENT_Y + 10);
+    tft.print(headline);
     tft.setTextColor(ui.text, ui.bg); tft.setCursor(12, CONTENT_Y + 34); tft.print("DISTANCE  " + String((int)skyScore));
     tft.setCursor(12, CONTENT_Y + 52); tft.print("BEST      " + String(skyBestScore));
     if (skyScore > 0 && (int)skyScore == skyBestScore) { tft.setTextColor(ILI9341_GREEN, ui.bg); tft.setCursor(12, CONTENT_Y + 72); tft.print("NEW BEST!"); }
     footer("ENTER FLY AGAIN     FN GAMES");
     return;
   }
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 8); tft.print("OPEN-WORLD FLIGHT - DON'T HIT THE TERRAIN");
-  tft.setTextColor(ui.text, ui.bg); tft.setCursor(12, CONTENT_Y + 30); tft.print("BEST DISTANCE  " + String(skyBestScore));
-  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 60); tft.print("; . PITCH      , / BANK + TURN");
-  tft.setCursor(12, CONTENT_Y + 76); tft.print("W THROTTLE UP  A THROTTLE DOWN");
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 96); tft.print("Controls hold their angle - release");
-  tft.setCursor(12, CONTENT_Y + 108); tft.print("to keep the current pitch/bank.");
-  footer("ENTER TAKE OFF     FN GAMES");
+  static const char* modes[SKY_MODE_OPTION_COUNT] = {"FREE ROAM - RUNWAY START", "FREE ROAM - AIRBORNE START", "AIRPORT TO AIRPORT"};
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 4); tft.print("BEST DISTANCE  " + String(skyBestScore));
+  for (int i = 0; i < SKY_MODE_OPTION_COUNT; ++i) {
+    int y = CONTENT_Y + 24 + i * 20; bool sel = i == skyModeSelected; uint16_t bg = sel ? ui.selected : ui.bg;
+    if (sel) tft.fillRoundRect(8, y - 3, 304, 16, 4, bg);
+    tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  "); tft.print(modes[i]);
+  }
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 100); tft.print("; . PITCH      , / BANK + TURN");
+  tft.setCursor(12, CONTENT_Y + 114); tft.print("W/A THROTTLE   Q LANDING GEAR");
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 134); tft.print("Controls hold their angle on release.");
+  tft.setCursor(12, CONTENT_Y + 146); tft.print("Below 12 spd airborne, watch for a stall.");
+  footer(";/. SELECT     ENTER START     FN GAMES");
 }
+
+constexpr float SKY_STALL_SPEED = 12.0f;
+constexpr float SKY_ROTATE_SPEED = 16.0f;  // ground speed needed before the nose can lift off
 
 // Continuous per-frame flight loop - called unconditionally every loop()
 // iteration (like stepKartRace()), but only actually does anything mid-flight;
@@ -3457,10 +3590,13 @@ void stepSkyPilotFlight() {
   if (dt > 0.1f) dt = 0.1f;
   if (dt < 0) dt = 0;
 
-  static bool prevH = false;
+  static bool prevH = false, prevQ = false;
   bool nowH = M5Cardputer.Keyboard.isKeyPressed('h');
   bool edgeH = nowH && !prevH; prevH = nowH;
   if (edgeH) { skyState = SKY_HOME; redrawNeeded = true; return; }
+  bool nowQ = M5Cardputer.Keyboard.isKeyPressed('q');
+  bool edgeQ = nowQ && !prevQ; prevQ = nowQ;
+  if (edgeQ) { skyGearDown = !skyGearDown; playFunctionSound(); }
 
   int pitchInput = 0, bankInput = 0, throttleInput = 0;
   if (M5Cardputer.Keyboard.isKeyPressed(';')) pitchInput = 1;
@@ -3470,39 +3606,111 @@ void stepSkyPilotFlight() {
   if (M5Cardputer.Keyboard.isKeyPressed('w')) throttleInput = 1;
   else if (M5Cardputer.Keyboard.isKeyPressed('a')) throttleInput = -1;
 
-  // Rate control, not position control: pitch/bank change while a key is
-  // held and simply HOLD wherever they end up on release, like a real
-  // control surface with no auto-level - deliberately no return-to-zero
-  // easing here (an earlier version had one; it read as "arcade car
-  // steering", not flight). Still clamped short of +-90 deg to avoid the
-  // gimbal-lock singularity in the pitch/heading -> forward-vector math
-  // below, not to fake a self-centering feel.
-  static const float BANK_RATE = 1.6f, BANK_MAX = 1.2f;
-  static const float PITCH_RATE = 1.0f, PITCH_MAX = 1.3f;
-  // Turning is coordinated with bank, like a real aircraft (rudder is
-  // implicit) - NOT a separate yaw control. heading -= (not +=) so that a
-  // left bank (negative, from ',') increases heading, which this file's
-  // fwd={sin(heading),...,cos(heading)} convention turns toward the
-  // camera's left - matching Kart Racer's steer sign and fixing a bug
-  // where Sky Pilot originally turned opposite to the bank direction.
-  static const float TURN_RATE_PER_BANK = 1.2f;
-  static const float THROTTLE_ACCEL = 9.0f, CRUISE_DECAY = 1.0f;
+  bool stalling = !skyGrounded && skyPlane.speed < SKY_STALL_SPEED;
+  if (stalling && (now - skyLastStallBeepAt > 450 || !skyWasStalling)) {
+    skyLastStallBeepAt = now; vibrate(40); if (volumeLevel) M5Cardputer.Speaker.tone(160, 90);
+  }
+  skyWasStalling = stalling;
 
-  if (bankInput != 0) skyPlane.bank = constrain(skyPlane.bank + bankInput * BANK_RATE * dt, -BANK_MAX, BANK_MAX);
-  if (pitchInput != 0) skyPlane.pitch = constrain(skyPlane.pitch + pitchInput * PITCH_RATE * dt, -PITCH_MAX, PITCH_MAX);
-  skyPlane.heading -= sinf(skyPlane.bank) * TURN_RATE_PER_BANK * dt;
-
+  // Throttle, plus a small extra drag from the gear hanging in the airstream
+  // - the same lever that's required for a safe landing also costs you
+  // cruise speed if you forget to raise it after takeoff.
+  static const float THROTTLE_ACCEL = 9.0f, CRUISE_DECAY = 1.0f, GEAR_DRAG = 1.4f;
   if (throttleInput > 0) skyPlane.speed += THROTTLE_ACCEL * dt;
   else if (throttleInput < 0) skyPlane.speed -= THROTTLE_ACCEL * dt;
   else if (skyPlane.speed > SkyPlane::MIN_SPEED) skyPlane.speed -= CRUISE_DECAY * dt;
-  skyPlane.speed = constrain(skyPlane.speed, SkyPlane::MIN_SPEED, SkyPlane::MAX_SPEED);
+  if (skyGearDown && !skyGrounded) skyPlane.speed -= GEAR_DRAG * dt;
+
+  if (skyGrounded) {
+    // Ground roll: locked to the runway heading - a real aircraft can't
+    // bank or pitch with its wheels on the tarmac - until fast enough to
+    // rotate the nose up.
+    skyPlane.bank = 0;
+    skyBankRateCur = skyPitchRateCur = 0;
+    if (pitchInput > 0 && skyPlane.speed >= SKY_ROTATE_SPEED) skyPlane.pitch = min(skyPlane.pitch + 0.6f * dt, 0.3f);
+    else skyPlane.pitch = max(skyPlane.pitch - 0.6f * dt, 0.0f);
+  } else {
+    // Pitch/bank are rate-controlled with their OWN acceleration (not just a
+    // fixed rate the instant a key is pressed) so they ramp up and coast
+    // down like a real control surface has inertia, instead of snapping to
+    // full deflection - this is what made the earlier version feel twitchy.
+    // Releasing the key decelerates the RATE, not the angle, so the plane
+    // still holds whatever attitude it ends up at.
+    float controlScale = stalling ? 0.4f : 1.0f;
+    static const float BANK_RATE_MAX = 0.55f, BANK_ACCEL = 1.4f, BANK_MAX = 1.2f;
+    static const float PITCH_RATE_MAX = 0.42f, PITCH_ACCEL = 1.1f, PITCH_MAX = 1.3f;
+    // Turning is coordinated with bank, like a real aircraft (rudder is
+    // implicit) - NOT a separate yaw control. heading -= (not +=) so that a
+    // left bank (negative, from ',') increases heading, which this file's
+    // fwd={sin(heading),...,cos(heading)} convention turns toward the
+    // camera's left, matching Kart Racer's steer sign.
+    static const float TURN_RATE_PER_BANK = 1.2f;
+
+    float bankTargetRate = bankInput * BANK_RATE_MAX * controlScale;
+    if (skyBankRateCur < bankTargetRate) skyBankRateCur = min(skyBankRateCur + BANK_ACCEL * dt, bankTargetRate);
+    else if (skyBankRateCur > bankTargetRate) skyBankRateCur = max(skyBankRateCur - BANK_ACCEL * dt, bankTargetRate);
+    skyPlane.bank = constrain(skyPlane.bank + skyBankRateCur * dt, -BANK_MAX, BANK_MAX);
+
+    float pitchTargetRate = pitchInput * PITCH_RATE_MAX * controlScale;
+    if (skyPitchRateCur < pitchTargetRate) skyPitchRateCur = min(skyPitchRateCur + PITCH_ACCEL * dt, pitchTargetRate);
+    else if (skyPitchRateCur > pitchTargetRate) skyPitchRateCur = max(skyPitchRateCur - PITCH_ACCEL * dt, pitchTargetRate);
+    skyPlane.pitch = constrain(skyPlane.pitch + skyPitchRateCur * dt, -PITCH_MAX, PITCH_MAX);
+    if (stalling) skyPlane.pitch = max(skyPlane.pitch - 0.5f * dt, -PITCH_MAX);  // the nose drops on its own
+
+    skyPlane.heading -= sinf(skyPlane.bank) * TURN_RATE_PER_BANK * dt;
+
+    // Climbing trades speed for altitude and diving trades back, like real
+    // energy conservation - also what makes a sustained climb bleed into a
+    // stall instead of stalling being reachable only by braking.
+    constexpr float SKY_CLIMB_SPEED_LOSS = 6.0f;
+    skyPlane.speed -= sinf(skyPlane.pitch) * SKY_CLIMB_SPEED_LOSS * dt;
+  }
+  skyPlane.speed = constrain(skyPlane.speed, 0.0f, SkyPlane::MAX_SPEED);
 
   KVec3 fwd = {cosf(skyPlane.pitch) * sinf(skyPlane.heading), sinf(skyPlane.pitch), cosf(skyPlane.pitch) * cosf(skyPlane.heading)};
   float moveDist = skyPlane.speed * dt;
   skyPlane.pos = skyPlane.pos + fwd * moveDist;
+  if (stalling) skyPlane.pos.y -= 4.0f * dt;  // sinking faster than pitch alone implies
   skyScore += moveDist;
 
-  bool crashed = skyPlane.pos.y <= skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z) + 1.0f;
+  if (skyGrounded) {
+    skyPlane.pos.y = skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
+    if (skyPlane.pitch > 0.08f && skyPlane.speed >= SKY_ROTATE_SPEED) skyGrounded = false;  // liftoff
+  } else {
+    float ground = skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
+    if (skyPlane.pos.y <= ground + 1.0f) {
+      int nearAirport = -1;
+      for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) {
+        float dx = skyPlane.pos.x - skyAirports[i].pos.x, dz = skyPlane.pos.z - skyAirports[i].pos.z;
+        if (sqrtf(dx * dx + dz * dz) < skyAirports[i].length * 0.55f) { nearAirport = i; break; }
+      }
+      float vSpeed = fwd.y * skyPlane.speed;
+      bool safe = nearAirport >= 0 && skyGearDown && vSpeed > -8.0f && fabsf(skyPlane.bank) < 0.35f && fabsf(skyPlane.pitch) < 0.35f;
+      if (safe) {
+        skyGrounded = true;
+        skyPlane.pos.y = ground;
+        skyPlane.pitch = 0; skyPlane.bank = 0;
+        skyPlane.heading = skyAirports[nearAirport].heading;
+        skyBankRateCur = skyPitchRateCur = 0;
+        vibrate(30); if (volumeLevel) M5Cardputer.Speaker.tone(500, 80);
+        if (skyMode == SKY_MODE_AIRPORT && nearAirport == skyTargetAirport) {
+          skyMissionSuccess = true;
+          if ((int)skyScore > skyBestScore) { skyBestScore = (int)skyScore; skySaveBest(); }
+          skyState = SKY_RESULTS;
+          redrawNeeded = true;
+          return;
+        }
+      } else {
+        vibrate(200);
+        if (volumeLevel) { M5Cardputer.Speaker.tone(180, 150); delay(160); M5Cardputer.Speaker.tone(90, 220); }
+        if ((int)skyScore > skyBestScore) { skyBestScore = (int)skyScore; skySaveBest(); }
+        skyMissionSuccess = false;
+        skyState = SKY_RESULTS;
+        redrawNeeded = true;
+        return;
+      }
+    }
+  }
 
   KartCam cam;
   cam.position = skyPlane.pos - fwd * 6.0f + KVec3{0, 2.2f, 0};
@@ -3512,16 +3720,8 @@ void stepSkyPilotFlight() {
   cam.fovY = 68.0f;
 
   skyRenderScene(cam, fwd);
-  skyRenderHud();
+  skyRenderHud(stalling);
   tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
-
-  if (crashed) {
-    vibrate(200);
-    if (volumeLevel) { M5Cardputer.Speaker.tone(180, 150); delay(160); M5Cardputer.Speaker.tone(90, 220); }
-    if ((int)skyScore > skyBestScore) { skyBestScore = (int)skyScore; skySaveBest(); }
-    skyState = SKY_RESULTS;
-    redrawNeeded = true;
-  }
 }
 // ============================================================================
 
@@ -6635,10 +6835,16 @@ void keyboard() {
       return;
     }
     if (gameMode == 8) {
-      // SKY_FLYING input is polled directly in stepSkyPilotFlight() every
-      // frame, not through this per-event handler - HOME/RESULTS only need
-      // a single ENTER to (re)start the flight.
-      if (k.enter && (skyState == SKY_HOME || skyState == SKY_RESULTS)) { playEnterSound(); startSkyPilotFlight(); }
+      // SKY_FLYING input (including gear) is polled directly in
+      // stepSkyPilotFlight() every frame, not through this per-event
+      // handler - HOME only needs mode selection, RESULTS just a restart.
+      if (skyState == SKY_HOME) {
+        for (char c : k.word) {
+          if (c == ';') { skyModeSelected = (skyModeSelected + SKY_MODE_OPTION_COUNT - 1) % SKY_MODE_OPTION_COUNT; redrawNeeded = true; }
+          else if (c == '.') { skyModeSelected = (skyModeSelected + 1) % SKY_MODE_OPTION_COUNT; redrawNeeded = true; }
+        }
+      }
+      if (k.enter && (skyState == SKY_HOME || skyState == SKY_RESULTS)) { playEnterSound(); startSkyPilotFlight(skyModeSelected); }
       return;
     }
     if (gameMode == 1) {
