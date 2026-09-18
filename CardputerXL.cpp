@@ -4003,11 +4003,25 @@ void skyDrawPlanePreviewScene() {
   cam.fovY = 55.0f;
 
   skyDrawPlaneModel(cam, fwd, showcasePos, bank, skyPlaneModels[skyPlaneModelIndex]);
+
+  // Baked into the canvas (not printed separately onto tft) so the
+  // continuous per-frame update below is a single blit of this buffer, like
+  // every other continuously-animated view in this file - printing this
+  // directly to tft every frame, on top of a full-screen blit, was visible
+  // as a flash/flicker each tick.
+  const SkyPlaneModelParams& picked = skyPlaneModels[skyPlaneModelIndex];
+  kartCanvas.setTextSize(2); kartCanvas.setTextColor(ILI9341_WHITE, ILI9341_NAVY);
+  kartCanvas.setCursor(10, CONTENT_Y + 6); kartCanvas.print(picked.name);
+  kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_NAVY);
+  kartCanvas.setCursor(10, CONTENT_Y + 28); kartCanvas.print(picked.special);
 }
-void drawSkyPilotHubPlane();
 // Continuous driver for the PLANE stage's rotation - bypasses redrawNeeded
 // like Kart Racer/Sky Pilot's own live view do, self-gated on actually
-// being on that stage so it's a no-op everywhere else.
+// being on that stage so it's a no-op everywhere else. Unlike the one-time
+// full draw (drawSkyPilotHubPlane(), used on stage entry/plane change),
+// this blits only the content band between the header and footer strips
+// and never touches header()/footer() - repainting those every animation
+// tick was what caused the visible flashing.
 unsigned long skyPreviewLastMs = 0;
 void stepSkyPilotHubPreview() {
   if (page != GAMEHUB || gameMode != 8 || skyState != SKY_HOME || skyHubStage != SkyHubStage::PLANE) { skyPreviewLastMs = 0; return; }
@@ -4019,7 +4033,9 @@ void stepSkyPilotHubPreview() {
   if (dt > 0.1f) dt = 0.1f;
   skyPreviewSpin += dt * 1.1f;
   if (skyPreviewSpin > 6.2832f) skyPreviewSpin -= 6.2832f;
-  drawSkyPilotHubPlane();
+  skyDrawPlanePreviewScene();
+  int bandH = H - HEADER_H - FOOTER_H;
+  tft.drawRGBBitmap(0, HEADER_H, kartCanvas.getBuffer() + (size_t)HEADER_H * kartCanvas.width(), kartCanvas.width(), bandH);
 }
 
 void drawSkyPilotHubMode() {
@@ -4035,21 +4051,17 @@ void drawSkyPilotHubMode() {
   footer(";/. SELECT     ENTER NEXT     FN GAMES");
 }
 
-// The 3D preview fills the whole canvas as a backdrop, so header()/footer()
-// are called AFTER blitting it - they simply paint over the strips they own,
-// same trick the flight HUD uses over the live scene. Plane name/special use
-// the preview's own navy sky colour as their print background instead of a
-// separate box, since both sit over that region regardless of which plane
-// is picked (see skyDrawPlanePreviewScene()'s fixed layout).
+// The 3D preview (name/special trait included, see skyDrawPlanePreviewScene())
+// fills the whole canvas as a backdrop, so header()/footer() are called AFTER
+// blitting it - they simply paint over the strips they own, same trick the
+// flight HUD uses over the live scene. Used only for the one-time full paint
+// on stage entry/plane change - the continuous rotation animation
+// (stepSkyPilotHubPreview()) blits just the content band instead, since
+// repainting header()/footer() every animation tick visibly flickered.
 void drawSkyPilotHubPlane() {
   skyDrawPlanePreviewScene();
   tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
   header("GAMES / SKY PILOT / PLANE (2 OF 3)");
-  const SkyPlaneModelParams& picked = skyPlaneModels[skyPlaneModelIndex];
-  tft.setTextSize(2); tft.setTextColor(ILI9341_WHITE, ILI9341_NAVY);
-  tft.setCursor(10, CONTENT_Y + 6); tft.print(picked.name);
-  tft.setTextSize(1); tft.setTextColor(ILI9341_YELLOW, ILI9341_NAVY);
-  tft.setCursor(10, CONTENT_Y + 28); tft.print(picked.special);
   footer(",/ CHANGE PLANE     ENTER NEXT     FN BACK");
 }
 
