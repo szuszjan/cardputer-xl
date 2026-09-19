@@ -2102,9 +2102,52 @@ constexpr int CTRLCTR_SLIDE_ZONE_H = CTRLCTR_Y + CTRLCTR_H;
 constexpr int CTRLCTR_TILE_W = 38, CTRLCTR_TILE_H = 36, CTRLCTR_TILE_GAP = 6;
 constexpr int CTRLCTR_TILES_LEFT = CTRLCTR_X + (CTRLCTR_W - (CONTROLCENTER_ROW_COUNT * CTRLCTR_TILE_W + (CONTROLCENTER_ROW_COUNT - 1) * CTRLCTR_TILE_GAP)) / 2;
 constexpr int CTRLCTR_TILE_TOP = CTRLCTR_Y + 22;
-const char* controlCenterIcon(int row) {
-  static const char* icons[CONTROLCENTER_ROW_COUNT] = {"br", "vo", "th", "wf", "bt"};
-  return icons[row];
+// Small vector glyphs instead of text abbreviations - drawn directly with
+// GFX primitives (no bitmap/font asset exists anywhere in this file for
+// icons; every other "icon" in the app, e.g. the dock's own tiles, is
+// actually a 1-2 character text glyph). drawCircleHelper's cornername mask
+// (see Adafruit_GFX::drawRoundRect's own use of it) is 1=top-left,
+// 2=top-right, 4=bottom-right, 8=bottom-left - combined masks draw a half-
+// circle arc opening the other way (3=top-left+top-right opens upward,
+// 6=top-right+bottom-right opens rightward).
+void ccIconBrightness(int cx, int cy, uint16_t col) {
+  tft.fillCircle(cx, cy, 4, col);
+  for (int a = 0; a < 8; ++a) {
+    float ang = a * (3.14159265f / 4.0f);  // KART_PI isn't declared until much later in this single-pass file
+    tft.drawLine(cx + (int)(cosf(ang) * 7), cy + (int)(sinf(ang) * 7), cx + (int)(cosf(ang) * 10), cy + (int)(sinf(ang) * 10), col);
+  }
+}
+void ccIconVolume(int cx, int cy, uint16_t col) {
+  tft.fillTriangle(cx - 9, cy - 6, cx - 9, cy + 6, cx - 2, cy, col);
+  tft.fillRect(cx - 11, cy - 3, 3, 6, col);
+  tft.drawCircleHelper(cx - 2, cy, 5, 6, col);
+  tft.drawCircleHelper(cx - 2, cy, 9, 6, col);
+}
+void ccIconTheme(int cx, int cy) {
+  tft.fillCircle(cx - 5, cy - 3, 4, ILI9341_RED);
+  tft.fillCircle(cx + 5, cy - 3, 4, ILI9341_GREEN);
+  tft.fillCircle(cx, cy + 5, 4, ILI9341_BLUE);
+}
+void ccIconWifi(int cx, int cy, uint16_t col) {
+  tft.fillCircle(cx, cy + 6, 2, col);
+  tft.drawCircleHelper(cx, cy + 6, 6, 3, col);
+  tft.drawCircleHelper(cx, cy + 6, 10, 3, col);
+}
+void ccIconBluetooth(int cx, int cy, uint16_t col) {
+  tft.drawLine(cx, cy - 9, cx, cy + 9, col);
+  tft.drawLine(cx, cy - 9, cx + 6, cy - 4, col);
+  tft.drawLine(cx + 6, cy - 4, cx, cy, col);
+  tft.drawLine(cx, cy, cx + 6, cy + 4, col);
+  tft.drawLine(cx + 6, cy + 4, cx, cy + 9, col);
+}
+void drawControlCenterIcon(int row, int cx, int cy, uint16_t col) {
+  switch (row) {
+    case 0: ccIconBrightness(cx, cy, col); break;
+    case 1: ccIconVolume(cx, cy, col); break;
+    case 2: ccIconTheme(cx, cy); break;
+    case 3: ccIconWifi(cx, cy, col); break;
+    default: ccIconBluetooth(cx, cy, col); break;
+  }
 }
 String controlCenterValueText(int row) {
   switch (row) {
@@ -2120,8 +2163,7 @@ void drawControlCenterTile(int row, bool selected) {
   uint16_t fill = selected ? ui.selected : ILI9341_DARKGREY;
   tft.fillRoundRect(x, CTRLCTR_TILE_TOP, CTRLCTR_TILE_W, CTRLCTR_TILE_H, 6, fill);
   tft.drawRoundRect(x, CTRLCTR_TILE_TOP, CTRLCTR_TILE_W, CTRLCTR_TILE_H, 6, selected ? ui.accent : ui.dim);
-  tft.setTextSize(2); tft.setTextColor(ui.text, fill);
-  tft.setCursor(x + 5, CTRLCTR_TILE_TOP + 10); tft.print(controlCenterIcon(row));
+  drawControlCenterIcon(row, x + CTRLCTR_TILE_W / 2, CTRLCTR_TILE_TOP + CTRLCTR_TILE_H / 2, ui.text);
 }
 // Redraws just the caption naming the selected tile's name+value - called on
 // open, whenever the selection moves, and whenever the selected tile's own
@@ -3005,14 +3047,47 @@ static void kartDrawSeg(const KartCam& cam, const KVec3& a, const KVec3& b, uint
   if (abs(ax) > SCREEN_MARGIN || abs(ay) > SCREEN_MARGIN || abs(bx) > SCREEN_MARGIN || abs(by) > SCREEN_MARGIN) return;
   kartCanvas.drawLine(ax, ay, bx, by, col);
 }
+// Clips a triangle against the near plane (Sutherland-Hodgman, one plane)
+// before filling it, instead of bailing on the WHOLE triangle the instant
+// any one vertex fails to project - same motivation as kartDrawSeg's own
+// segment clip above, just for a filled shape instead of a line. Clipping a
+// triangle against a single plane yields a triangle (0 vertices behind), a
+// quad (1 vertex behind - fan-filled as 2 triangles here), or nothing (2-3
+// vertices behind). Without this, terrain cells right under a low, banking
+// camera - e.g. just after touchdown or during a low takeoff climb-out -
+// would flicker out entirely rather than just losing the sliver actually
+// behind the camera.
+static void kartClipFillTriangle(const KartCam& cam, const KVec3& a, const KVec3& b, const KVec3& c, uint16_t col) {
+  constexpr float NEAR_Z = 0.17f;  // KartCam::project()'s own NEAR_Z (0.15) plus a hair of margin
+  const KVec3 verts[3] = {a, b, c};
+  float cz[3];
+  for (int i = 0; i < 3; ++i) cz[i] = kdot(verts[i] - cam.position, cam.forward);
+  KVec3 out[4];
+  int outCount = 0;
+  for (int i = 0; i < 3; ++i) {
+    const KVec3& cur = verts[i];
+    const KVec3& nxt = verts[(i + 1) % 3];
+    float curZ = cz[i], nxtZ = cz[(i + 1) % 3];
+    bool curIn = curZ >= NEAR_Z, nxtIn = nxtZ >= NEAR_Z;
+    if (curIn) out[outCount++] = cur;
+    if (curIn != nxtIn) out[outCount++] = cur + (nxt - cur) * constrain((NEAR_Z - curZ) / (nxtZ - curZ), 0.0f, 1.0f);
+  }
+  if (outCount < 3) return;
+  int x0, y0;
+  if (!cam.project(out[0], kartCanvas.width(), kartCanvas.height(), x0, y0)) return;
+  constexpr int SCREEN_MARGIN = 1000;  // see kartDrawSeg's own comment on this
+  if (abs(x0) > SCREEN_MARGIN || abs(y0) > SCREEN_MARGIN) return;
+  for (int i = 1; i + 1 < outCount; ++i) {
+    int x1, y1, x2, y2;
+    if (!cam.project(out[i], kartCanvas.width(), kartCanvas.height(), x1, y1)) continue;
+    if (!cam.project(out[i + 1], kartCanvas.width(), kartCanvas.height(), x2, y2)) continue;
+    if (abs(x1) > SCREEN_MARGIN || abs(y1) > SCREEN_MARGIN || abs(x2) > SCREEN_MARGIN || abs(y2) > SCREEN_MARGIN) continue;
+    kartCanvas.fillTriangle(x0, y0, x1, y1, x2, y2, col);
+  }
+}
 static void kartFillQuad(const KartCam& cam, const KVec3& a, const KVec3& b, const KVec3& c, const KVec3& d, uint16_t col) {
-  int ax, ay, bx, by, cx, cy, dx, dy;
-  if (!cam.project(a, kartCanvas.width(), kartCanvas.height(), ax, ay)) return;
-  if (!cam.project(b, kartCanvas.width(), kartCanvas.height(), bx, by)) return;
-  if (!cam.project(c, kartCanvas.width(), kartCanvas.height(), cx, cy)) return;
-  if (!cam.project(d, kartCanvas.width(), kartCanvas.height(), dx, dy)) return;
-  kartCanvas.fillTriangle(ax, ay, bx, by, cx, cy, col);
-  kartCanvas.fillTriangle(ax, ay, cx, cy, dx, dy, col);
+  kartClipFillTriangle(cam, a, b, c, col);
+  kartClipFillTriangle(cam, a, c, d, col);
 }
 static int kartIndexDelta(int a, int b, int n) { int d = a - b; if (d > n / 2) d -= n; if (d < -n / 2) d += n; return d; }
 static void kartDrawWheel(const KartCam& cam, const KVec3& center, float radius, float thickness, const KVec3& fwd, const KVec3& up, const KVec3& right, uint16_t col) {
@@ -3432,6 +3507,13 @@ unsigned long skyLastStallBeepAt = 0;
 int skyTargetAirport = -1;   // airport index for AIRPORT TO AIRPORT; -1 = free roam
 int skyStartAirport = 0;     // departure airport for AIRPORT TO AIRPORT (randomized each flight)
 bool skyMissionSuccess = false;
+// Set the instant a safe touchdown at the TARGET airport happens (A2A mode
+// only) - instead of ending the flight right there, the plane keeps
+// rolling/decelerating under its own ground physics (throttle forced to
+// OFF) until it actually stops, only THEN playing the end-of-flight
+// sequence. Landing used to mean "touched the right runway", which looked
+// like the plane just vanishing mid-rollout at 40+ units/sec.
+bool skyStopping = false;
 bool skyFirstPerson = false;   // 'v' during flight, like Kart Racer's own toggle
 float skyFovOffset = 0;        // i/o held during flight, added to each view's base fovY
 bool skyEngineSoundEnabled = true;  // 'm' on the HOME screen, like Kart's M/F
@@ -3525,11 +3607,11 @@ int skyBotCount = 4;  // adjustable in OPTIONS ("BOTS COUNT"), 1..SKY_BOT_MAX
 // (MEDIUM) reproduces this file's original fixed values (GRID=16, 700-unit
 // bot cull, 900-unit label cull) exactly, so the default experience is
 // unchanged; 0/2 trade view distance for (or against) frame rate.
-constexpr int SKY_RENDER_DIST_LEVELS = 3;
-const char* skyRenderDistNames[SKY_RENDER_DIST_LEVELS] = {"SHORT", "MEDIUM", "LONG"};
-const int skyRenderDistGrid[SKY_RENDER_DIST_LEVELS] = {10, 16, 20};
-const float skyRenderDistBotCull[SKY_RENDER_DIST_LEVELS] = {400.0f, 700.0f, 1000.0f};
-const float skyRenderDistLabelCull[SKY_RENDER_DIST_LEVELS] = {500.0f, 900.0f, 1300.0f};
+constexpr int SKY_RENDER_DIST_LEVELS = 4;
+const char* skyRenderDistNames[SKY_RENDER_DIST_LEVELS] = {"SHORT", "MEDIUM", "LONG", "MAX"};
+const int skyRenderDistGrid[SKY_RENDER_DIST_LEVELS] = {10, 16, 20, 26};
+const float skyRenderDistBotCull[SKY_RENDER_DIST_LEVELS] = {400.0f, 700.0f, 1000.0f, 1400.0f};
+const float skyRenderDistLabelCull[SKY_RENDER_DIST_LEVELS] = {500.0f, 900.0f, 1300.0f, 1800.0f};
 int skyRenderDistLevel = 1;
 // 'R' on the HOME screen - shows bots (as blips) on the same minimap
 // airports already use, regardless of game mode.
@@ -3687,9 +3769,9 @@ float skyTerrainHeight(float x, float z) {
 // to frame, and the visible window only steps by whole STEPs as the plane
 // crosses a cell boundary - real ground, not a rebuilt patch each frame.
 // GRID is now the RENDER DISTANCE setting's, not a fixed constant - the
-// point array is sized to the largest level (LONG) and only the first
+// point array is sized to the largest level (MAX) and only the first
 // GRID+1 rows/columns of it are ever touched at a shorter setting.
-constexpr int SKY_TERRAIN_GRID_MAX = 20;
+constexpr int SKY_TERRAIN_GRID_MAX = 26;
 void skyDrawTerrain(const KartCam& cam, const KVec3& fwd) {
   const int GRID = skyRenderDistGrid[skyRenderDistLevel];
   constexpr float STEP = 22.0f;
@@ -4053,17 +4135,35 @@ void skyDrawCompass(int x0, int y0, int w, int h) {
   char buf[5]; snprintf(buf, sizeof(buf), "%03d", (int)headingDeg);
   kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK); kartCanvas.setCursor(cx - 9, y0 + h - 9); kartCanvas.print(buf);
 }
-// A small fixed-scale radar: the plane always sits at the center (a north-up
-// map, not heading-up, since the compass strip already covers "which way am
-// I facing" - this one is for "where is everything else"), with airports as
+// A fixed-scale radar: the plane always sits at the center (a north-up map,
+// not heading-up, since the compass strip already covers "which way am I
+// facing" - this one is for "where is everything else"), with airports as
 // blips pinned to the edge when out of range so their direction is never
-// lost even far from either of them.
+// lost even far from either of them. The background is sampled straight
+// from the same terrain height/water functions the live 3D view uses (one
+// sample per pixel row/column, skyIsWater() for the color) instead of a
+// flat black square, so lakes and the general shape of nearby high ground
+// actually show up on it, not just the blips.
 void skyDrawMinimap(int x0, int y0, int size) {
-  kartCanvas.fillRect(x0, y0, size, size, ILI9341_BLACK);
   kartCanvas.drawRect(x0, y0, size, size, ILI9341_DARKGREY);
   const float unitsPerPixel = 9.0f;
   int cx = x0 + size / 2, cy = y0 + size / 2;
   float maxR = size / 2.0f - 3.0f;
+  // Sampled every 3px (not every pixel) and filled as small blocks - plenty
+  // of resolution for a corner radar at this size, for a fraction of the
+  // skyTerrainHeight()/skyIsWater() calls a per-pixel sample would cost.
+  constexpr int SAMPLE_STEP = 3;
+  for (int py = y0 + 1; py < y0 + size - 1; py += SAMPLE_STEP) {
+    for (int px = x0 + 1; px < x0 + size - 1; px += SAMPLE_STEP) {
+      float wx = skyPlane.pos.x + (px - cx) * unitsPerPixel;
+      float wz = skyPlane.pos.z - (py - cy) * unitsPerPixel;
+      bool water = skyIsWater(wx, wz);
+      float h = skyTerrainHeight(wx, wz);
+      uint16_t col = water ? 0x1B5F : (h > SKY_RUNWAY_ELEVATION + 15.0f ? 0x2AA0 : 0x1A05);
+      int bw = min(SAMPLE_STEP, x0 + size - 1 - px), bh = min(SAMPLE_STEP, y0 + size - 1 - py);
+      kartCanvas.fillRect(px, py, bw, bh, col);
+    }
+  }
   for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) {
     float dx = (skyAirports[i].pos.x - skyPlane.pos.x) / unitsPerPixel;
     float dz = (skyAirports[i].pos.z - skyPlane.pos.z) / unitsPerPixel;
@@ -4087,9 +4187,13 @@ void skyDrawMinimap(int x0, int y0, int size) {
   float ax = sinf(skyPlane.heading), az = cosf(skyPlane.heading);
   kartCanvas.drawLine(cx - (int)(ax * 4), cy + (int)(az * 4), cx + (int)(ax * 7), cy - (int)(az * 7), ILI9341_WHITE);
 }
+// The minimap grew from 52 to 72px (see skyDrawMinimap()'s own comment on
+// why) - these two derive the rest of the top-right HUD layout from that
+// one size so they can't drift out of sync with it again.
+constexpr int SKY_MINIMAP_SIZE = 72, SKY_MINIMAP_X0 = -SKY_MINIMAP_SIZE - 2;
 void skyRenderHud(bool stalling, bool pullUp) {
   int hudY = kartCanvas.height() - SKY_HUD_H;
-  kartCanvas.fillRect(0, 0, kartCanvas.width() - 58, 22, ILI9341_BLACK);
+  kartCanvas.fillRect(0, 0, kartCanvas.width() + SKY_MINIMAP_X0 - 4, 22, ILI9341_BLACK);
   kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
   char buf[48];
   if (skySpectating) snprintf(buf, sizeof(buf), "SPECTATING");
@@ -4111,11 +4215,12 @@ void skyRenderHud(bool stalling, bool pullUp) {
     kartCanvas.setTextColor((millis() / 250) % 2 ? ILI9341_RED : ILI9341_YELLOW, ILI9341_BLACK);
     kartCanvas.setCursor(kartCanvas.width() / 2 - 40, 2); kartCanvas.print("STALL");
   }
-  skyDrawMinimap(kartCanvas.width() - 54, 2, 52);
+  skyDrawMinimap(kartCanvas.width() + SKY_MINIMAP_X0, 2, SKY_MINIMAP_SIZE);
   char fpsBuf[8]; snprintf(fpsBuf, sizeof(fpsBuf), "%dFPS", (int)(skyFpsSmoothed + 0.5f));
-  kartCanvas.fillRect(kartCanvas.width() - 54, 56, 52, 10, ILI9341_BLACK);
+  int fpsY = 2 + SKY_MINIMAP_SIZE + 2;
+  kartCanvas.fillRect(kartCanvas.width() + SKY_MINIMAP_X0, fpsY, SKY_MINIMAP_SIZE, 10, ILI9341_BLACK);
   kartCanvas.setTextColor(ILI9341_GREEN, ILI9341_BLACK);
-  kartCanvas.setCursor(kartCanvas.width() - 4 - 6 * strlen(fpsBuf), 57); kartCanvas.print(fpsBuf);
+  kartCanvas.setCursor(kartCanvas.width() - 4 - 6 * strlen(fpsBuf), fpsY + 1); kartCanvas.print(fpsBuf);
   // GPWS-style terrain warning - large and center-screen (not tucked into a
   // corner strip like STALL) since this one means impact is imminent.
   if (pullUp) {
@@ -4195,6 +4300,7 @@ void startSkyPilotFlight(int modeSelected) {
   skyMissionSuccess = false;
   skyHasClearedGround = false;
   skyPaused = false;
+  skyStopping = false;
   skySpectating = (modeSelected == 3);
   skyWatchIndex = 0;
 
@@ -4515,6 +4621,39 @@ void skyEngineToneUpdate(bool grounded, bool stalling) {
 }
 void skyEngineToneStop() { M5Cardputer.Speaker.stop(3); skyEngineSmoothedFreq = 0; }
 
+// A short cinematic close for a completed flight - a full orbit of the
+// camera around the plane's final resting spot, "LANDED"/"CRASHED" held
+// over it - instead of cutting straight to the RESULTS screen the instant
+// the outcome is known. Blocking, like every other one-shot transition in
+// this file (playAppIntroAnimation, skyPlayStageTransition, the dock's own
+// open/close): a few seconds of M5Cardputer.update()+delay() frames is
+// nothing next to the flight that just ended.
+void skyPlayEndSequence(const char* text, uint16_t color) {
+  KVec3 subject = skyPlane.pos;
+  constexpr int FRAMES = 44;
+  constexpr float ORBIT_RADIUS = 15.0f, ORBIT_HEIGHT = 5.5f;
+  for (int f = 0; f < FRAMES; ++f) {
+    float angle = (2.0f * KART_PI) * f / FRAMES;
+    KartCam cam;
+    cam.position = subject + KVec3{cosf(angle) * ORBIT_RADIUS, ORBIT_HEIGHT, sinf(angle) * ORBIT_RADIUS};
+    cam.forward = knormalized(subject - cam.position);
+    cam.right = knormalized(kcross(cam.forward, KVec3{0, 1, 0}));
+    cam.up = kcross(cam.right, cam.forward);
+    cam.fovY = 60.0f;
+    KVec3 planeFwd{cosf(skyPlane.pitch) * sinf(skyPlane.heading), sinf(skyPlane.pitch), cosf(skyPlane.pitch) * cosf(skyPlane.heading)};
+    skyRenderScene(cam, planeFwd, false);
+    kartCanvas.setTextSize(3);
+    kartCanvas.setTextColor(color, ILI9341_BLACK);
+    int16_t bx, by; uint16_t bw, bh;
+    kartCanvas.getTextBounds(text, 0, 0, &bx, &by, &bw, &bh);
+    kartCanvas.setCursor(kartCanvas.width() / 2 - (int)bw / 2 - bx, kartCanvas.height() / 2 - (int)bh / 2 - by);
+    kartCanvas.print(text);
+    tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+    M5Cardputer.update();
+    delay(28);
+  }
+}
+
 void skyDrawPausedOverlay() {
   int w = kartCanvas.width(), h = kartCanvas.height();
   kartCanvas.fillRect(w / 2 - 74, h / 2 - 24, 148, 48, ILI9341_BLACK);
@@ -4579,6 +4718,39 @@ void stepSkyPilotFlight() {
   // spectate camera blocks.
   if (M5Cardputer.Keyboard.isKeyPressed('i')) skyFovOffset = constrain(skyFovOffset - dt * 40.0f, -30.0f, 30.0f);
   if (M5Cardputer.Keyboard.isKeyPressed('o')) skyFovOffset = constrain(skyFovOffset + dt * 40.0f, -30.0f, 30.0f);
+
+  // Rolling to a stop after a safe touchdown at the A2A target (see
+  // skyStopping's own comment) - no player input at all, just decelerate
+  // straight along the runway heading under simple ground friction until
+  // slow enough to call it a full stop, then hand off to the same
+  // end-of-flight camera-orbit sequence a crash uses.
+  if (skyStopping) {
+    constexpr float ROLLOUT_DECEL = 7.0f;
+    skyPlane.speed = max(0.0f, skyPlane.speed - ROLLOUT_DECEL * dt);
+    KVec3 rollFwd{sinf(skyPlane.heading), 0, cosf(skyPlane.heading)};
+    skyPlane.pos = skyPlane.pos + rollFwd * (skyPlane.speed * dt);
+    skyPlane.pos.y = skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
+    skyEngineToneUpdate(true, false);
+    KartCam cam;
+    cam.position = skyPlane.pos - rollFwd * 6.0f + KVec3{0, 2.2f, 0};
+    cam.forward = knormalized((skyPlane.pos + rollFwd * 8.0f) - cam.position);
+    cam.right = knormalized(kcross(cam.forward, KVec3{0, 1, 0}));
+    cam.up = kcross(cam.right, cam.forward);
+    cam.fovY = 68.0f;
+    skyRenderScene(cam, rollFwd, false);
+    skyRenderHud(false, false);
+    tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+    if (skyPlane.speed < 0.5f) {
+      skyStopping = false;
+      skyMissionSuccess = true;
+      if ((int)skyScore > skyBestScore) { skyBestScore = (int)skyScore; skySaveBest(); }
+      skyEngineToneStop();
+      skyPlayEndSequence("LANDED", ILI9341_GREEN);
+      skyState = SKY_RESULTS;
+      redrawNeeded = true;
+    }
+    return;
+  }
 
   // Spectate: no piloting at all - just cycle which bot to watch, update the
   // bots, copy the watched bot's state into skyPlane (so the normal
@@ -4791,12 +4963,13 @@ void stepSkyPilotFlight() {
         skyBankRateCur = skyPitchRateCur = 0;
         vibrate(30); if (volumeLevel) M5Cardputer.Speaker.tone(500, 80);
         if (skyMode == SKY_MODE_AIRPORT && nearAirport == skyTargetAirport) {
-          skyMissionSuccess = true;
-          if ((int)skyScore > skyBestScore) { skyBestScore = (int)skyScore; skySaveBest(); }
-          skyEngineToneStop();
-          skyState = SKY_RESULTS;
-          redrawNeeded = true;
-          return;
+          // Touching down safely isn't the end - the plane still has to
+          // actually stop. skyStopping's own branch above takes over next
+          // tick: forcing the throttle off here (this tick still finishes
+          // its normal render below) is what makes that rollout decelerate
+          // instead of coasting at touchdown speed forever.
+          skyStopping = true;
+          skyThrottleLevel = 0;
         }
       } else {
         vibrate(200);
@@ -4804,6 +4977,7 @@ void stepSkyPilotFlight() {
         if ((int)skyScore > skyBestScore) { skyBestScore = (int)skyScore; skySaveBest(); }
         skyMissionSuccess = false;
         skyEngineToneStop();
+        skyPlayEndSequence("CRASHED", ILI9341_RED);
         skyState = SKY_RESULTS;
         redrawNeeded = true;
         return;
@@ -7989,15 +8163,19 @@ void keyboard() {
   }
   optLast = k.opt;
   if (controlCenterOpen) {
-    // Same "owns all input while open" rule as the dock below - ;/. move
-    // between tiles, ,// adjust the selected tile's value (a toggle for
-    // Wi-Fi/Bluetooth, a stepped level for the other three).
+    // Same "owns all input while open" rule as the dock below - but unlike
+    // OPTIONS' vertical lists elsewhere in Sky Pilot, this row is
+    // horizontal, so ,// (left/right) move between tiles and ;/. (up/down)
+    // adjust the selected tile's value (a toggle for Wi-Fi/Bluetooth, a
+    // stepped level for the other three) - the physical key directions
+    // matching what they actually do on screen, not the ;/. select-,//
+    // adjust convention the vertical OPTIONS lists use.
     if (!event || !M5Cardputer.Keyboard.isPressed()) return;
     int oldSel = controlCenterSelected;
-    if (wordContains(k.word, ';')) controlCenterSelected = (controlCenterSelected + CONTROLCENTER_ROW_COUNT - 1) % CONTROLCENTER_ROW_COUNT;
-    else if (wordContains(k.word, '.')) controlCenterSelected = (controlCenterSelected + 1) % CONTROLCENTER_ROW_COUNT;
+    if (wordContains(k.word, ',')) controlCenterSelected = (controlCenterSelected + CONTROLCENTER_ROW_COUNT - 1) % CONTROLCENTER_ROW_COUNT;
+    else if (wordContains(k.word, '/')) controlCenterSelected = (controlCenterSelected + 1) % CONTROLCENTER_ROW_COUNT;
     if (controlCenterSelected != oldSel) { playMenuSound(); drawControlCenterTile(oldSel, false); drawControlCenterTile(controlCenterSelected, true); drawControlCenterCaption(); }
-    bool dec = wordContains(k.word, ','), inc = wordContains(k.word, '/');
+    bool dec = wordContains(k.word, '.'), inc = wordContains(k.word, ';');
     if (dec || inc) {
       switch (controlCenterSelected) {
         case 0: brightnessLevel = constrain((int)brightnessLevel + (inc ? 1 : -1), 1, 10); applyBacklight(); break;
