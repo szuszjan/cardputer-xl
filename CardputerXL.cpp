@@ -4854,11 +4854,21 @@ void skyDrawModeScene(float dt) {
   }
   kartCanvas.setTextColor(0x8C71, skyManiaBgAt(CONTENT_Y + 130)); kartCanvas.setCursor(12, CONTENT_Y + 130); kartCanvas.print("Step 1 of 3 - how you start the flight.");
 }
+// Shared with skyPlayStageTransition() below, which needs to paint just the
+// chrome for the stage it's switching to without also blitting the content
+// band (that would flash the fully-revealed new content for one real SPI
+// transfer before the still-growing cover panel gets drawn back on top of
+// it - there's no double buffering here, so anything actually written to
+// tft is visible for however long that write takes, however briefly).
+void skyPaintHubChrome() {
+  if (skyHubStage == SkyHubStage::PLANE) { header("GAMES / SKY PILOT / PLANE (2 OF 3)"); footer(",/ CHANGE PLANE     ENTER NEXT     FN BACK"); }
+  else if (skyHubStage == SkyHubStage::OPTIONS) { header("GAMES / SKY PILOT / OPTIONS (3 OF 3)"); footer(";/. SELECT  ,/ ADJUST  ENTER TOGGLE/START  FN BACK"); }
+  else { header("GAMES / SKY PILOT / MODE (1 OF 3)"); footer(";/. SELECT     ENTER NEXT     FN GAMES"); }
+}
 void drawSkyPilotHubMode() {
   skyDrawModeScene(0);
   tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
-  header("GAMES / SKY PILOT / MODE (1 OF 3)");
-  footer(";/. SELECT     ENTER NEXT     FN GAMES");
+  skyPaintHubChrome();
 }
 
 // The 3D preview (name/special trait included, see skyDrawPlanePreviewScene())
@@ -4871,8 +4881,7 @@ void drawSkyPilotHubMode() {
 void drawSkyPilotHubPlane() {
   skyDrawPlanePreviewScene();
   tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
-  header("GAMES / SKY PILOT / PLANE (2 OF 3)");
-  footer(",/ CHANGE PLANE     ENTER NEXT     FN BACK");
+  skyPaintHubChrome();
 }
 
 // 14 rows no longer fit in one screen even at the tightest reasonable row
@@ -4945,8 +4954,7 @@ void skyDrawOptionsScene(float dt) {
 void drawSkyPilotHubOptions() {
   skyDrawOptionsScene(0);
   tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
-  header("GAMES / SKY PILOT / OPTIONS (3 OF 3)");
-  footer(";/. SELECT  ,/ ADJUST  ENTER TOGGLE/START  FN BACK");
+  skyPaintHubChrome();
 }
 
 // Continuous driver for the whole HOME wizard (all 3 stages) - bypasses
@@ -5006,15 +5014,24 @@ void tftDrawSlantPanel(int x0, int y0, int w, int h, int skew, uint16_t color) {
 // fragmentation crash that was fixed there). Instead: grow an opaque panel
 // until it fully covers the OLD stage's content band (header/footer are
 // left alone the whole time - they don't need to participate in the wipe),
-// repaint the NEW stage's header/footer/content ONCE underneath it
-// (skyHubStage must already be updated by the caller before this call),
+// switch the header/footer chrome to the NEW stage (skyHubStage must
+// already be updated by the caller before this call) - safe to do while
+// still fully covered, since header/footer sit outside the covered band
+// and were always going to change the instant this is called regardless -
 // then shrink the SAME panel away in the same direction, re-painting only
 // the cheap content-band scene each of those frames (never header/footer/a
 // full-canvas blit again) since tft has no readback and can't otherwise
-// "reveal" pixels it already covered. The first version of this called the
-// full drawSkyPilotHub() - header()+footer()+a full-height blit - on every
-// single reveal frame, which was the actual source of the reported lag;
-// header/footer only need painting once, right when the stage switches.
+// "reveal" pixels it already covered.
+//
+// Critically, the NEW content is never blitted to tft while unmasked, not
+// even for one frame: an earlier version called the full drawSkyPilotHub()
+// here, which blits the entire new scene BEFORE the cover panel is drawn
+// back on top of it - with no double buffering, that blit is a real SPI
+// transfer, so the fully-revealed new stage was actually visible on the
+// physical panel for however long that transfer took, seen as a whole-
+// screen flash. Rendering into kartCanvas without blitting it keeps the
+// new content off-screen until the reveal loop below paints it already
+// masked by the (still nearly-full) shrinking panel.
 void skyPlayStageTransition(int direction) {
   vibrate(15);
   constexpr int FRAMES = 8, SKEW = 50;
@@ -5035,8 +5052,7 @@ void skyPlayStageTransition(int direction) {
     M5Cardputer.update();
     delay(9);
   }
-  drawSkyPilotHub();        // one-time: header/footer switch to the new stage's chrome + a full content paint
-  drawCoverPanel(W + SKEW); // instantly re-cover the content band (cheap - 2 triangles) before the reveal starts
+  skyPaintHubChrome();  // header/footer only - content band stays covered, untouched, throughout
   for (int f = FRAMES - 1; f >= 0; --f) {
     int w = (int)((W + SKEW) * easeOutCubic((float)f / FRAMES));
     drawNewStageContent();
@@ -9076,23 +9092,23 @@ void keyboard() {
       // toggle shortcuts still work from any stage too, for muscle memory.
       if (skyState == SKY_HOME) {
         for (char c : k.word) {
-          if (c == 'm') { skyEngineSoundEnabled = !skyEngineSoundEnabled; playFunctionSound(); redrawNeeded = true; }
-          else if (c == 'p') { skyPlaneModelIndex = (skyPlaneModelIndex + 1) % SKY_PLANE_MODEL_COUNT; playFunctionSound(); redrawNeeded = true; }
-          else if (c == 'i') { skyImuControlEnabled = !skyImuControlEnabled; playFunctionSound(); redrawNeeded = true; }
-          else if (c == 'r') { skyRadarEnabled = !skyRadarEnabled; playFunctionSound(); redrawNeeded = true; }
+          if (c == 'm') { skyEngineSoundEnabled = !skyEngineSoundEnabled; redrawNeeded = true; }
+          else if (c == 'p') { skyPlaneModelIndex = (skyPlaneModelIndex + 1) % SKY_PLANE_MODEL_COUNT; redrawNeeded = true; }
+          else if (c == 'i') { skyImuControlEnabled = !skyImuControlEnabled; redrawNeeded = true; }
+          else if (c == 'r') { skyRadarEnabled = !skyRadarEnabled; redrawNeeded = true; }
         }
         if (skyHubStage == SkyHubStage::MODE) {
           for (char c : k.word) {
             if (c == ';') { skyModeSelected = (skyModeSelected + SKY_MODE_OPTION_COUNT - 1) % SKY_MODE_OPTION_COUNT; skyListScrollTo(skyModeScroll, skyModeSelected * SKY_MODE_ROW_H); redrawNeeded = true; }
             else if (c == '.') { skyModeSelected = (skyModeSelected + 1) % SKY_MODE_OPTION_COUNT; skyListScrollTo(skyModeScroll, skyModeSelected * SKY_MODE_ROW_H); redrawNeeded = true; }
           }
-          if (k.enter) { skyHubStage = SkyHubStage::PLANE; skyPlayStageTransition(1); playEnterSound(); redrawNeeded = true; }
+          if (k.enter) { skyHubStage = SkyHubStage::PLANE; skyPlayStageTransition(1); redrawNeeded = true; }
         } else if (skyHubStage == SkyHubStage::PLANE) {
           for (char c : k.word) {
             if (c == ',') { skyPlaneModelIndex = (skyPlaneModelIndex + SKY_PLANE_MODEL_COUNT - 1) % SKY_PLANE_MODEL_COUNT; redrawNeeded = true; }
             else if (c == '/') { skyPlaneModelIndex = (skyPlaneModelIndex + 1) % SKY_PLANE_MODEL_COUNT; redrawNeeded = true; }
           }
-          if (k.enter) { skyHubStage = SkyHubStage::OPTIONS; skyPlayStageTransition(1); playEnterSound(); redrawNeeded = true; }
+          if (k.enter) { skyHubStage = SkyHubStage::OPTIONS; skyPlayStageTransition(1); redrawNeeded = true; }
         } else {  // OPTIONS
           for (char c : k.word) {
             if (c == ';') { skyOptionsSelected = (skyOptionsSelected + SKY_OPTIONS_COUNT - 1) % SKY_OPTIONS_COUNT; skyListScrollTo(skyOptScroll, skyOptionsSelected * SKY_OPTIONS_ROW_H); redrawNeeded = true; }
@@ -9101,22 +9117,22 @@ void keyboard() {
             // ranges, not toggles - ,/ / adjust them directly (same
             // convention as the PLANE stage cycling the plane model)
             // instead of ENTER stepping through several values one at a time.
-            else if (skyOptionsSelected == 4 && c == ',') { skyBotCount = max(1, skyBotCount - 1); playFunctionSound(); redrawNeeded = true; }
-            else if (skyOptionsSelected == 4 && c == '/') { skyBotCount = min(SKY_BOT_MAX, skyBotCount + 1); playFunctionSound(); redrawNeeded = true; }
-            else if (skyOptionsSelected == 5 && c == ',') { skyRenderDistLevel = max(0, skyRenderDistLevel - 1); playFunctionSound(); redrawNeeded = true; }
-            else if (skyOptionsSelected == 5 && c == '/') { skyRenderDistLevel = min(SKY_RENDER_DIST_LEVELS - 1, skyRenderDistLevel + 1); playFunctionSound(); redrawNeeded = true; }
-            else if (skyOptionsSelected == 9 && c == ',') { skyFuelDifficulty = max(0, skyFuelDifficulty - 1); playFunctionSound(); redrawNeeded = true; }
-            else if (skyOptionsSelected == 9 && c == '/') { skyFuelDifficulty = min(SKY_FUEL_DIFF_COUNT - 1, skyFuelDifficulty + 1); playFunctionSound(); redrawNeeded = true; }
-            else if (skyOptionsSelected == 10 && c == ',') { skyTimeMode = (skyTimeMode + SKY_TIME_MODES - 1) % SKY_TIME_MODES; playFunctionSound(); redrawNeeded = true; }
-            else if (skyOptionsSelected == 10 && c == '/') { skyTimeMode = (skyTimeMode + 1) % SKY_TIME_MODES; playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 4 && c == ',') { skyBotCount = max(1, skyBotCount - 1); redrawNeeded = true; }
+            else if (skyOptionsSelected == 4 && c == '/') { skyBotCount = min(SKY_BOT_MAX, skyBotCount + 1); redrawNeeded = true; }
+            else if (skyOptionsSelected == 5 && c == ',') { skyRenderDistLevel = max(0, skyRenderDistLevel - 1); redrawNeeded = true; }
+            else if (skyOptionsSelected == 5 && c == '/') { skyRenderDistLevel = min(SKY_RENDER_DIST_LEVELS - 1, skyRenderDistLevel + 1); redrawNeeded = true; }
+            else if (skyOptionsSelected == 9 && c == ',') { skyFuelDifficulty = max(0, skyFuelDifficulty - 1); redrawNeeded = true; }
+            else if (skyOptionsSelected == 9 && c == '/') { skyFuelDifficulty = min(SKY_FUEL_DIFF_COUNT - 1, skyFuelDifficulty + 1); redrawNeeded = true; }
+            else if (skyOptionsSelected == 10 && c == ',') { skyTimeMode = (skyTimeMode + SKY_TIME_MODES - 1) % SKY_TIME_MODES; redrawNeeded = true; }
+            else if (skyOptionsSelected == 10 && c == '/') { skyTimeMode = (skyTimeMode + 1) % SKY_TIME_MODES; redrawNeeded = true; }
             else if (skyOptionsSelected == 12 && (c == ',' || c == '/')) {
               skySaveSlot = (skySaveSlot + (c == '/' ? 1 : SKY_SAVE_SLOTS - 1)) % SKY_SAVE_SLOTS;
               skyLoadBest();  // a different slot's best/achievements/visited airports
-              playFunctionSound(); redrawNeeded = true;
+              redrawNeeded = true;
             }
           }
           if (k.enter) {
-            if (skyOptionsSelected == SKY_OPTIONS_COUNT - 1) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
+            if (skyOptionsSelected == SKY_OPTIONS_COUNT - 1) { startSkyPilotFlight(skyModeSelected); return; }
             if (skyOptionsSelected == 0) skyImuControlEnabled = !skyImuControlEnabled;
             else if (skyOptionsSelected == 1) skyEngineSoundEnabled = !skyEngineSoundEnabled;
             else if (skyOptionsSelected == 2) skyRadarEnabled = !skyRadarEnabled;
@@ -9125,7 +9141,7 @@ void keyboard() {
             else if (skyOptionsSelected == 7) skyContinuousEnabled = !skyContinuousEnabled;
             else if (skyOptionsSelected == 8) skyFuelEnabled = !skyFuelEnabled;
             else if (skyOptionsSelected == 11) skyWeatherEnabled = !skyWeatherEnabled;
-            if (skyOptionsSelected != 4 && skyOptionsSelected != 5 && skyOptionsSelected != 9 && skyOptionsSelected != 10 && skyOptionsSelected != 12 && skyOptionsSelected != 13) { playFunctionSound(); redrawNeeded = true; }
+            redrawNeeded = true;
           }
         }
       } else if (k.enter && skyState == SKY_RESULTS) {
