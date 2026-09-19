@@ -125,7 +125,13 @@ struct Theme { uint16_t bg, panel, accent, text, dim, selected; };
 // middle would shift every later page's index into those arrays by one.
 // WIFISETUP/LOCKSCREEN/SCREENSAVER are deliberately last and excluded from
 // that indexing already (see pageDisplayName()).
-enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, TRIKISCOPE, MINICAM, WIFISETUP, LOCKSCREEN, SCREENSAVER };
+// BLECOMPANION is appended right before the WIFISETUP/LOCKSCREEN/SCREENSAVER
+// trio rather than inserted next to WEBCOMPANION (its closest sibling) -
+// several other places (homeAppIndices[], secondaryAppIndices[]) hardcode
+// numeric (Page - 1) indices into appNames[], so slotting a new page into
+// the middle would silently renumber every app after it. Appending at the
+// end only ever adds a new index, never reassigns an existing one.
+enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, TRIKISCOPE, MINICAM, BLECOMPANION, WIFISETUP, LOCKSCREEN, SCREENSAVER };
 
 struct CVar { String name; long value; };
 
@@ -423,6 +429,7 @@ int findCVar(const String& name); long cAtom(String token, bool& ok); long cExpr
 String uptime(); void applyTheme(); void setBacklight(bool on); void header(const char* title); void footer(const char* text);
 void drawLauncher(); void drawSystem(); const char* enc(wifi_auth_mode_t e); void drawWifi(); void drawNotes(); void drawClock();
 void drawTextTools(); void drawFavourites(); void drawWifiMonitor(); void drawFileBrowser(); void drawWebCompanion(); void drawHomeEditor(); void startWebCompanion(); void applyWebInput(); void applyWebAction(const String& action);
+void drawBleCompanion(); void startBleCompanion(); void applyBleInput();
 void drawCalc(); void updateClockValue(); void updateCalcPanel(); void updateNotesLine(); void updateSettingsRow(int index);
 void drawCLab(); void drawCLabQR(); void drawCardCRepl(); void drawQRText(); void drawQRTextField(); void drawQRModules(); void drawCLabEditor(); void drawCLabCodeLine(int lineIndex); void drawCLabExamples(); void loadCLabExample(int example); void drawCLabExplorer(); void drawCLabSaveDialog(); void drawCLabSlotDialog(); void drawCLabNameDialog(); void openNewCLabFile(); void saveCLabFile(); void openCLabUserApp(int slot, bool runNow); void captureCLabUserApp();
 void runCLab(); void runCardCRepl(); void loadCLabDemo(); String settingValue(int i); void drawSettings(); void draw(); void startScan(); void checkScan(); void calcResult();
@@ -594,15 +601,15 @@ Page previousPage = LAUNCHER;
 Page screensaverReturnPage = LAUNCHER;
 unsigned long screensaverStartedAt = 0;
 unsigned long screensaverLastFrameAt = 0;
-const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES", "TRIKI SCOPE", "MINI CAM"};
-const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt", "Zabka Triki motion controller over BLE", "MiniCam network camera preview and shutter"};
-constexpr int APP_COUNT = 31;
+const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES", "TRIKI SCOPE", "MINI CAM", "BLE COMPANION"};
+const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt", "Zabka Triki motion controller over BLE", "MiniCam network camera preview and shutter", "Android companion app: remote control, notes and C LAB over BLE"};
+constexpr int APP_COUNT = 32;
 constexpr int APP_VISIBLE = 5;
 // Abstract two-character glyphs for the APPS grid (see drawLauncherTileColored()
 // below), same punctuation-icon style as Home's homeTileIcons[] - the default
 // GFX font is ASCII-only, so these are stand-ins rather than literal pictograms.
 // Indexed identically to appNames[]/appInfo[] (i.e. by Page - 1).
-const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><", "^y", "(o"};
+const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><", "^y", "(o", "B)"};
 // appNames[] is indexed by (Page - 1) and only covers pages up to GAMEHUB -
 // WIFISETUP/LOCKSCREEN/SCREENSAVER aren't "apps" and have no entry, so a raw
 // appNames[(int)p - 1] lookup on an arbitrary Page is not always safe. This
@@ -620,8 +627,8 @@ constexpr int HOME_TILE_COUNT = 6;
 int homeAppIndices[5] = {5, 2, 6, 4, 8}; // C LAB, Notes, REPL, Calc, Settings
 const char* homeTileIcons[HOME_TILE_COUNT] = {"{}", "[]", ">_", "+-", "*", "::"};
 // Entry 0 is a navigation action; the remaining entries open secondary apps.
-const int secondaryAppIndices[26] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30};
-constexpr int SECONDARY_APP_COUNT = 27;
+const int secondaryAppIndices[27] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
+constexpr int SECONDARY_APP_COUNT = 28;
 bool launcherHome = true;
 int homeSelected = 0;
 int appSelected = 0, appScroll = 0;
@@ -666,6 +673,20 @@ const char* WEB_MDNS_HOST = "cardputer-xl";
 const char* INITIAL_WIFI_SSID = "California house";
 const char* INITIAL_WIFI_PASSWORD = "2k20vVTS";
 String webStatus = "Press ENTER to connect to Wi-Fi";
+// ---- BLE COMPANION: a Nordic UART Service (the same well-known UUIDs a
+// generic "BLE serial terminal" phone app already understands, useful for
+// testing this protocol by hand before a dedicated companion app exists)
+// exposing the same remote-control/Notes/C LAB features as Web Companion,
+// over BLE instead of local Wi-Fi - no shared network needed, at the cost
+// of NimBLE's own ~55KB permanent heap cost once started (see
+// ensureBleReady()'s own comment) and BLE's much smaller MTU, which is why
+// every multi-line payload here is chunked on the wire (see bleSendLine()
+// and the RX characteristic's write callback, both below).
+bool bleCompanionEnabled = false;
+bool bleCompanionAdvertising = false;
+String bleCompanionStatus = "Press ENTER to advertise over BLE";
+String bleRxBuffer = "";        // accumulates incoming bytes until a '\n' completes a command line
+String pendingBleCommand = "";  // one complete command line, drained by applyBleInput() in loop()
 // Wi-Fi setup uses a scanned SSID and a RAM-only password entry field. The
 // chosen credentials are persisted only after the user presses ENTER to connect.
 int wifiSetupSelected = 0;
@@ -2343,6 +2364,29 @@ String base64Encode(const String& input) {
   for (uint8_t c : input) { value = (value << 8) + c; bits += 8; while (bits >= 0) { output += alphabet[(value >> bits) & 0x3F]; bits -= 6; } }
   if (bits > -6) output += alphabet[((value << 8) >> (bits + 8)) & 0x3F];
   while (output.length() % 4) output += '=';
+  return output;
+}
+// The BLE Companion protocol below wraps every multi-line text payload
+// (Notes, C LAB source) in base64 rather than sending it raw, since the
+// wire protocol itself is newline-delimited commands/responses - a literal
+// newline inside the payload would otherwise be indistinguishable from the
+// end of the message.
+String base64Decode(const String& input) {
+  auto val = [](char c) -> int {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+  };
+  String output; int buffer = 0, bits = 0;
+  for (char c : input) {
+    int v = val(c);
+    if (v < 0) continue;  // '=' padding and anything else is simply skipped
+    buffer = (buffer << 6) | v; bits += 6;
+    if (bits >= 8) { bits -= 8; output += (char)((buffer >> bits) & 0xFF); }
+  }
   return output;
 }
 // ---- TEXT TOOLS: character count / upper / lower / base64 on typed text ---
@@ -8474,6 +8518,145 @@ void serviceAutoConnectWifi() {
   autoConnectWifi();
 }
 
+// ---- BLE COMPANION: a Nordic UART Service GATT server (RX/TX over the
+// same well-known UUIDs a generic "BLE serial terminal" phone app already
+// understands, useful for testing this protocol by hand before a dedicated
+// companion app exists), added as a SECOND service on the same NimBLE
+// server HijelHID_BLEKeyboard's begin() already created (NimBLEDevice::
+// getServer() - the library keeps its own NimBLEServer* private, but the
+// device-wide singleton is reachable this way, exactly like the Triki
+// central-role code above shares the one NimBLE stack instead of a second
+// NimBLEDevice::init()). Commands and responses are newline-delimited
+// text; any multi-line payload (Notes, C LAB source) is base64-wrapped so
+// an embedded newline in the payload itself can never be mistaken for the
+// end of a message - see base64Encode()/base64Decode()'s own comment.
+static const NimBLEUUID BLE_COMPANION_SERVICE_UUID("6e400001-b5a3-f393-e0a9-e50e24dcca9e");
+static const NimBLEUUID BLE_COMPANION_RX_UUID("6e400002-b5a3-f393-e0a9-e50e24dcca9e");
+static const NimBLEUUID BLE_COMPANION_TX_UUID("6e400003-b5a3-f393-e0a9-e50e24dcca9e");
+NimBLEService* bleCompanionService = nullptr;
+NimBLECharacteristic* bleCompanionTxChar = nullptr;
+NimBLECharacteristic* bleCompanionRxChar = nullptr;
+// Runs in the NimBLE host task, not loop() - kept minimal on purpose (just
+// buffering into pendingBleCommand), the same "defer real work to loop()"
+// pattern Web Companion's own pendingWebAction/pendingWebNote/pendingWebCLab
+// already use, so command handling only ever touches shared state
+// (notes[], cLines[], ...) from the single loop() task.
+class BleCompanionRxCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& connInfo) override {
+    std::string v = c->getValue();
+    bleRxBuffer += v.c_str();
+    int nl;
+    while ((nl = bleRxBuffer.indexOf('\n')) >= 0) {
+      String line = bleRxBuffer.substring(0, nl);
+      bleRxBuffer = bleRxBuffer.substring(nl + 1);
+      line.trim();
+      if (!line.isEmpty() && pendingBleCommand.isEmpty()) pendingBleCommand = line;
+    }
+  }
+};
+// A single BLE notification can only carry up to (negotiated MTU - 3)
+// bytes - this chunks a whole response line into small fixed pieces
+// instead, safely under even the smallest MTU a phone will ever negotiate
+// (23 bytes, unnegotiated), rather than assuming the companion app
+// requested a larger one first.
+void bleSendLine(const String& line) {
+  if (!bleCompanionTxChar) return;
+  String full = line + "\n";
+  constexpr int CHUNK = 20;
+  for (int i = 0; i < (int)full.length(); i += CHUNK) {
+    String piece = full.substring(i, min((int)full.length(), i + CHUNK));
+    bleCompanionTxChar->setValue((uint8_t*)piece.c_str(), piece.length());
+    bleCompanionTxChar->notify();
+    delay(15);  // let the link layer drain between packets instead of overrunning NimBLE's own notify queue
+  }
+}
+void applyBleCommand(const String& line) {
+  if (line.startsWith("ACTION:")) { pendingWebAction = line.substring(7); bleSendLine("OK"); }
+  else if (line == "STATUS") {
+    String s = "STATUS:batt=" + String(M5Cardputer.Power.getBatteryLevel()) +
+               ",uptime=" + String(millis() / 1000UL) +
+               ",wifi=" + String(WiFi.status() == WL_CONNECTED ? 1 : 0) +
+               ",heap=" + String(ESP.getFreeHeap() / 1024UL) +
+               ",page=" + pageDisplayName(page);
+    bleSendLine(s);
+  } else if (line == "GET_NOTES") {
+    String joined; for (int i = 0; i < noteCount; ++i) { if (i) joined += '\n'; joined += notes[i]; }
+    bleSendLine("NOTES:" + base64Encode(joined));
+  } else if (line.startsWith("PUT_NOTES:")) {
+    // Full multi-line replace (up to Notes' own 15-line capacity) - unlike
+    // Web Companion's /note, which only ever keeps a single 50-char line.
+    String text = base64Decode(line.substring(10));
+    noteCount = 0; int start = 0;
+    while (noteCount < 15) { int end = text.indexOf('\n', start); notes[noteCount++] = (end < 0 ? text.substring(start) : text.substring(start, end)).substring(0, 50); if (end < 0) break; start = end + 1; }
+    if (!noteCount) noteCount = 1;
+    noteLine = 0; markStateDirty();
+    if (page == NOTES) redrawNeeded = true;
+    bleSendLine("OK");
+  } else if (line == "GET_CLAB") {
+    String joined; for (int i = 0; i < cLineCount; ++i) { if (i) joined += '\n'; joined += cLines[i]; }
+    bleSendLine("CLAB:" + base64Encode(joined));
+  } else if (line.startsWith("PUT_CLAB:") || line.startsWith("RUN_CLAB:")) {
+    // Reuses the exact same pendingWebCLab/pendingWebCLabRun hand-off Web
+    // Companion's /clab and /clabrun already drain in loop() - no need to
+    // duplicate the line-splitting/run logic here.
+    bool run = line.startsWith("RUN_CLAB:");
+    pendingWebCLab = base64Decode(line.substring(9));
+    pendingWebCLabRun = run;
+    bleSendLine("OK");
+  } else {
+    bleSendLine("ERR:UNKNOWN");
+  }
+}
+void applyBleInput() {
+  if (pendingBleCommand.isEmpty()) return;
+  String cmd = pendingBleCommand;
+  pendingBleCommand = "";
+  applyBleCommand(cmd);
+}
+void startBleCompanion() {
+  if (bleCompanionEnabled) {
+    if (bleCompanionAdvertising) { NimBLEDevice::getAdvertising()->stop(); bleCompanionAdvertising = false; }
+    bleCompanionEnabled = false;
+    bleCompanionStatus = "BLE Companion stopped";
+    redrawNeeded = true;
+    return;
+  }
+  ensureBleReady();
+  if (!bleCompanionService) {
+    NimBLEServer* server = NimBLEDevice::getServer();
+    bleCompanionService = server->createService(BLE_COMPANION_SERVICE_UUID);
+    bleCompanionTxChar = bleCompanionService->createCharacteristic(BLE_COMPANION_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
+    bleCompanionRxChar = bleCompanionService->createCharacteristic(BLE_COMPANION_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    bleCompanionRxChar->setCallbacks(new BleCompanionRxCallbacks());
+    bleCompanionService->start();
+  }
+  // addServiceUUID() is best-effort - legacy advertising payloads are
+  // capped at 31 bytes and HID's own advertising (device name, appearance,
+  // its own service UUID) may already use most of that, so this UUID might
+  // not actually fit in the advertisement. That's fine: the companion app
+  // scans by device name, not by service UUID, and GATT discovery finds
+  // this service regardless of what fit in the advertisement itself.
+  NimBLEDevice::getAdvertising()->addServiceUUID(BLE_COMPANION_SERVICE_UUID);
+  NimBLEDevice::getAdvertising()->start();
+  bleCompanionAdvertising = true;
+  bleCompanionEnabled = true;
+  bleCompanionStatus = "Advertising - scan for this device's name";
+  redrawNeeded = true;
+}
+// ---- BLE COMPANION screen: mirrors drawWebCompanion()'s own layout -------
+void drawBleCompanion() {
+  tft.fillScreen(ui.bg); header("BLE COMPANION"); tft.setTextSize(1);
+  tft.setTextColor(bleCompanionEnabled ? ILI9341_GREEN : ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 12);
+  tft.print(bleCompanionEnabled ? "ADVERTISING" : "STOPPED");
+  tft.setTextColor(ui.text, ui.bg); tft.setCursor(12, CONTENT_Y + 30); tft.print(bleCompanionStatus);
+  tft.setTextColor(ui.dim, ui.bg);
+  tft.setCursor(12, CONTENT_Y + 55); tft.print("Pair a phone app (or a generic BLE");
+  tft.setCursor(12, CONTENT_Y + 68); tft.print("UART terminal) to this device's name.");
+  tft.setCursor(12, CONTENT_Y + 94); tft.print("Remote: arrows, Enter, Back, theme,");
+  tft.setCursor(12, CONTENT_Y + 107); tft.print("brightness, volume + Notes / C LAB.");
+  footer(bleCompanionEnabled ? "ENTER STOP     FN BACK" : "ENTER ADVERTISE     FN BACK");
+}
+
 void startWebCompanion() {
   if (webRunning) {
     webServer.stop();
@@ -8729,7 +8912,7 @@ void draw() {
   // itself (Home/Apps aren't "an app" to splash into) - see
   // playAppIntroAnimation()'s own comment for what this actually plays.
   if (realAppTransition && page != LAUNCHER) playAppIntroAnimation(page);
-  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) { ensureBleReady(); drawBleKeyboard(); } else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else if (page == MINICAM) { miniCamJoinNetwork(); drawMiniCam(); } else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
+  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) { ensureBleReady(); drawBleKeyboard(); } else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else if (page == MINICAM) { miniCamJoinNetwork(); drawMiniCam(); } else if (page == BLECOMPANION) drawBleCompanion(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
 
 // Repaint only a changed application's content. Headers and footers are kept
 // intact; full draw() remains reserved for entering a different scene, modal
@@ -8807,6 +8990,7 @@ void refreshLocalPage() {
     case HOMEEDITOR: updateHomeEditorScreen(); break;
     case CLABEXAMPLES: updateCLabExamplesList(); break;
     case WEBCOMPANION: drawWebCompanion(); break;
+    case BLECOMPANION: drawBleCompanion(); break;
     case BLEKEYBOARD: drawBleKeyboard(); break;
     case CARDCREPL: drawCardCRepl(); break;
     case CLAB: drawCLab(); break;
@@ -9677,6 +9861,7 @@ void keyboard() {
   if (page == WIFIMONITOR) { if (k.enter) { playMenuSound(); startScan(); } return; }
   if (page == FILEBROWSER) { if (k.enter) { String content = localFiles[fileSelected]; noteCount = 1; noteLine = 0; int start = 0; for (int i = 0; i < 15; ++i) { int end = content.indexOf('\n', start); notes[i] = end < 0 ? content.substring(start, start + 50) : content.substring(start, end).substring(0, 50); noteCount = i + 1; if (end < 0) break; start = end + 1; } markStateDirty(); page = NOTES; redrawNeeded = true; return; } if (k.del) { localFiles[fileSelected] = ""; markStateDirty(); redrawNeeded = true; return; } for (char c : k.word) if (c == ';') { fileSelected = (fileSelected + 2) % 3; redrawNeeded = true; } else if (c == '.') { fileSelected = (fileSelected + 1) % 3; redrawNeeded = true; } return; }
   if (page == WEBCOMPANION) { if (k.enter) startWebCompanion(); return; }
+  if (page == BLECOMPANION) { if (k.enter) startBleCompanion(); return; }
   if (page == CLABEXAMPLES) {
     // Examples is entered from C LAB FILES, so use its robust key path too.
     bool up = wordContains(k.word, ';') || M5Cardputer.Keyboard.isKeyPressed(';');
@@ -9806,6 +9991,7 @@ void loop() {
   serviceConnectionToasts();
   serviceStatusSounds();
   if (webRunning) { webServer.handleClient(); applyWebInput(); }
+  if (bleCompanionEnabled) applyBleInput();
   keyboard();
   if (page == MIC && !sleeping) updateMicMonitor();
   auto keys = M5Cardputer.Keyboard.keysState();
