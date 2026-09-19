@@ -4867,14 +4867,33 @@ void skyDrawPlanePreviewScene(float dt = 0) {
 // instead, skipping this. Same fixed-anchor scroll list as MODE/OPTIONS,
 // just with a big title banner above it instead of a "BEST DISTANCE" line.
 constexpr int SKY_START_ANCHOR_Y = CONTENT_Y + 76;
+// A hand-vector dart/plane silhouette with a couple of speed-line dashes
+// trailing behind it - the same GFX-primitive icon style the Control
+// Center's own icons already use elsewhere in this file - so the title
+// screen reads as an actual mark, not just a line of text.
+void skyDrawLogoMark(int x, int y, uint16_t color) {
+  kartCanvas.fillTriangle(x, y, x, y + 16, x + 30, y + 8, color);
+  kartCanvas.fillRect(x - 16, y + 6, 12, 2, color);
+  kartCanvas.fillRect(x - 26, y + 10, 8, 2, color);
+}
 void skyDrawStartScene(float dt) {
   skyDrawManiaGradient();
   skyDrawHubStars(dt);
   skyDrawManiaRainbowStripe(CONTENT_Y - 4);
   skyListScrollUpdate(skyStartScroll, dt);
-  skyDrawManiaPanel(30, CONTENT_Y + 6, 260, 32, 22, ILI9341_BLACK);
-  kartCanvas.setTextSize(3); kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
-  kartCanvas.setCursor(48, CONTENT_Y + 15); kartCanvas.print("SKY PILOT");
+  skyDrawManiaPanel(20, CONTENT_Y + 2, 288, 38, 26, ILI9341_BLACK);
+  skyDrawLogoMark(70, CONTENT_Y + 12, ILI9341_ORANGE);
+  // Wordmark: two colors (not one flat run of text) plus a dim offset copy
+  // drawn first so a shadow sliver peeks out bottom-right of the bright
+  // text on top - the cheapest way to fake a bold/outlined game-logo look
+  // out of GFX's plain, unweighted default font.
+  kartCanvas.setTextSize(2);
+  int tx = 112, ty = CONTENT_Y + 12;
+  kartCanvas.setTextColor(0x2965, ILI9341_BLACK); kartCanvas.setCursor(tx + 2, ty + 2); kartCanvas.print("SKY");
+  kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK); kartCanvas.setCursor(tx, ty); kartCanvas.print("SKY");
+  tx += 3 * 12 + 8;
+  kartCanvas.setTextColor(0x2965, ILI9341_BLACK); kartCanvas.setCursor(tx + 2, ty + 2); kartCanvas.print("PILOT");
+  kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_BLACK); kartCanvas.setCursor(tx, ty); kartCanvas.print("PILOT");
   kartCanvas.setTextSize(1);
   static const char* items[SKY_START_OPTION_COUNT] = {"PLAY", "EXIT", "INFO"};
   for (int i = 0; i < SKY_START_OPTION_COUNT; ++i) {
