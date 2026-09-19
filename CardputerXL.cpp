@@ -304,7 +304,6 @@ void drawSkyPilotHub();
 void startSkyPilotFlight(int modeSelected);
 void stepSkyPilotFlight();
 void stepSkyPilotHub();
-void skyMenuMusicStop();
 float skyDayFraction();
 void autoConnectWifi();
 void miniCamJoinNetwork();
@@ -4599,7 +4598,6 @@ void skyReadImuTilt(float& pitchAngle, float& bankAngle) {
 // 2=airport to airport (a random distinct start/destination pair from the
 // airport pool, picked fresh each flight).
 void startSkyPilotFlight(int modeSelected) {
-  skyMenuMusicStop();  // otherwise it loops forever on its channel - nothing else stops it once skyState leaves SKY_HOME
   skyLoadBest();
   skyPlane = SkyPlane();
   skyBankRateCur = skyPitchRateCur = 0;
@@ -4723,14 +4721,18 @@ uint16_t skyManiaBgAt(int y) {
   return kartLerpColor565(0x0007 /*deep navy*/, 0x2812 /*deep violet*/, t);
 }
 void skyDrawManiaGradient() {
-  // Covers the FULL canvas height, not just the content band - the one-shot
-  // full-screen draws (drawSkyPilotHubMode()/drawSkyPilotHubOptions()) blit
-  // this whole buffer to tft before header()/footer() paint over their own
-  // strips, so leaving those strips un-filled would flash whatever was in
-  // the canvas from the previous screen for a frame first.
-  constexpr int BAND = 6;
-  for (int y = 0; y < H; y += BAND) {
-    kartCanvas.fillRect(0, y, W, min(BAND, H - y), skyManiaBgAt(y));
+  // Content band only, same as the old flat ui.bg fillScreen() this
+  // replaced - the one-shot full-screen draws still blit the whole canvas
+  // before header()/footer() paint over their own strips (the same
+  // established "blit first, chrome after" pattern the PLANE stage already
+  // used), so the header/footer strips flashing whatever was in kartCanvas
+  // for one frame is a pre-existing, accepted cost, not a new one. Fewer,
+  // taller bands (20px, not 6) than the first version of this cut the
+  // per-frame fillRect call count 3x - this runs every animation tick, so
+  // that overhead was a real, measurable source of the reported lag.
+  constexpr int BAND = 20;
+  for (int y = HEADER_H; y < H - FOOTER_H; y += BAND) {
+    kartCanvas.fillRect(0, y, W, min(BAND, H - FOOTER_H - y), skyManiaBgAt(y));
   }
 }
 void skyDrawManiaRainbowStripe(int y) {
@@ -4947,39 +4949,6 @@ void drawSkyPilotHubOptions() {
   footer(";/. SELECT  ,/ ADJUST  ENTER TOGGLE/START  FN BACK");
 }
 
-// A ~3.5s loop from the user's own chiptune collection ("shock therapy 23")
-// for the HOME wizard, on its own speaker channel (4 - Kart Racer's melody/
-// beep/engine use 0/1/2, Sky Pilot's own flight engine drone uses 3) so it
-// never fights either of those, and so a UI click's one-shot tone
-// (playEnterSound() etc, channel 0 by default) doesn't get cut off by it or
-// vice versa. Two earlier automated trims (4-12s, then 20-28s) both landed
-// on spans that sounded like they kept "cutting off" - confirmed via
-// waveform renders to be sparse/quiet sections of the track, not a
-// playback bug - so this final clip is the user's own hand-picked trim
-// instead. Stored as headerless 16kHz mono 16-bit PCM (sky_menu_music.h)
-// rather than a WAV container - playRaw() takes the raw samples directly,
-// sidestepping playWav()'s stricter header parsing.
-//
-// Uses playRaw(repeat=0) - M5Unified's own "loop forever" - which wraps the
-// buffer sample-accurately inside its own audio task, with no gap. An
-// earlier version drove the repeat itself instead (a single play-through
-// re-triggered on this file's own millis() timer), from back when repeat=0
-// was mistakenly suspected of being the cause of the trim-related cutting
-// off above; that self-driven version introduced a real, audible ~50ms gap
-// of its own, since loop() (keyboard scanning, other steppers, etc.) can't
-// guarantee firing the retrigger the instant the clip actually ends the way
-// the audio task's own internal wraparound can.
-bool skyMenuMusicPlaying = false;
-void skyMenuMusicStop() {
-  if (skyMenuMusicPlaying) { M5Cardputer.Speaker.stop(4); skyMenuMusicPlaying = false; }
-}
-void skyMenuMusicUpdate() {
-  if (!volumeLevel) { skyMenuMusicStop(); return; }
-  if (skyMenuMusicPlaying) return;
-  M5Cardputer.Speaker.playRaw(reinterpret_cast<const int16_t*>(SKY_MENU_MUSIC_PCM), SKY_MENU_MUSIC_PCM_LEN / 2, 16000, false, 0, 4, true);
-  skyMenuMusicPlaying = true;
-}
-
 // Continuous driver for the whole HOME wizard (all 3 stages) - bypasses
 // redrawNeeded like Kart Racer/Sky Pilot's own live view do, self-gated on
 // actually sitting in SKY_HOME so it's a no-op everywhere else. Blits only
@@ -4987,18 +4956,12 @@ void skyMenuMusicUpdate() {
 // header()/footer() themselves (those are only painted once, by each
 // stage's own one-time full-draw function above, on entry/on a value
 // change) - repainting them every animation tick is what visibly flickered
-// before. Also drives the looping menu music.
+// before.
 unsigned long skyHubLastMs = 0;
 // The redraw (starfield + a full content-band blit) doesn't need to run
 // uncapped - it's a static list with a subtle background animation, not
 // something that benefits from more than ~24fps, so this caps it to reduce
-// needless continuous SPI/canvas work. (Originally added chasing a
-// suspected audio-starvation cause for the menu music cutting out; that
-// turned out to be a bad trim point in the audio itself, not a rendering
-// issue - see sky_menu_music.h's own comment - but the throttle is still a
-// reasonable efficiency win on its own, so it stayed.) skyMenuMusicUpdate()
-// itself still runs every tick regardless (cheap, no drawing) so audio
-// timing doesn't depend on this throttle either way.
+// needless continuous SPI/canvas work.
 constexpr unsigned long SKY_HUB_FRAME_MS = 41;
 unsigned long skyHubLastFrameMs = 0;
 void stepSkyPilotHub() {
@@ -5009,7 +4972,6 @@ void stepSkyPilotHub() {
   float dt = (now - skyHubLastMs) / 1000.0f;
   skyHubLastMs = now;
   if (dt > 0.1f) dt = 0.1f;
-  skyMenuMusicUpdate();
   if (now - skyHubLastFrameMs < SKY_HUB_FRAME_MS) return;
   skyHubLastFrameMs = now;
   if (skyHubStage == SkyHubStage::PLANE) {
@@ -5042,27 +5004,43 @@ void tftDrawSlantPanel(int x0, int y0, int w, int h, int skew, uint16_t color) {
 // see the MiniCam buffer comment on its own declaration - so a second
 // full-size buffer just for this transition risks the exact DRAM
 // fragmentation crash that was fixed there). Instead: grow an opaque panel
-// until it fully covers the OLD stage (still sitting untouched on tft, no
-// redraw needed for this half), repaint the NEW stage once underneath it
+// until it fully covers the OLD stage's content band (header/footer are
+// left alone the whole time - they don't need to participate in the wipe),
+// repaint the NEW stage's header/footer/content ONCE underneath it
 // (skyHubStage must already be updated by the caller before this call),
-// then shrink the SAME panel away in the same direction, re-painting the
-// new stage each of those frames too since tft has no readback and can't
-// otherwise "reveal" pixels it already covered.
+// then shrink the SAME panel away in the same direction, re-painting only
+// the cheap content-band scene each of those frames (never header/footer/a
+// full-canvas blit again) since tft has no readback and can't otherwise
+// "reveal" pixels it already covered. The first version of this called the
+// full drawSkyPilotHub() - header()+footer()+a full-height blit - on every
+// single reveal frame, which was the actual source of the reported lag;
+// header/footer only need painting once, right when the stage switches.
 void skyPlayStageTransition(int direction) {
   vibrate(15);
   constexpr int FRAMES = 8, SKEW = 50;
   constexpr uint16_t coverCol = ILI9341_BLACK;
+  constexpr int bandY = HEADER_H, bandH = H - HEADER_H - FOOTER_H;
+  auto drawCoverPanel = [&](int w) {
+    int x0 = direction >= 0 ? 0 : W - w;
+    tftDrawSlantPanel(x0, bandY, w, bandH, SKEW, coverCol);
+  };
+  auto drawNewStageContent = [&]() {
+    if (skyHubStage == SkyHubStage::PLANE) skyDrawPlanePreviewScene(0);
+    else if (skyHubStage == SkyHubStage::OPTIONS) skyDrawOptionsScene(0);
+    else skyDrawModeScene(0);
+    tft.drawRGBBitmap(0, bandY, kartCanvas.getBuffer() + (size_t)bandY * kartCanvas.width(), kartCanvas.width(), bandH);
+  };
   for (int f = 1; f <= FRAMES; ++f) {
-    int w = (int)((W + SKEW) * easeInCubic((float)f / FRAMES));
-    tftDrawSlantPanel(direction >= 0 ? 0 : W - w, 0, w, H, SKEW, coverCol);
+    drawCoverPanel((int)((W + SKEW) * easeInCubic((float)f / FRAMES)));
     M5Cardputer.update();
     delay(9);
   }
-  drawSkyPilotHub();
+  drawSkyPilotHub();        // one-time: header/footer switch to the new stage's chrome + a full content paint
+  drawCoverPanel(W + SKEW); // instantly re-cover the content band (cheap - 2 triangles) before the reveal starts
   for (int f = FRAMES - 1; f >= 0; --f) {
     int w = (int)((W + SKEW) * easeOutCubic((float)f / FRAMES));
-    drawSkyPilotHub();
-    if (w > 0) tftDrawSlantPanel(direction >= 0 ? W - w : 0, 0, w, H, SKEW, coverCol);
+    drawNewStageContent();
+    if (w > 0) drawCoverPanel(w);
     M5Cardputer.update();
     delay(9);
   }
@@ -8689,7 +8667,7 @@ void keyboard() {
   if (fn && !fnLast) {
     if (quickMenuOpen) { if (controlCenterOpen) { controlCenterOpen = false; closeControlCenterAnimated(); } else closeQuickMenuAnimated(); quickMenuOpen = false; playExitSound(); forceFullRedraw = true; redrawNeeded = true; }
     else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode == 8 && skyState == SKY_HOME && skyHubStage != SkyHubStage::MODE) { skyHubStage = skyHubStage == SkyHubStage::OPTIONS ? SkyHubStage::PLANE : SkyHubStage::MODE; skyPlayStageTransition(-1); }
-    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyMenuMusicStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
+    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
   // Opt cycles through three states from any page, any time - independent
