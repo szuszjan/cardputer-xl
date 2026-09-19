@@ -304,6 +304,7 @@ void drawSkyPilotHub();
 void startSkyPilotFlight(int modeSelected);
 void stepSkyPilotFlight();
 void stepSkyPilotHub();
+void skyMenuMusicStop();
 float skyDayFraction();
 void autoConnectWifi();
 void miniCamJoinNetwork();
@@ -4598,6 +4599,7 @@ void skyReadImuTilt(float& pitchAngle, float& bankAngle) {
 // 2=airport to airport (a random distinct start/destination pair from the
 // airport pool, picked fresh each flight).
 void startSkyPilotFlight(int modeSelected) {
+  skyMenuMusicStop();  // otherwise it loops forever on its channel - nothing else stops it once skyState leaves SKY_HOME
   skyLoadBest();
   skyPlane = SkyPlane();
   skyBankRateCur = skyPitchRateCur = 0;
@@ -4957,6 +4959,27 @@ void drawSkyPilotHubOptions() {
   skyPaintHubChrome();
 }
 
+// A ~3.5s loop from the user's own chiptune collection ("shock therapy 23")
+// for the HOME wizard, on its own speaker channel (4 - Kart Racer's melody/
+// beep/engine use 0/1/2, Sky Pilot's own flight engine drone uses 3) so it
+// never fights either of those, and so a UI click's one-shot tone
+// (playEnterSound() etc, channel 0 by default) doesn't get cut off by it or
+// vice versa. Stored as headerless 16kHz mono 16-bit PCM (sky_menu_music.h)
+// rather than a WAV container - playRaw() takes the raw samples directly,
+// sidestepping playWav()'s stricter header parsing. Uses playRaw(repeat=0)
+// - M5Unified's own "loop forever" - which wraps the buffer sample-
+// accurately inside its own audio task, with no gap.
+bool skyMenuMusicPlaying = false;
+void skyMenuMusicStop() {
+  if (skyMenuMusicPlaying) { M5Cardputer.Speaker.stop(4); skyMenuMusicPlaying = false; }
+}
+void skyMenuMusicUpdate() {
+  if (!volumeLevel) { skyMenuMusicStop(); return; }
+  if (skyMenuMusicPlaying) return;
+  M5Cardputer.Speaker.playRaw(reinterpret_cast<const int16_t*>(SKY_MENU_MUSIC_PCM), SKY_MENU_MUSIC_PCM_LEN / 2, 16000, false, 0, 4, true);
+  skyMenuMusicPlaying = true;
+}
+
 // Continuous driver for the whole HOME wizard (all 3 stages) - bypasses
 // redrawNeeded like Kart Racer/Sky Pilot's own live view do, self-gated on
 // actually sitting in SKY_HOME so it's a no-op everywhere else. Blits only
@@ -4964,12 +4987,14 @@ void drawSkyPilotHubOptions() {
 // header()/footer() themselves (those are only painted once, by each
 // stage's own one-time full-draw function above, on entry/on a value
 // change) - repainting them every animation tick is what visibly flickered
-// before.
+// before. Also drives the looping menu music.
 unsigned long skyHubLastMs = 0;
 // The redraw (starfield + a full content-band blit) doesn't need to run
 // uncapped - it's a static list with a subtle background animation, not
 // something that benefits from more than ~24fps, so this caps it to reduce
-// needless continuous SPI/canvas work.
+// needless continuous SPI/canvas work. skyMenuMusicUpdate() itself still
+// runs every tick regardless (cheap, no drawing) so audio timing doesn't
+// depend on this throttle either way.
 constexpr unsigned long SKY_HUB_FRAME_MS = 41;
 unsigned long skyHubLastFrameMs = 0;
 void stepSkyPilotHub() {
@@ -4980,6 +5005,7 @@ void stepSkyPilotHub() {
   float dt = (now - skyHubLastMs) / 1000.0f;
   skyHubLastMs = now;
   if (dt > 0.1f) dt = 0.1f;
+  skyMenuMusicUpdate();
   if (now - skyHubLastFrameMs < SKY_HUB_FRAME_MS) return;
   skyHubLastFrameMs = now;
   if (skyHubStage == SkyHubStage::PLANE) {
@@ -5002,61 +5028,72 @@ void tftDrawSlantPanel(int x0, int y0, int w, int h, int skew, uint16_t color) {
   tft.fillTriangle(x0 + skew, y0, x1 + skew, y0, x1, y1, color);
   tft.fillTriangle(x0 + skew, y0, x1, y1, x0, y1, color);
 }
-// A full-screen diagonal wipe between HOME wizard stages - the same
-// diagonal-panel language as the menu rows, swept across in the direction
-// of travel (+1 left-to-right for ENTER/forward, -1 right-to-left for FN/
+// A full-screen wipe between HOME wizard stages, swept in the direction of
+// travel (+1 left-to-right for ENTER/forward, -1 right-to-left for FN/
 // back) so moving through the wizard reads as a deliberate page turn with
 // a spatial direction, not a flat cut. Deliberately does NOT hold a second
 // off-screen copy of the old/new frame to crossfade between (kartCanvas is
 // already a single ~150KB buffer the boot sequence barely has room for -
 // see the MiniCam buffer comment on its own declaration - so a second
 // full-size buffer just for this transition risks the exact DRAM
-// fragmentation crash that was fixed there). Instead: grow an opaque panel
-// until it fully covers the OLD stage's content band (header/footer are
-// left alone the whole time - they don't need to participate in the wipe),
-// switch the header/footer chrome to the NEW stage (skyHubStage must
-// already be updated by the caller before this call) - safe to do while
-// still fully covered, since header/footer sit outside the covered band
-// and were always going to change the instant this is called regardless -
-// then shrink the SAME panel away in the same direction, re-painting only
-// the cheap content-band scene each of those frames (never header/footer/a
-// full-canvas blit again) since tft has no readback and can't otherwise
-// "reveal" pixels it already covered.
+// fragmentation crash that was fixed there).
 //
-// Critically, the NEW content is never blitted to tft while unmasked, not
-// even for one frame: an earlier version called the full drawSkyPilotHub()
-// here, which blits the entire new scene BEFORE the cover panel is drawn
-// back on top of it - with no double buffering, that blit is a real SPI
-// transfer, so the fully-revealed new stage was actually visible on the
-// physical panel for however long that transfer took, seen as a whole-
-// screen flash. Rendering into kartCanvas without blitting it keeps the
-// new content off-screen until the reveal loop below paints it already
-// masked by the (still nearly-full) shrinking panel.
+// Two earlier versions of this both caused a real, visible flash, for the
+// same underlying reason: with no double buffering, ANYTHING blitted to
+// tft is a genuine SPI transfer that is briefly visible on the physical
+// panel for however long that transfer takes - so any "draw the whole new
+// scene, then immediately cover most of it again" sequence exposes the
+// full new stage for real on every frame that does it, not just once.
+// (First version: drawSkyPilotHub() did this once. Second version: the
+// reveal loop's per-frame re-blit of the FULL content band did this on
+// every one of its 8 frames, since a growing/shrinking cover panel doesn't
+// change how much of the band gets blitted underneath it each time.)
+//
+// The actual fix: never blit more of the new content than should already
+// be visible. Cover phase (grow a diagonal panel to fully hide the OLD
+// content) is unaffected - it only ever paints solid black, so it was
+// never the problem. The reveal phase instead streams the NEWLY exposed
+// vertical slice directly out of kartCanvas each frame, using the same
+// startWrite()/setAddrWindow()/writePixels() pattern the lock screen's
+// wallpaper draw already uses elsewhere in this file - one row at a time,
+// since kartCanvas's row stride (its full W) doesn't match a partial
+// slice's width, so Adafruit_GFX's own drawRGBBitmap (which needs one
+// contiguous w*h buffer) can't address a sub-rectangle directly. Every
+// pixel this writes is already in its final, correct state - nothing is
+// ever exposed and then re-covered, so there is nothing left to flash.
+void skyDrawCanvasSlice(int x, int y, int w, int h) {
+  if (w <= 0 || h <= 0) return;
+  tft.startWrite();
+  tft.setAddrWindow(x, y, w, h);
+  for (int row = 0; row < h; ++row) {
+    uint16_t* rowPtr = kartCanvas.getBuffer() + (size_t)(y + row) * kartCanvas.width() + x;
+    tft.writePixels(rowPtr, w, true, false);
+  }
+  tft.endWrite();
+}
 void skyPlayStageTransition(int direction) {
   vibrate(15);
   constexpr int FRAMES = 8, SKEW = 50;
   constexpr uint16_t coverCol = ILI9341_BLACK;
   constexpr int bandY = HEADER_H, bandH = H - HEADER_H - FOOTER_H;
-  auto drawCoverPanel = [&](int w) {
+  for (int f = 1; f <= FRAMES; ++f) {
+    int w = (int)((W + SKEW) * easeInCubic((float)f / FRAMES));
     int x0 = direction >= 0 ? 0 : W - w;
     tftDrawSlantPanel(x0, bandY, w, bandH, SKEW, coverCol);
-  };
-  auto drawNewStageContent = [&]() {
-    if (skyHubStage == SkyHubStage::PLANE) skyDrawPlanePreviewScene(0);
-    else if (skyHubStage == SkyHubStage::OPTIONS) skyDrawOptionsScene(0);
-    else skyDrawModeScene(0);
-    tft.drawRGBBitmap(0, bandY, kartCanvas.getBuffer() + (size_t)bandY * kartCanvas.width(), kartCanvas.width(), bandH);
-  };
-  for (int f = 1; f <= FRAMES; ++f) {
-    drawCoverPanel((int)((W + SKEW) * easeInCubic((float)f / FRAMES)));
     M5Cardputer.update();
     delay(9);
   }
   skyPaintHubChrome();  // header/footer only - content band stays covered, untouched, throughout
-  for (int f = FRAMES - 1; f >= 0; --f) {
-    int w = (int)((W + SKEW) * easeOutCubic((float)f / FRAMES));
-    drawNewStageContent();
-    if (w > 0) drawCoverPanel(w);
+  if (skyHubStage == SkyHubStage::PLANE) skyDrawPlanePreviewScene(0);
+  else if (skyHubStage == SkyHubStage::OPTIONS) skyDrawOptionsScene(0);
+  else skyDrawModeScene(0);
+  int revealed = 0;
+  for (int f = 1; f <= FRAMES; ++f) {
+    int target = constrain((int)(W * easeOutCubic((float)f / FRAMES)), revealed, W);
+    int sliceW = target - revealed;
+    int sx = direction >= 0 ? revealed : (W - target);
+    skyDrawCanvasSlice(sx, bandY, sliceW, bandH);
+    revealed = target;
     M5Cardputer.update();
     delay(9);
   }
@@ -8683,7 +8720,7 @@ void keyboard() {
   if (fn && !fnLast) {
     if (quickMenuOpen) { if (controlCenterOpen) { controlCenterOpen = false; closeControlCenterAnimated(); } else closeQuickMenuAnimated(); quickMenuOpen = false; playExitSound(); forceFullRedraw = true; redrawNeeded = true; }
     else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode == 8 && skyState == SKY_HOME && skyHubStage != SkyHubStage::MODE) { skyHubStage = skyHubStage == SkyHubStage::OPTIONS ? SkyHubStage::PLANE : SkyHubStage::MODE; skyPlayStageTransition(-1); }
-    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
+    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyMenuMusicStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
   // Opt cycles through three states from any page, any time - independent
