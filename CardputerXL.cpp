@@ -2088,32 +2088,52 @@ constexpr int CONTROLCENTER_ROW_COUNT = 5;  // BRIGHTNESS, VOLUME, THEME, WI-FI,
 // just auto-reconnects forever via serviceAutoConnectWifi(). This adds the
 // one missing piece (an explicit off switch) that function now also checks.
 bool wifiRadioEnabled = true;
-constexpr int CTRLCTR_W = 280, CTRLCTR_H = 150;
+constexpr int CTRLCTR_W = 280, CTRLCTR_H = 92;
 constexpr int CTRLCTR_X = (W - CTRLCTR_W) / 2;
 // Resting position, docked near the top edge (mirrors QUICKMENU_Y's own
 // "near the opposite edge" role); the slide animation moves the panel
 // between -CTRLCTR_H (fully off-screen above) and this Y.
 constexpr int CTRLCTR_Y = 8;
 constexpr int CTRLCTR_SLIDE_ZONE_H = CTRLCTR_Y + CTRLCTR_H;
-constexpr int CTRLCTR_ROW_H = 24;
-void drawControlCenterRow(int row, bool selected) {
-  int y = CTRLCTR_Y + 24 + row * CTRLCTR_ROW_H;
-  uint16_t bg = selected ? ui.selected : ui.panel;
-  tft.fillRect(CTRLCTR_X + 6, y - 3, CTRLCTR_W - 12, CTRLCTR_ROW_H - 4, bg);
-  static const char* labels[CONTROLCENTER_ROW_COUNT] = {"BRIGHTNESS", "VOLUME", "THEME", "WI-FI", "BLUETOOTH"};
-  tft.setTextSize(1); tft.setTextColor(selected ? ui.text : ui.dim, bg);
-  tft.setCursor(CTRLCTR_X + 10, y + 3); tft.print(labels[row]);
-  String val;
+// A horizontal row of icon tiles (like the dock's own QUICKMENU tiles)
+// instead of a vertical text list - two-letter literal abbreviations
+// matching this file's existing icon convention (appIcons[] already uses
+// "bt" for its own Bluetooth-adjacent app, reused verbatim here).
+constexpr int CTRLCTR_TILE_W = 38, CTRLCTR_TILE_H = 36, CTRLCTR_TILE_GAP = 6;
+constexpr int CTRLCTR_TILES_LEFT = CTRLCTR_X + (CTRLCTR_W - (CONTROLCENTER_ROW_COUNT * CTRLCTR_TILE_W + (CONTROLCENTER_ROW_COUNT - 1) * CTRLCTR_TILE_GAP)) / 2;
+constexpr int CTRLCTR_TILE_TOP = CTRLCTR_Y + 22;
+const char* controlCenterIcon(int row) {
+  static const char* icons[CONTROLCENTER_ROW_COUNT] = {"br", "vo", "th", "wf", "bt"};
+  return icons[row];
+}
+String controlCenterValueText(int row) {
   switch (row) {
-    case 0: val = String(brightnessLevel) + "/10"; break;
-    case 1: val = String(volumeLevel) + "/10"; break;
-    case 2: val = String(themeIndex + 1) + "/" + String(THEME_COUNT); break;
-    case 3: val = !wifiRadioEnabled ? "OFF" : (WiFi.status() == WL_CONNECTED ? "ON" : "..."); break;
-    default: val = !bleHidEnabled ? "OFF" : (bleKeyboard.isPaired() ? "PAIRED" : "ON"); break;
+    case 0: return "BRIGHTNESS " + String(brightnessLevel) + "/10";
+    case 1: return "VOLUME " + String(volumeLevel) + "/10";
+    case 2: return "THEME " + String(themeIndex + 1) + "/" + String(THEME_COUNT);
+    case 3: return String("WI-FI ") + (!wifiRadioEnabled ? "OFF" : (WiFi.status() == WL_CONNECTED ? "ON" : "..."));
+    default: return String("BLUETOOTH ") + (!bleHidEnabled ? "OFF" : (bleKeyboard.isPaired() ? "PAIRED" : "ON"));
   }
-  tft.setTextColor(selected ? ui.text : ui.accent, bg);
-  tft.setCursor(CTRLCTR_X + CTRLCTR_W - 10 - (int)val.length() * 6, y + 3);
-  tft.print(val);
+}
+void drawControlCenterTile(int row, bool selected) {
+  int x = CTRLCTR_TILES_LEFT + row * (CTRLCTR_TILE_W + CTRLCTR_TILE_GAP);
+  uint16_t fill = selected ? ui.selected : ILI9341_DARKGREY;
+  tft.fillRoundRect(x, CTRLCTR_TILE_TOP, CTRLCTR_TILE_W, CTRLCTR_TILE_H, 6, fill);
+  tft.drawRoundRect(x, CTRLCTR_TILE_TOP, CTRLCTR_TILE_W, CTRLCTR_TILE_H, 6, selected ? ui.accent : ui.dim);
+  tft.setTextSize(2); tft.setTextColor(ui.text, fill);
+  tft.setCursor(x + 5, CTRLCTR_TILE_TOP + 10); tft.print(controlCenterIcon(row));
+}
+// Redraws just the caption naming the selected tile's name+value - called on
+// open, whenever the selection moves, and whenever the selected tile's own
+// value changes (the tiles themselves only ever show a fixed icon, so they
+// don't need to redraw for that) - same role as the dock's own
+// drawQuickMenuCaption(), just with a value appended.
+void drawControlCenterCaption() {
+  tft.fillRect(CTRLCTR_X + 4, CTRLCTR_Y + CTRLCTR_H - 16, CTRLCTR_W - 8, 12, ui.panel);
+  tft.setTextSize(1); tft.setTextColor(ui.accent, ui.panel);
+  String label = controlCenterValueText(controlCenterSelected);
+  tft.setCursor(CTRLCTR_X + (CTRLCTR_W - (int)label.length() * 6) / 2, CTRLCTR_Y + CTRLCTR_H - 14);
+  tft.print(label);
 }
 void drawControlCenter() {
   tft.fillRoundRect(CTRLCTR_X, CTRLCTR_Y, CTRLCTR_W, CTRLCTR_H, 10, ui.panel);
@@ -2122,7 +2142,8 @@ void drawControlCenter() {
   const char* title = "CONTROL CENTER";
   tft.setCursor(CTRLCTR_X + (CTRLCTR_W - (int)strlen(title) * 6) / 2, CTRLCTR_Y + 6);
   tft.print(title);
-  for (int i = 0; i < CONTROLCENTER_ROW_COUNT; ++i) drawControlCenterRow(i, i == controlCenterSelected);
+  for (int i = 0; i < CONTROLCENTER_ROW_COUNT; ++i) drawControlCenterTile(i, i == controlCenterSelected);
+  drawControlCenterCaption();
 }
 // Same easing/frame-count convention as the dock's own open/close, just
 // travelling from off-screen ABOVE (y = -CTRLCTR_H) down to CTRLCTR_Y
@@ -3388,7 +3409,7 @@ int skyPreSpectateModelIndex = 0;  // skyPlaneModelIndex gets overwritten every 
 // special-case) rather than exiting Sky Pilot entirely from PLANE/OPTIONS.
 enum class SkyHubStage { MODE, PLANE, OPTIONS };
 SkyHubStage skyHubStage = SkyHubStage::MODE;
-constexpr int SKY_OPTIONS_COUNT = 6;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, START FLIGHT
+constexpr int SKY_OPTIONS_COUNT = 7;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, RENDER DISTANCE, START FLIGHT
 int skyOptionsSelected = 0;
 
 // Stall/rotate speed, control rates, and throttle targets all now come from
@@ -3498,6 +3519,18 @@ struct SkyBot {
 constexpr int SKY_BOT_MAX = 10;
 SkyBot skyBots[SKY_BOT_MAX];
 int skyBotCount = 4;  // adjustable in OPTIONS ("BOTS COUNT"), 1..SKY_BOT_MAX
+// Render distance: one setting driving terrain grid extent, bot draw-distance
+// culling, and airport label culling together, so it reads as a single
+// coherent "how far can I see" dial rather than three separate ones. Level 1
+// (MEDIUM) reproduces this file's original fixed values (GRID=16, 700-unit
+// bot cull, 900-unit label cull) exactly, so the default experience is
+// unchanged; 0/2 trade view distance for (or against) frame rate.
+constexpr int SKY_RENDER_DIST_LEVELS = 3;
+const char* skyRenderDistNames[SKY_RENDER_DIST_LEVELS] = {"SHORT", "MEDIUM", "LONG"};
+const int skyRenderDistGrid[SKY_RENDER_DIST_LEVELS] = {10, 16, 20};
+const float skyRenderDistBotCull[SKY_RENDER_DIST_LEVELS] = {400.0f, 700.0f, 1000.0f};
+const float skyRenderDistLabelCull[SKY_RENDER_DIST_LEVELS] = {500.0f, 900.0f, 1300.0f};
+int skyRenderDistLevel = 1;
 // 'R' on the HOME screen - shows bots (as blips) on the same minimap
 // airports already use, regardless of game mode.
 bool skyRadarEnabled = true;
@@ -3566,6 +3599,33 @@ float skyRunwayPadDistance(float x, float z, const SkyAirport& a) {
   float dAlong = along - clampedAlong, dPerp = perp - clampedPerp;
   return sqrtf(dAlong * dAlong + dPerp * dPerp);
 }
+// Lakes: fixed low-lying, flat depressions carved into the procedural
+// terrain, purely so there's a visually distinct "don't land here" hazard
+// besides open ground (which was already never safe to land on outside a
+// runway - see stepSkyPilotFlight's landing check - but read as identical,
+// featureless green everywhere). Placed in open space between airports;
+// the airport flatten pass in skyTerrainHeight() below runs AFTER this one
+// and unconditionally overrides it near any runway, so a lake can never
+// actually contaminate a landing strip even if placed close to one.
+struct SkyLake { KVec3 pos; float radius; };
+constexpr int SKY_LAKE_COUNT = 3;
+const SkyLake skyLakes[SKY_LAKE_COUNT] = {
+  {{350, 0, 250}, 130.0f},
+  {{-500, 0, -400}, 160.0f},
+  {{1100, 0, 900}, 140.0f},
+};
+constexpr float SKY_LAKE_LEVEL = 3.0f;
+constexpr float SKY_LAKE_BLEND = 90.0f;
+// For terrain coloring only (skyDrawTerrain()) - a point counts as "water"
+// only within a lake's core radius, not its blend margin, so the shoreline
+// reads as a clean edge rather than a fuzzy gradient of blue.
+bool skyIsWater(float x, float z) {
+  for (int i = 0; i < SKY_LAKE_COUNT; ++i) {
+    float dx = x - skyLakes[i].pos.x, dz = z - skyLakes[i].pos.z;
+    if (dx * dx + dz * dz < skyLakes[i].radius * skyLakes[i].radius) return true;
+  }
+  return false;
+}
 // A handful of stacked sine waves, evaluated directly from world (x,z) with
 // no stored heightmap - an "infinite" terrain that needs no generation step
 // and never runs out. The two big terms are clamped to their positive half
@@ -3577,6 +3637,20 @@ float skyTerrainHeight(float x, float z) {
   h += 34.0f * max(0.0f, sinf(x * 0.0055f + 1.7f) * cosf(z * 0.0048f + 0.4f));
   h += 20.0f * max(0.0f, sinf(x * 0.013f + 0.6f) * sinf(z * 0.015f + 2.6f));
   h += 5.0f * cosf(x * 0.05f + 3.0f) * cosf(z * 0.045f + 1.1f);
+  // Carve the lakes in - same quintic-ease blend as the runway flatten
+  // below, just toward a low, flat water level instead of the runway's
+  // elevation. Deliberately runs BEFORE the airport pass so that one can
+  // always override this near a runway, never the other way around.
+  for (int i = 0; i < SKY_LAKE_COUNT; ++i) {
+    float dx = x - skyLakes[i].pos.x, dz = z - skyLakes[i].pos.z;
+    float d = sqrtf(dx * dx + dz * dz);
+    float outer = skyLakes[i].radius + SKY_LAKE_BLEND;
+    if (d < outer) {
+      float t = constrain((d - skyLakes[i].radius) / SKY_LAKE_BLEND, 0.0f, 1.0f);
+      float smooth = t * t * t * (t * (t * 6 - 15) + 10);
+      h = SKY_LAKE_LEVEL * (1 - smooth) + h * smooth;
+    }
+  }
   // Flatten a landing pad around each airport's actual runway footprint
   // (zero contamination anywhere on the strip itself), blending smoothly
   // into the surrounding terrain out to the flatten radius beyond its edges.
@@ -3612,10 +3686,14 @@ float skyTerrainHeight(float x, float z) {
 // Snapping the lattice means the same world-fixed vertices are reused frame
 // to frame, and the visible window only steps by whole STEPs as the plane
 // crosses a cell boundary - real ground, not a rebuilt patch each frame.
+// GRID is now the RENDER DISTANCE setting's, not a fixed constant - the
+// point array is sized to the largest level (LONG) and only the first
+// GRID+1 rows/columns of it are ever touched at a shorter setting.
+constexpr int SKY_TERRAIN_GRID_MAX = 20;
 void skyDrawTerrain(const KartCam& cam, const KVec3& fwd) {
-  constexpr int GRID = 16;
+  const int GRID = skyRenderDistGrid[skyRenderDistLevel];
   constexpr float STEP = 22.0f;
-  static KVec3 pts[GRID + 1][GRID + 1];
+  static KVec3 pts[SKY_TERRAIN_GRID_MAX + 1][SKY_TERRAIN_GRID_MAX + 1];
   KVec3 groundFwd = knormalized(KVec3{fwd.x, 0, fwd.z});
   KVec3 center = skyPlane.pos + groundFwd * (GRID * STEP * 0.28f);
   float originX = floorf(center.x / STEP) * STEP;
@@ -3628,8 +3706,25 @@ void skyDrawTerrain(const KartCam& cam, const KVec3& fwd) {
       pts[j][i] = {x, skyTerrainHeight(x, z), z};
     }
   }
-  for (int j = 0; j <= GRID; ++j) for (int i = 0; i < GRID; ++i) kartDrawSeg(cam, pts[j][i], pts[j][i + 1], ILI9341_OLIVE);
-  for (int i = 0; i <= GRID; ++i) for (int j = 0; j < GRID; ++j) kartDrawSeg(cam, pts[j][i], pts[j + 1][i], ILI9341_OLIVE);
+  // Filled, alternating-shade cells - the same cheap 2-tone "lit/shadowed"
+  // depth trick the airport buildings use for their walls - instead of a
+  // bare wireframe lattice, plus a distinct blue for lake cells (skyIsWater()).
+  // Nothing outside a runway was ever actually safe to land on (see
+  // stepSkyPilotFlight's landing check), but a flat, featureless green grid
+  // never communicated that a lake is there at all, let alone worse than
+  // the grass around it.
+  constexpr uint16_t GRASS_A = 0x3B27, GRASS_B = 0x2AA0;
+  constexpr uint16_t WATER_A = 0x1B5F, WATER_B = 0x1CDF;
+  for (int j = 0; j < GRID; ++j) {
+    for (int i = 0; i < GRID; ++i) {
+      const KVec3 &a = pts[j][i], &b = pts[j][i + 1], &c = pts[j + 1][i + 1], &d = pts[j + 1][i];
+      float cx = (a.x + b.x + c.x + d.x) * 0.25f, cz = (a.z + b.z + c.z + d.z) * 0.25f;
+      bool water = skyIsWater(cx, cz);
+      bool alt = (i + j) & 1;
+      uint16_t col = water ? (alt ? WATER_A : WATER_B) : (alt ? GRASS_A : GRASS_B);
+      kartFillQuad(cam, a, b, c, d, col);
+    }
+  }
 }
 // Drawn using the plane's BANKED right/up (unlike the upright chase camera),
 // so the wings visibly tilt even though the camera itself never rolls.
@@ -3809,7 +3904,7 @@ void skyDrawAirportLabels(const KartCam& cam) {
   for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) {
     KVec3 labelPos{skyAirports[i].pos.x, skyTerrainHeight(skyAirports[i].pos.x, skyAirports[i].pos.z) + 18.0f, skyAirports[i].pos.z};
     KVec3 rel = labelPos - cam.position;
-    if (sqrtf(kdot(rel, rel)) > 900.0f) continue;  // too far to be legible - skip rather than clutter
+    if (sqrtf(kdot(rel, rel)) > skyRenderDistLabelCull[skyRenderDistLevel]) continue;  // too far to be legible - skip rather than clutter
     int sx, sy;
     if (!cam.project(labelPos, kartCanvas.width(), kartCanvas.height(), sx, sy)) continue;
     if (sx < -40 || sx > kartCanvas.width() + 40 || sy < -20 || sy > kartCanvas.height() + 20) continue;
@@ -3884,7 +3979,8 @@ void skyDrawBots(const KartCam& cam) {
     const SkyBot& b = skyBots[i];
     KVec3 fwd{cosf(b.pitch) * sinf(b.heading), sinf(b.pitch), cosf(b.pitch) * cosf(b.heading)};
     KVec3 rel = b.pos - cam.position;
-    if (kdot(rel, rel) > 700.0f * 700.0f) continue;  // far enough to skip drawing - not worth the segments
+    float botCull = skyRenderDistBotCull[skyRenderDistLevel];
+    if (kdot(rel, rel) > botCull * botCull) continue;  // far enough to skip drawing - not worth the segments
     skyDrawPlaneModel(cam, fwd, b.pos, b.bank, skyPlaneModels[b.modelIndex]);
   }
 }
@@ -4266,13 +4362,13 @@ void drawSkyPilotHubPlane() {
 void skyDrawOptionsScene(float dt) {
   kartCanvas.fillScreen(ui.bg);
   skyDrawHubStars(dt);
-  static const char* optNames[SKY_OPTIONS_COUNT] = {"CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "START FLIGHT"};
+  static const char* optNames[SKY_OPTIONS_COUNT] = {"CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "RENDER DISTANCE", "START FLIGHT"};
   for (int i = 0; i < SKY_OPTIONS_COUNT; ++i) {
-    int y = CONTENT_Y + 14 + i * 24; bool sel = i == skyOptionsSelected;
+    int y = CONTENT_Y + 12 + i * 22; bool sel = i == skyOptionsSelected;
     uint16_t bg = sel ? lerpColor565(ui.bg, ui.selected, 0.6f + 0.4f * sinf(millis() / 180.0f)) : ui.bg;
-    if (sel) kartCanvas.fillRoundRect(8, y - 4, 304, 19, 4, bg);
+    if (sel) kartCanvas.fillRoundRect(8, y - 4, 304, 18, 4, bg);
     kartCanvas.setTextColor(sel ? ui.text : ui.dim, bg); kartCanvas.setCursor(15, y); kartCanvas.print(sel ? "> " : "  ");
-    if (i == 5) {
+    if (i == 6) {
       kartCanvas.setTextColor(sel ? ILI9341_GREEN : ui.dim, bg); kartCanvas.print("START FLIGHT");
       continue;
     }
@@ -4281,10 +4377,11 @@ void skyDrawOptionsScene(float dt) {
                : i == 1 ? (skyEngineSoundEnabled ? "ON" : "OFF")
                : i == 2 ? (skyRadarEnabled ? "ON" : "OFF")
                : i == 3 ? (skyAiBotsEnabled ? "ON" : "OFF")
-                        : String(skyBotCount);
+               : i == 4 ? String(skyBotCount)
+                        : String(skyRenderDistNames[skyRenderDistLevel]);
     kartCanvas.setTextColor(sel ? ui.text : ui.accent, bg); kartCanvas.setCursor(240, y); kartCanvas.print(val);
   }
-  kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(12, CONTENT_Y + 180);
+  kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(12, CONTENT_Y + 172);
   kartCanvas.print("Controls hold their angle. MED/HIGH throttle to take off.");
 }
 void drawSkyPilotHubOptions() {
@@ -7893,13 +7990,13 @@ void keyboard() {
   optLast = k.opt;
   if (controlCenterOpen) {
     // Same "owns all input while open" rule as the dock below - ;/. move
-    // between rows, ,// adjust the selected row's value (a toggle for
+    // between tiles, ,// adjust the selected tile's value (a toggle for
     // Wi-Fi/Bluetooth, a stepped level for the other three).
     if (!event || !M5Cardputer.Keyboard.isPressed()) return;
     int oldSel = controlCenterSelected;
     if (wordContains(k.word, ';')) controlCenterSelected = (controlCenterSelected + CONTROLCENTER_ROW_COUNT - 1) % CONTROLCENTER_ROW_COUNT;
     else if (wordContains(k.word, '.')) controlCenterSelected = (controlCenterSelected + 1) % CONTROLCENTER_ROW_COUNT;
-    if (controlCenterSelected != oldSel) { playMenuSound(); drawControlCenterRow(oldSel, false); drawControlCenterRow(controlCenterSelected, true); }
+    if (controlCenterSelected != oldSel) { playMenuSound(); drawControlCenterTile(oldSel, false); drawControlCenterTile(controlCenterSelected, true); drawControlCenterCaption(); }
     bool dec = wordContains(k.word, ','), inc = wordContains(k.word, '/');
     if (dec || inc) {
       switch (controlCenterSelected) {
@@ -7910,9 +8007,9 @@ void keyboard() {
         default: bleHidEnabled = !bleHidEnabled; if (bleHidEnabled) ensureBleReady(); break;
       }
       playFunctionSound(); markStateDirty();
-      // A theme change recolors every row's background, not just the
-      // selected one's value - the only case needing a full repaint here.
-      if (controlCenterSelected == 2) drawControlCenter(); else drawControlCenterRow(controlCenterSelected, true);
+      // A theme change recolors every tile's fill, not just the selected
+      // one's caption - the only case needing a full repaint here.
+      if (controlCenterSelected == 2) drawControlCenter(); else drawControlCenterCaption();
     }
     return;
   }
@@ -8290,19 +8387,22 @@ void keyboard() {
           for (char c : k.word) {
             if (c == ';') { skyOptionsSelected = (skyOptionsSelected + SKY_OPTIONS_COUNT - 1) % SKY_OPTIONS_COUNT; redrawNeeded = true; }
             else if (c == '.') { skyOptionsSelected = (skyOptionsSelected + 1) % SKY_OPTIONS_COUNT; redrawNeeded = true; }
-            // BOTS COUNT is a range, not a toggle - ,/ / adjust it directly
-            // (same convention as the PLANE stage cycling the plane model)
-            // instead of ENTER stepping through 10 values one at a time.
+            // BOTS COUNT and RENDER DISTANCE are ranges, not toggles - ,/ /
+            // adjust them directly (same convention as the PLANE stage
+            // cycling the plane model) instead of ENTER stepping through
+            // several values one at a time.
             else if (skyOptionsSelected == 4 && c == ',') { skyBotCount = max(1, skyBotCount - 1); playFunctionSound(); redrawNeeded = true; }
             else if (skyOptionsSelected == 4 && c == '/') { skyBotCount = min(SKY_BOT_MAX, skyBotCount + 1); playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 5 && c == ',') { skyRenderDistLevel = max(0, skyRenderDistLevel - 1); playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 5 && c == '/') { skyRenderDistLevel = min(SKY_RENDER_DIST_LEVELS - 1, skyRenderDistLevel + 1); playFunctionSound(); redrawNeeded = true; }
           }
           if (k.enter) {
-            if (skyOptionsSelected == 5) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
+            if (skyOptionsSelected == 6) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
             if (skyOptionsSelected == 0) skyImuControlEnabled = !skyImuControlEnabled;
             else if (skyOptionsSelected == 1) skyEngineSoundEnabled = !skyEngineSoundEnabled;
             else if (skyOptionsSelected == 2) skyRadarEnabled = !skyRadarEnabled;
             else if (skyOptionsSelected == 3) skyAiBotsEnabled = !skyAiBotsEnabled;
-            if (skyOptionsSelected != 4) { playFunctionSound(); redrawNeeded = true; }
+            if (skyOptionsSelected != 4 && skyOptionsSelected != 5) { playFunctionSound(); redrawNeeded = true; }
           }
         }
       } else if (k.enter && skyState == SKY_RESULTS) {
