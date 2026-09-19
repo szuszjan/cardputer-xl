@@ -4702,14 +4702,21 @@ void skyInitHubStars() {
 }
 void skyDrawHubStars(float dt) {
   if (!skyHubStarsReady) skyInitHubStars();
+  uint16_t* buf = kartCanvas.getBuffer();
+  int stride = kartCanvas.width(), canvasH = kartCanvas.height();
   for (int i = 0; i < SKY_HUB_STAR_COUNT; i++) {
     SkyHubStar& s = skyHubStars[i];
     s.x -= s.speed * dt;
     if (s.x < 0) { s.x = W; s.y = HEADER_H + random(0, H - HEADER_H - FOOTER_H); }
+    int sx = (int)s.x, sy = (int)s.y;
+    if (sx < 0 || sx >= stride || sy < 0 || sy >= canvasH) continue;
     // Mostly dim slate specks for depth, with the occasional bright twinkle
     // (every 5th star) - a nod to the little sparkle dots in a Mania-style
     // menu backdrop without needing per-star animation state of their own.
-    kartCanvas.drawPixel((int)s.x, (int)s.y, (i % 5 == 0) ? ILI9341_WHITE : 0x2965);
+    // Written straight into the buffer (not kartCanvas.drawPixel()) - see
+    // skyDrawManiaGradient()'s own comment on why this whole draw path
+    // avoids Adafruit_GFX's virtual per-pixel calls.
+    buf[(size_t)sy * stride + sx] = (i % 5 == 0) ? ILI9341_WHITE : 0x2965;
   }
 }
 // ---- "Mania menu" look: a deep navy-to-violet vertical gradient behind the
@@ -4722,19 +4729,23 @@ uint16_t skyManiaBgAt(int y) {
   float t = constrain((float)(y - HEADER_H) / (float)(H - HEADER_H - FOOTER_H), 0.0f, 1.0f);
   return kartLerpColor565(0x0007 /*deep navy*/, 0x2812 /*deep violet*/, t);
 }
+// Writes straight into kartCanvas's own buffer instead of calling
+// kartCanvas.fillRect() - fillRect() isn't overridden by GFXcanvas16, so it
+// falls back to Adafruit_GFX's generic implementation, which loops one
+// *virtual* drawFastVLine() call per column (320 of them per row-band,
+// each carrying its own clipping/rotation-check overhead meant for a real
+// display driver, not an in-RAM buffer this file already owns outright).
+// This runs every single animation tick for the whole content band, so
+// that per-call overhead - multiplied by every row's panel too, see
+// skyDrawManiaPanel() below - was the actual, measurable source of the
+// reported scrolling lag, not just the fill's raw pixel count.
 void skyDrawManiaGradient() {
-  // Content band only, same as the old flat ui.bg fillScreen() this
-  // replaced - the one-shot full-screen draws still blit the whole canvas
-  // before header()/footer() paint over their own strips (the same
-  // established "blit first, chrome after" pattern the PLANE stage already
-  // used), so the header/footer strips flashing whatever was in kartCanvas
-  // for one frame is a pre-existing, accepted cost, not a new one. Fewer,
-  // taller bands (20px, not 6) than the first version of this cut the
-  // per-frame fillRect call count 3x - this runs every animation tick, so
-  // that overhead was a real, measurable source of the reported lag.
-  constexpr int BAND = 20;
-  for (int y = HEADER_H; y < H - FOOTER_H; y += BAND) {
-    kartCanvas.fillRect(0, y, W, min(BAND, H - FOOTER_H - y), skyManiaBgAt(y));
+  uint16_t* buf = kartCanvas.getBuffer();
+  int stride = kartCanvas.width();
+  for (int y = HEADER_H; y < H - FOOTER_H; ++y) {
+    uint16_t col = skyManiaBgAt(y);
+    uint16_t* row = buf + (size_t)y * stride;
+    for (int x = 0; x < W; ++x) row[x] = col;
   }
 }
 void skyDrawManiaRainbowStripe(int y) {
@@ -4743,14 +4754,29 @@ void skyDrawManiaRainbowStripe(int y) {
   int segW = (W + N - 1) / N;
   for (int i = 0; i < N; ++i) kartCanvas.fillRect(i * segW, y, segW, 3, rainbow[i]);
 }
-// A right-leaning parallelogram (two triangles) instead of a plain
-// rectangle - the diagonal-cut panel behind every row is the single most
-// recognizable piece of a Mania-style menu. skew is how far the top edge
-// leans right of the bottom edge.
+// A right-leaning parallelogram instead of a plain rectangle - the
+// diagonal-cut panel behind every row is the single most recognizable
+// piece of a Mania-style menu. skew is how far the top edge leans right of
+// the bottom edge. Filled scanline-by-scanline straight into kartCanvas's
+// buffer (linearly interpolating the edge's x-offset from `skew` at the
+// top to 0 at the bottom - the exact same shape the original two-
+// fillTriangle() version drew) rather than via two Adafruit_GFX
+// fillTriangle() calls, each of which sorts vertices and then makes its
+// own *virtual* per-scanline draw call - real cost multiplied by every
+// visible row, every animation tick. See skyDrawManiaGradient()'s comment
+// for the same reasoning applied to the background fill.
 void skyDrawManiaPanel(int x0, int y0, int w, int h, int skew, uint16_t color) {
-  int x1 = x0 + w, y1 = y0 + h;
-  kartCanvas.fillTriangle(x0 + skew, y0, x1 + skew, y0, x1, y1, color);
-  kartCanvas.fillTriangle(x0 + skew, y0, x1, y1, x0, y1, color);
+  uint16_t* buf = kartCanvas.getBuffer();
+  int stride = kartCanvas.width(), canvasH = kartCanvas.height();
+  for (int row = 0; row < h; ++row) {
+    int y = y0 + row;
+    if (y < 0 || y >= canvasH) continue;
+    int localSkew = h > 1 ? (int)(skew * (1.0f - (float)row / (h - 1))) : skew;
+    int xs = max(0, x0 + localSkew), xe = min(stride, x0 + localSkew + w);
+    if (xe <= xs) continue;
+    uint16_t* rowBuf = buf + (size_t)y * stride;
+    for (int x = xs; x < xe; ++x) rowBuf[x] = color;
+  }
 }
 // The Mania menu's real selection animation: the highlighted slot stays put
 // at a fixed on-screen anchor, and the whole list slides underneath it (fast
