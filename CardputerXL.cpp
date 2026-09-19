@@ -3058,7 +3058,18 @@ static void kartDrawSeg(const KartCam& cam, const KVec3& a, const KVec3& b, uint
 // would flicker out entirely rather than just losing the sliver actually
 // behind the camera.
 static void kartClipFillTriangle(const KartCam& cam, const KVec3& a, const KVec3& b, const KVec3& c, uint16_t col) {
-  constexpr float NEAR_Z = 0.17f;  // KartCam::project()'s own NEAR_Z (0.15) plus a hair of margin
+  // Much further from the camera than kartDrawSeg's own 0.16 near-clip: a
+  // FILLED shape's clipped boundary vertices sit right at this plane by
+  // construction, and f/cz still blows up there for anything with real
+  // lateral (off-axis) offset even when cz is technically >0 - clipping
+  // alone doesn't prevent the wild-coordinate problem the way it does for
+  // a thin line, since a triangle spans two screen dimensions worth of
+  // that same blowup. Pushing the plane out trades a small sliver of
+  // geometry closest to the camera (never rendered at all, same as any
+  // near-clip) for actually eliminating the terrain cells that kept
+  // vanishing under a close, low camera (takeoff, the landing rollout, the
+  // end-of-flight orbit) even after the first clip fix.
+  constexpr float NEAR_Z = 2.2f;
   const KVec3 verts[3] = {a, b, c};
   float cz[3];
   for (int i = 0; i < 3; ++i) cz[i] = kdot(verts[i] - cam.position, cam.forward);
@@ -4071,7 +4082,19 @@ void skyRenderScene(const KartCam& cam, const KVec3& fwd, bool firstPerson) {
   kartDrawSky(cam);
   skyDrawTerrain(cam, fwd);
   for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) { skyDrawRunway(cam, skyAirports[i]); skyDrawAirportBuilding(cam, skyAirports[i]); }
-  if (firstPerson) skyDrawCockpitOverlay(); else skyDrawPlaneModel(cam, fwd, skyPlane.pos, skyPlane.bank, skyPlaneModels[skyPlaneModelIndex]);
+  if (firstPerson) skyDrawCockpitOverlay();
+  else {
+    // The model is drawn centered on skyPlane.pos with no separate
+    // "landing gear" geometry of its own, so at pos.y == the exact terrain
+    // height (skyGrounded) the fuselage/wing belly renders visibly sunk
+    // into the ground instead of sitting on top of it - easy to miss from
+    // the normal chase view but obvious from the end-of-flight orbit
+    // camera's low, close angles. A small fixed clearance while grounded
+    // stands in for wheel height without needing real gear geometry.
+    KVec3 modelPos = skyPlane.pos;
+    if (skyGrounded) modelPos.y += 0.5f;
+    skyDrawPlaneModel(cam, fwd, modelPos, skyPlane.bank, skyPlaneModels[skyPlaneModelIndex]);
+  }
   skyDrawBots(cam);
   skyDrawAirportLabels(cam);
 }
@@ -4628,11 +4651,22 @@ void skyEngineToneStop() { M5Cardputer.Speaker.stop(3); skyEngineSmoothedFreq = 
 // this file (playAppIntroAnimation, skyPlayStageTransition, the dock's own
 // open/close): a few seconds of M5Cardputer.update()+delay() frames is
 // nothing next to the flight that just ended.
-void skyPlayEndSequence(const char* text, uint16_t color) {
+void skyPlayEndSequence(const char* text, uint16_t color, bool win) {
   KVec3 subject = skyPlane.pos;
   constexpr int FRAMES = 44;
   constexpr float ORBIT_RADIUS = 15.0f, ORBIT_HEIGHT = 5.5f;
   for (int f = 0; f < FRAMES; ++f) {
+    // A short ascending fanfare on a safe landing, timed into the orbit's
+    // own first few frames instead of played as a separate blocking intro -
+    // no added dead time before the camera actually starts moving. tone()
+    // itself doesn't block; the frames' own delay(28) below provides the
+    // ~110ms note spacing.
+    if (win && volumeLevel) {
+      if (f == 0) M5Cardputer.Speaker.tone(523.25f, 100);
+      else if (f == 4) M5Cardputer.Speaker.tone(659.25f, 100);
+      else if (f == 8) M5Cardputer.Speaker.tone(783.99f, 100);
+      else if (f == 12) M5Cardputer.Speaker.tone(1046.50f, 200);
+    }
     float angle = (2.0f * KART_PI) * f / FRAMES;
     KartCam cam;
     cam.position = subject + KVec3{cosf(angle) * ORBIT_RADIUS, ORBIT_HEIGHT, sinf(angle) * ORBIT_RADIUS};
@@ -4646,12 +4680,21 @@ void skyPlayEndSequence(const char* text, uint16_t color) {
     kartCanvas.setTextColor(color, ILI9341_BLACK);
     int16_t bx, by; uint16_t bw, bh;
     kartCanvas.getTextBounds(text, 0, 0, &bx, &by, &bw, &bh);
-    kartCanvas.setCursor(kartCanvas.width() / 2 - (int)bw / 2 - bx, kartCanvas.height() / 2 - (int)bh / 2 - by);
+    // Near the top rather than dead-center - the orbiting subject (the
+    // plane) sits at screen-center by construction, so centered text
+    // covered it for the entire sequence.
+    kartCanvas.setCursor(kartCanvas.width() / 2 - (int)bw / 2 - bx, (int)(kartCanvas.height() * 0.16f) - (int)bh / 2 - by);
     kartCanvas.print(text);
     tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
     M5Cardputer.update();
     delay(28);
   }
+  // Otherwise this leaks into the HOME wizard's own kartCanvas-drawn MODE/
+  // OPTIONS text (see skyDrawModeScene()/skyDrawOptionsScene(), neither of
+  // which sets its own text size, having never needed to before this
+  // function started changing it) - the whole menu would render at 3x
+  // size after any landing or crash.
+  kartCanvas.setTextSize(1);
 }
 
 void skyDrawPausedOverlay() {
@@ -4745,7 +4788,7 @@ void stepSkyPilotFlight() {
       skyMissionSuccess = true;
       if ((int)skyScore > skyBestScore) { skyBestScore = (int)skyScore; skySaveBest(); }
       skyEngineToneStop();
-      skyPlayEndSequence("LANDED", ILI9341_GREEN);
+      skyPlayEndSequence("LANDED", ILI9341_GREEN, true);
       skyState = SKY_RESULTS;
       redrawNeeded = true;
     }
@@ -4977,7 +5020,7 @@ void stepSkyPilotFlight() {
         if ((int)skyScore > skyBestScore) { skyBestScore = (int)skyScore; skySaveBest(); }
         skyMissionSuccess = false;
         skyEngineToneStop();
-        skyPlayEndSequence("CRASHED", ILI9341_RED);
+        skyPlayEndSequence("CRASHED", ILI9341_RED, false);
         skyState = SKY_RESULTS;
         redrawNeeded = true;
         return;
