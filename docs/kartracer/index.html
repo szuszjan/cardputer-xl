@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kart Racer</title>
+<meta name="description" content="A time-trial kart racer for the keyboard - three procedural circuits, drift through the kerbs, beat your best lap.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏁</text></svg>">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Titillium+Web:wght@400;600;700;900&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<style>
+html,body{margin:0}
+[hidden]{display:none!important}
+img{max-width:100%}
+:root{
+  --bg:#101112; --panel:#18191b; --panel-2:#1f2123; --line:#2c2e31;
+  --red:#ff3b3b; --red-dim:#7a2323; --yellow:#f5c94a; --green:#3ddc84;
+  --text:#eceff1; --dim:#8b9096; --dim-2:#54585c;
+  --font-display:'Titillium Web',system-ui,sans-serif;
+  --font-body:'Titillium Web',system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--bg); color:var(--text); font-family:var(--font-body);
+  display:flex; align-items:center; justify-content:center;
+  padding:16px; padding-block:24px; overflow:hidden;
+}
+#console{
+  position:relative; width:min(920px,100%); aspect-ratio:4/3; max-height:calc(100vh - 48px);
+  background:var(--panel); border:2px solid var(--line); border-radius:10px;
+  box-shadow:0 0 0 1px #000, inset 0 0 40px rgba(0,0,0,.5), 0 20px 60px -20px rgba(0,0,0,.7);
+  overflow:hidden;
+}
+#bezelLabel{
+  position:absolute; top:8px; left:14px; z-index:5; font-family:var(--font-mono); font-size:10px;
+  letter-spacing:.12em; color:var(--dim-2); pointer-events:none; text-transform:uppercase;
+}
+#bezelLabel b{color:var(--red-dim)}
+canvas{display:block; width:100%; height:100%}
+.screen{
+  position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; gap:14px; padding:28px 20px; text-align:center;
+  animation:powerUp .5s ease both;
+}
+@keyframes powerUp{ from{opacity:0; filter:brightness(0.3)} to{opacity:1; filter:brightness(1)} }
+.eyebrow{ font-family:var(--font-mono); font-size:11px; letter-spacing:.18em; color:var(--dim); text-transform:uppercase; }
+h1.title{
+  font-family:var(--font-display); font-weight:900; font-size:clamp(28px,7vw,44px);
+  margin:0; color:var(--red); text-wrap:balance; letter-spacing:.02em;
+  text-shadow:0 0 18px rgba(255,59,59,.35);
+}
+.sub{color:var(--dim); font-size:13px; max-width:46ch; margin:0}
+.panel{ background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:10px; width:min(440px,92%); }
+.rows{display:flex; flex-direction:column; gap:2px}
+.row{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 12px; border-radius:5px; font-size:14px; color:var(--dim); border:1px solid transparent; }
+.row.sel{ background:rgba(255,59,59,.1); color:var(--text); border-color:var(--red-dim); }
+.row .val{ font-family:var(--font-mono); color:var(--dim); font-size:13px; }
+.row.sel .val{ color:var(--red) }
+.hint{ font-family:var(--font-mono); font-size:11px; color:var(--dim-2); letter-spacing:.04em; }
+.hint b{color:var(--dim)}
+#hud{ position:absolute; inset:0; pointer-events:none; font-family:var(--font-mono); }
+#lapLine{ position:absolute; top:6px; left:6px; font-size:12px; color:var(--yellow); text-shadow:0 0 6px #000; }
+#lapLine .dim{color:var(--dim)}
+#timeBar{
+  position:absolute; top:6px; right:8px; text-align:right; font-size:12px; color:var(--text); text-shadow:0 0 6px #000;
+}
+#timeBar .big{ font-size:20px; color:var(--yellow); font-variant-numeric:tabular-nums; }
+#speedTag{
+  position:absolute; bottom:8px; right:10px; font-size:22px; color:var(--red); text-shadow:0 0 6px #000;
+  font-variant-numeric:tabular-nums;
+}
+#speedTag .u{font-size:10px;color:var(--dim)}
+#offTrack{ position:absolute; bottom:36px; left:50%; transform:translateX(-50%); color:var(--yellow); font-weight:700; font-size:12px; letter-spacing:.1em; text-shadow:0 0 6px #000; }
+#pauseTag{
+  position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  background:var(--panel); border:1px solid var(--red-dim); border-radius:8px; padding:14px 22px; text-align:center; font-family:var(--font-display); font-weight:700;
+}
+#touchpad{ position:absolute; inset:0; display:none; pointer-events:none; }
+.tbtn{
+  position:absolute; pointer-events:auto; width:50px; height:50px; border-radius:8px;
+  background:rgba(20,20,20,.55); border:1px solid var(--line); color:var(--red);
+  font-family:var(--font-mono); font-size:18px; display:flex; align-items:center; justify-content:center;
+  user-select:none; -webkit-user-select:none;
+}
+@media (pointer: coarse){ #touchpad{ display:block } }
+@media (max-width:480px){ h1.title{font-size:26px} .panel{padding:8px} .row{font-size:12px; padding:7px 9px} }
+</style>
+</head>
+<body>
+<div id="console">
+  <div id="bezelLabel">CARDPUTER XL // <b>KART RACER</b></div>
+  <canvas id="scene"></canvas>
+
+  <section class="screen" id="screenTitle">
+    <div class="eyebrow">Vector Time Trial</div>
+    <h1 class="title">KART RACER</h1>
+    <p class="sub">Three procedural circuits. No opponents, just the clock, the kerbs, and your own best lap.</p>
+    <p class="hint">Press <b>ENTER</b> to start engines</p>
+  </section>
+
+  <section class="screen" id="screenTrack" hidden>
+    <div class="eyebrow">Select Circuit</div>
+    <div class="panel"><div class="rows" id="trackRows"></div></div>
+    <p class="hint"><b>&uarr;&darr;</b> select &nbsp; <b>ENTER</b> race</p>
+  </section>
+
+  <section class="screen" id="screenResults" hidden>
+    <div class="eyebrow" id="resultHead">RACE COMPLETE</div>
+    <h1 class="title" style="font-size:clamp(22px,6vw,32px)">FINISH</h1>
+    <div class="panel" style="width:min(300px,90%)">
+      <div class="row"><span>Best lap this run</span><span class="val" id="resLap">0.0s</span></div>
+      <div class="row"><span>All-time best</span><span class="val" id="resBest">0.0s</span></div>
+    </div>
+    <p class="hint">Press <b>ENTER</b> to race again &nbsp; <b>ESC</b> menu</p>
+  </section>
+
+  <div id="hud" hidden>
+    <div id="lapLine">LAP <span id="lapNum">1</span>/<span id="lapTotal">3</span> &nbsp;<span class="dim">BEST <span id="bestLap">--</span></span></div>
+    <div id="timeBar"><div class="dim">CURRENT LAP</div><div class="big" id="curLap">0.0</div></div>
+    <div id="speedTag"><span id="speedNum">0</span><span class="u">KPH</span></div>
+    <div id="offTrack" hidden>OFF TRACK</div>
+    <div id="pauseTag" hidden>PAUSED<div class="hint">ESC resume &nbsp; H menu</div></div>
+  </div>
+
+  <div id="touchpad">
+    <div class="tbtn" id="tbUp" style="left:50%;bottom:110px;transform:translateX(-50%)">&uarr;</div>
+    <div class="tbtn" id="tbDown" style="left:50%;bottom:56px;transform:translateX(-50%)">&darr;</div>
+    <div class="tbtn" id="tbLeft" style="left:calc(50% - 60px);bottom:82px">&larr;</div>
+    <div class="tbtn" id="tbRight" style="left:calc(50% + 60px);bottom:82px">&rarr;</div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+const V=(x,y,z)=>({x,y,z});
+const add=(a,b)=>V(a.x+b.x,a.y+b.y,a.z+b.z);
+const sub=(a,b)=>V(a.x-b.x,a.y-b.y,a.z-b.z);
+const scl=(a,s)=>V(a.x*s,a.y*s,a.z*s);
+const dot=(a,b)=>a.x*b.x+a.y*b.y+a.z*b.z;
+const cross=(a,b)=>V(a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x);
+const len=(a)=>Math.sqrt(dot(a,a));
+const norm=(a)=>{const l=len(a); return l<1e-6?V(0,0,0):scl(a,1/l);};
+const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+const DEG=Math.PI/180;
+
+function makeCam(){ return {pos:V(0,0,0), right:V(1,0,0), up:V(0,1,0), fwd:V(0,0,1), fovY:70}; }
+const NEAR_Z=0.15;
+function project(cam,w,cw,ch){
+  const rel=sub(w,cam.pos); const cz=dot(rel,cam.fwd); if(cz<NEAR_Z) return null;
+  const cx=dot(rel,cam.right), cy=dot(rel,cam.up);
+  const f=(ch*0.5)/Math.tan(cam.fovY*DEG*0.5);
+  return {x:cw*0.5+cx*f/cz, y:ch*0.5-cy*f/cz};
+}
+function drawSeg(ctx,cam,a,b,cw,ch,col,width){
+  const CLIP=0.16;
+  let za=dot(sub(a,cam.pos),cam.fwd), zb=dot(sub(b,cam.pos),cam.fwd);
+  if(za<CLIP && zb<CLIP) return;
+  let pa=a, pb=b;
+  if(za<CLIP) pa=add(a, scl(sub(b,a), clamp((CLIP-za)/(zb-za),0,1)));
+  else if(zb<CLIP) pb=add(b, scl(sub(a,b), clamp((CLIP-zb)/(za-zb),0,1)));
+  const sa=project(cam,pa,cw,ch), sb=project(cam,pb,cw,ch); if(!sa||!sb) return;
+  const M=2000; if(Math.abs(sa.x)>M||Math.abs(sa.y)>M||Math.abs(sb.x)>M||Math.abs(sb.y)>M) return;
+  ctx.strokeStyle=col; ctx.lineWidth=width||1;
+  ctx.beginPath(); ctx.moveTo(sa.x,sa.y); ctx.lineTo(sb.x,sb.y); ctx.stroke();
+}
+function clipFillTri(ctx,cam,a,b,c,cw,ch,col){
+  const NEARC=2.2;
+  const verts=[a,b,c]; const cz=verts.map(v=>dot(sub(v,cam.pos),cam.fwd)); const out=[];
+  for(let i=0;i<3;i++){
+    const cur=verts[i], nxt=verts[(i+1)%3]; const cz0=cz[i], cz1=cz[(i+1)%3];
+    const in0=cz0>=NEARC, in1=cz1>=NEARC;
+    if(in0) out.push(cur);
+    if(in0!==in1) out.push(add(cur, scl(sub(nxt,cur), clamp((NEARC-cz0)/(cz1-cz0),0,1))));
+  }
+  if(out.length<3) return;
+  const pts=out.map(p=>project(cam,p,cw,ch)); if(pts.some(p=>!p)) return;
+  const M=2000; if(pts.some(p=>Math.abs(p.x)>M||Math.abs(p.y)>M)) return;
+  ctx.fillStyle=col;
+  for(let i=1;i+1<pts.length;i++){ ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y); ctx.lineTo(pts[i].x,pts[i].y); ctx.lineTo(pts[i+1].x,pts[i+1].y); ctx.closePath(); ctx.fill(); }
+}
+function fillQuad(ctx,cam,a,b,c,d,cw,ch,col){ clipFillTri(ctx,cam,a,b,c,cw,ch,col); clipFillTri(ctx,cam,a,c,d,cw,ch,col); }
+
+// ============================== Tracks =====================================
+const TRACK_N=72;
+const TRACK_DEFS=[
+  {name:"OVAL PARK", R:130, wob:0.16, k:2, width:15, laps:3},
+  {name:"SERPENTINE", R:150, wob:0.30, k:5, width:12, laps:3},
+  {name:"PETAL CIRCUIT", R:110, wob:0.24, k:3, width:13, laps:4},
+];
+function buildTrack(idx){
+  const p=TRACK_DEFS[idx];
+  const center=[];
+  for(let i=0;i<TRACK_N;i++){
+    const ang=(2*Math.PI*i)/TRACK_N;
+    const r=p.R*(1+p.wob*Math.cos(ang*p.k));
+    center.push(V(r*Math.cos(ang),0,r*Math.sin(ang)));
+  }
+  const left=[],right=[],tangents=[];
+  for(let i=0;i<TRACK_N;i++){
+    const prev=center[(i-1+TRACK_N)%TRACK_N], next=center[(i+1)%TRACK_N];
+    const tangent=norm(sub(next,prev)); tangents.push(tangent);
+    const perp=norm(cross(tangent,V(0,1,0)));
+    left.push(sub(center[i],scl(perp,p.width/2)));
+    right.push(add(center[i],scl(perp,p.width/2)));
+  }
+  return {def:p,center,left,right,tangents};
+}
+let TRACK=buildTrack(0);
+
+// ============================== Kart model ==================================
+function drawKart(ctx,cam,cw,ch,pos,heading,steer,col){
+  const fwd=V(Math.sin(heading),0,Math.cos(heading));
+  const right=norm(cross(fwd,V(0,1,0)));
+  const up=V(0,1,0);
+  const seg=(a,b,c)=>drawSeg(ctx,cam,a,b,cw,ch,c,1.4);
+  const bodyFront=add(pos,scl(fwd,1.5)), bodyBack=sub(pos,scl(fwd,1.3));
+  const half=0.85, h=0.5;
+  const flb=add(add(bodyBack,scl(right,-half)),V(0,h,0)), frb=add(add(bodyBack,scl(right,half)),V(0,h,0));
+  const flf=add(add(bodyFront,scl(right,-half)),V(0,h,0)), frf=add(add(bodyFront,scl(right,half)),V(0,h,0));
+  const base=V(0,0.15,0);
+  fillQuad(ctx,cam,add(flb,base),add(frb,base),add(add(bodyFront,scl(right,half)),base),add(add(bodyFront,scl(right,-half)),base),cw,ch,col);
+  seg(add(flb,base),flb,"#232527"); seg(add(frb,base),frb,"#232527");
+  seg(flb,frb,"#eceff1"); seg(flb,flf,"#eceff1"); seg(frb,frf,"#eceff1"); seg(flf,frf,"#eceff1");
+  seg(add(flf,V(0,0,0)),add(bodyFront,V(0,h+0.3,0)),"#eceff1"); seg(add(frf,V(0,0,0)),add(bodyFront,V(0,h+0.3,0)),"#eceff1");
+  const wheelFwd=Math.sin(steer*0.4), wheelSide=Math.cos(steer*0.4);
+  const wDirF=norm(V(fwd.x*wheelSide+right.x*wheelFwd,0,fwd.z*wheelSide+right.z*wheelFwd));
+  [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([sx,sz])=>{
+    const wp=add(add(pos,scl(right,sx*(half+0.15))),scl(fwd,sz*1.3));
+    const wDir = sz>0 ? wDirF : fwd;
+    const wr=norm(cross(wDir,V(0,1,0)));
+    const c0=add(wp,V(0,0.32,0));
+    seg(sub(c0,scl(wDir,0.25)),add(c0,scl(wDir,0.25)),"#111213");
+    seg(add(c0,scl(wr,0.12)),sub(c0,scl(wr,0.12)),"#111213");
+  });
+}
+
+// ============================== State =======================================
+const S={
+  stage:"title", trackSel:0, kart:{pos:V(0,0,0),heading:0,speed:0}, steerVis:0,
+  lap:0, lapStart:0, curLapMs:0, bestLapMs:Infinity, allTimeBest:Infinity,
+  lastCenterIdx:0, offTrack:false, paused:false, lastMs:0,
+};
+function bestKeyFor(idx){ return "kartracer_best_"+idx; }
+function loadBest(idx){ const v=localStorage.getItem(bestKeyFor(idx)); return v?parseFloat(v):Infinity; }
+function saveBest(idx,ms){ localStorage.setItem(bestKeyFor(idx),String(ms)); }
+
+const canvas=document.getElementById("scene");
+const ctx=canvas.getContext("2d");
+function resize(){ const r=canvas.getBoundingClientRect(); canvas.width=Math.round(r.width); canvas.height=Math.round(r.height); }
+window.addEventListener("resize",resize);
+
+function nearestIdx(pos){
+  let best=0, bestD=Infinity;
+  for(let i=0;i<TRACK.center.length;i++){ const d=dot(sub(pos,TRACK.center[i]),sub(pos,TRACK.center[i])); if(d<bestD){bestD=d;best=i;} }
+  return {idx:best,distSq:bestD};
+}
+function fmtTime(ms){ if(!isFinite(ms)) return "--"; return (ms/1000).toFixed(2)+"s"; }
+
+function resetRace(){
+  TRACK=buildTrack(S.trackSel);
+  S.kart={pos:{...TRACK.center[0]},heading:Math.atan2(TRACK.tangents[0].x,TRACK.tangents[0].z),speed:0};
+  S.lap=1; S.lapStart=performance.now(); S.curLapMs=0; S.bestLapMs=Infinity;
+  S.allTimeBest=loadBest(S.trackSel); S.lastCenterIdx=0; S.offTrack=false;
+  document.getElementById("lapTotal").textContent=TRACK.def.laps;
+  document.getElementById("bestLap").textContent=fmtTime(S.allTimeBest);
+}
+
+function drawGround(cw,ch){
+  const g=ctx.createLinearGradient(0,0,0,ch);
+  g.addColorStop(0,"#0c2a1c"); g.addColorStop(0.45,"#123a24"); g.addColorStop(0.451,"#123a24"); g.addColorStop(1,"#0e2e1c");
+  ctx.fillStyle=g; ctx.fillRect(0,0,cw,ch);
+}
+function drawTrack(cam,cw,ch){
+  const n=TRACK.center.length;
+  for(let i=0;i<n;i++){
+    const j=(i+1)%n;
+    const alt=i&1;
+    fillQuad(ctx,cam,TRACK.left[i],TRACK.left[j],TRACK.right[j],TRACK.right[i],cw,ch, alt?"#3a3c3f":"#333537");
+    const kerb = alt? "#ff3b3b":"#eceff1";
+    drawSeg(ctx,cam,TRACK.left[i],TRACK.left[j],cw,ch,kerb,2.5);
+    drawSeg(ctx,cam,TRACK.right[i],TRACK.right[j],cw,ch,kerb,2.5);
+  }
+  // start/finish gate
+  const gateH=4.5;
+  const a=TRACK.left[0], b=TRACK.right[0];
+  drawSeg(ctx,cam,a,add(a,V(0,gateH,0)),cw,ch,"#f5c94a",2.5);
+  drawSeg(ctx,cam,b,add(b,V(0,gateH,0)),cw,ch,"#f5c94a",2.5);
+  drawSeg(ctx,cam,add(a,V(0,gateH,0)),add(b,V(0,gateH,0)),cw,ch,"#f5c94a",2.5);
+}
+
+const keys=new Set();
+window.addEventListener("keydown",e=>{
+  keys.add(e.key);
+  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.key)) e.preventDefault();
+  handleMenuKey(e.key);
+});
+window.addEventListener("keyup",e=>keys.delete(e.key));
+const isDown=(k)=>keys.has(k);
+
+function stepKart(dt){
+  let throttle=0, steer=0;
+  if(isDown("ArrowUp")) throttle=1; else if(isDown("ArrowDown")) throttle=-1;
+  if(isDown("ArrowLeft")) steer=-1; else if(isDown("ArrowRight")) steer=1;
+  const maxSpeed=44, accel=26, brake=34, drag=14;
+  const k=S.kart;
+  if(throttle>0) k.speed=Math.min(maxSpeed,k.speed+accel*dt);
+  else if(throttle<0) k.speed=Math.max(-16,k.speed-brake*dt);
+  else k.speed = k.speed>0? Math.max(0,k.speed-drag*dt) : Math.min(0,k.speed+drag*dt);
+  const speedFrac=clamp(Math.abs(k.speed)/maxSpeed,0.25,1);
+  const turnRate=steer*speedFrac*2.1*(k.speed<0?-1:1);
+  k.heading+=turnRate*dt;
+  S.steerVis += (steer*0.6 - S.steerVis)*Math.min(1,dt*10);
+  const fwd=V(Math.sin(k.heading),0,Math.cos(k.heading));
+  const {idx,distSq}=nearestIdx(k.pos);
+  const offNow = distSq > (TRACK.def.width*0.62)*(TRACK.def.width*0.62);
+  S.offTrack=offNow;
+  const speedMul = offNow? 0.45:1.0;
+  k.pos=add(k.pos,scl(fwd,k.speed*speedMul*dt));
+
+  // lap detection: crossing from the last ~15% of the loop back to the first ~10%
+  const n=TRACK.center.length;
+  const wasNearEnd = S.lastCenterIdx > n*0.85;
+  const nowNearStart = idx < n*0.10;
+  if(wasNearEnd && nowNearStart && k.speed>0){
+    const lapMs=performance.now()-S.lapStart;
+    S.lapStart=performance.now();
+    if(lapMs<S.bestLapMs) S.bestLapMs=lapMs;
+    if(lapMs<S.allTimeBest){ S.allTimeBest=lapMs; saveBest(S.trackSel,lapMs); }
+    document.getElementById("bestLap").textContent=fmtTime(S.allTimeBest);
+    S.lap++;
+    if(S.lap>TRACK.def.laps){ finishRace(); return; }
+  }
+  S.lastCenterIdx=idx;
+  S.curLapMs=performance.now()-S.lapStart;
+}
+function finishRace(){
+  S.stage="results";
+  document.getElementById("resLap").textContent=fmtTime(S.bestLapMs);
+  document.getElementById("resBest").textContent=fmtTime(S.allTimeBest);
+  showScreen("screenResults");
+}
+
+// ============================== Menus =======================================
+function renderTrackRows(){
+  const el=document.getElementById("trackRows"); el.innerHTML="";
+  TRACK_DEFS.forEach((t,i)=>{
+    const row=document.createElement("div"); row.className="row"+(i===S.trackSel?" sel":"");
+    const best=loadBest(i);
+    row.innerHTML=`<span>${t.name} — ${t.laps} LAPS</span><span class="val">${fmtTime(best)}</span>`;
+    el.appendChild(row);
+  });
+}
+function showScreen(id){
+  document.querySelectorAll(".screen").forEach(s=>s.hidden=true);
+  document.getElementById("hud").hidden=true;
+  if(id) document.getElementById(id).hidden=false;
+}
+function handleMenuKey(key){
+  if(S.stage==="title"){ if(key==="Enter"){ S.stage="track"; showScreen("screenTrack"); renderTrackRows(); } return; }
+  if(S.stage==="track"){
+    if(key==="ArrowUp"){ S.trackSel=(S.trackSel+TRACK_DEFS.length-1)%TRACK_DEFS.length; renderTrackRows(); }
+    else if(key==="ArrowDown"){ S.trackSel=(S.trackSel+1)%TRACK_DEFS.length; renderTrackRows(); }
+    else if(key==="Enter"){ startRace(); }
+    return;
+  }
+  if(S.stage==="racing"){
+    if(key==="Escape"){ S.paused=!S.paused; document.getElementById("pauseTag").hidden=!S.paused; }
+    if(key==="h"||key==="H"){ S.stage="track"; showScreen("screenTrack"); renderTrackRows(); S.paused=false; document.getElementById("pauseTag").hidden=true; }
+    return;
+  }
+  if(S.stage==="results"){
+    if(key==="Enter") startRace();
+    else if(key==="Escape"){ S.stage="track"; showScreen("screenTrack"); renderTrackRows(); }
+    return;
+  }
+}
+function startRace(){
+  resetRace(); S.stage="racing"; showScreen(null); document.getElementById("hud").hidden=false;
+  S.lastMs=performance.now();
+}
+
+function updateHud(){
+  document.getElementById("lapNum").textContent=Math.min(S.lap,TRACK.def.laps);
+  document.getElementById("curLap").textContent=(S.curLapMs/1000).toFixed(1);
+  document.getElementById("speedNum").textContent=Math.round(Math.abs(S.kart.speed)*3.2);
+  document.getElementById("offTrack").hidden=!S.offTrack;
+}
+function frame(now){
+  requestAnimationFrame(frame);
+  const cw=canvas.width, ch=canvas.height;
+  if(S.stage!=="racing"){ S.lastMs=now; return; }
+  const dt=clamp((now-S.lastMs)/1000,0,0.1); S.lastMs=now;
+  if(!S.paused) stepKart(dt);
+  const k=S.kart, fwd=V(Math.sin(k.heading),0,Math.cos(k.heading));
+  const cam=makeCam();
+  cam.pos=sub(add(k.pos,V(0,2.3,0)),scl(fwd,6.5));
+  cam.fwd=norm(sub(add(k.pos,scl(fwd,6)),cam.pos));
+  cam.right=norm(cross(cam.fwd,V(0,1,0))); cam.up=cross(cam.right,cam.fwd); cam.fovY=72;
+  drawGround(cw,ch);
+  drawTrack(cam,cw,ch);
+  drawKart(ctx,cam,cw,ch,k.pos,k.heading,S.steerVis,"#ff3b3b");
+  updateHud();
+}
+
+function bindHold(id,onDown,onUp){
+  const el=document.getElementById(id);
+  const start=(e)=>{ e.preventDefault(); onDown(); }; const end=(e)=>{ e.preventDefault(); onUp&&onUp(); };
+  el.addEventListener("touchstart",start,{passive:false}); el.addEventListener("touchend",end);
+  el.addEventListener("mousedown",start); el.addEventListener("mouseup",end); el.addEventListener("mouseleave",end);
+}
+bindHold("tbUp",()=>keys.add("ArrowUp"),()=>keys.delete("ArrowUp"));
+bindHold("tbDown",()=>keys.add("ArrowDown"),()=>keys.delete("ArrowDown"));
+bindHold("tbLeft",()=>keys.add("ArrowLeft"),()=>keys.delete("ArrowLeft"));
+bindHold("tbRight",()=>keys.add("ArrowRight"),()=>keys.delete("ArrowRight"));
+
+function boot(){ resize(); showScreen("screenTitle"); requestAnimationFrame(frame); }
+if(window.claude?.hot?.ready) window.claude.hot.ready(boot); else boot();
+})();
+</script>
+</body>
+</html>
