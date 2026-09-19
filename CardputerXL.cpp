@@ -97,6 +97,7 @@
 #include <vector>  // TrikiFrameParser's re-sync buffer, see "---- TRIKI SCOPE"
 #include "cardc_documentation.h"
 #include "lock_wallpaper.h"
+#include "sky_menu_music.h"
 
 #define TFT_CS 5
 // A dedicated reset wire makes the external ILI9341 initialise reliably.
@@ -4213,35 +4214,27 @@ void drawSkyPilotHubOptions() {
   footer(";/. SELECT  ,/ ADJUST  ENTER TOGGLE/START  FN BACK");
 }
 
-// A short looping melody for the HOME wizard, on its own speaker channel
-// (4 - Kart Racer's melody/beep/engine use 0/1/2, Sky Pilot's own flight
-// engine drone uses 3) so it never fights either of those, and so a UI
-// click's one-shot tone (playEnterSound() etc, channel 0 by default)
-// doesn't get cut off by it or vice versa. Same "note index + end
-// timestamp" loop as kartMusicUpdate() above.
-struct SkyMenuNote { float freq; uint16_t dur; };
-static const SkyMenuNote skyMenuMelody[] = {
-  {196.00f, 180}, {246.94f, 180}, {293.66f, 180}, {392.00f, 180},
-  {349.23f, 180}, {392.00f, 180}, {440.00f, 180}, {392.00f, 180},
-  {196.00f, 180}, {246.94f, 180}, {293.66f, 180}, {392.00f, 180},
-  {466.16f, 180}, {440.00f, 180}, {392.00f, 180}, {293.66f, 180},
-};
-static const int SKY_MENU_NUM_NOTES = sizeof(skyMenuMelody) / sizeof(skyMenuMelody[0]);
-int skyMenuNoteIndex = -1;
-unsigned long skyMenuNoteEndMs = 0;
-bool skyMenuMusicWasPlaying = false;
+// An 8-second loop from the user's own chiptune collection ("shock therapy
+// 23", trimmed past its intro) for the HOME wizard, on its own speaker
+// channel (4 - Kart Racer's melody/beep/engine use 0/1/2, Sky Pilot's own
+// flight engine drone uses 3) so it never fights either of those, and so a
+// UI click's one-shot tone (playEnterSound() etc, channel 0 by default)
+// doesn't get cut off by it or vice versa. Stored as headerless 16kHz mono
+// 16-bit PCM (sky_menu_music.h) rather than a WAV container - playRaw()
+// takes the raw samples directly, sidestepping playWav()'s stricter header
+// parsing. repeat=0 means "loop forever" (M5Unified's own convention, see
+// Speaker_Class.cpp's _play_raw) - the driver handles the actual seamless
+// looping in its own audio task, so this only needs to kick it off once,
+// not re-trigger it every tick like a procedural note sequence would.
+bool skyMenuMusicPlaying = false;
 void skyMenuMusicStop() {
-  if (skyMenuMusicWasPlaying) { M5Cardputer.Speaker.stop(4); skyMenuNoteIndex = -1; skyMenuMusicWasPlaying = false; }
+  if (skyMenuMusicPlaying) { M5Cardputer.Speaker.stop(4); skyMenuMusicPlaying = false; }
 }
 void skyMenuMusicUpdate() {
   if (!volumeLevel) { skyMenuMusicStop(); return; }
-  unsigned long now = millis();
-  if (!skyMenuMusicWasPlaying || now >= skyMenuNoteEndMs) {
-    skyMenuNoteIndex = (skyMenuNoteIndex + 1) % SKY_MENU_NUM_NOTES;
-    M5Cardputer.Speaker.tone(skyMenuMelody[skyMenuNoteIndex].freq, skyMenuMelody[skyMenuNoteIndex].dur, 4, true);
-    skyMenuNoteEndMs = now + skyMenuMelody[skyMenuNoteIndex].dur;
-  }
-  skyMenuMusicWasPlaying = true;
+  if (skyMenuMusicPlaying) return;
+  M5Cardputer.Speaker.playRaw(reinterpret_cast<const int16_t*>(SKY_MENU_MUSIC_PCM), SKY_MENU_MUSIC_PCM_LEN / 2, 16000, false, 0, 4, true);
+  skyMenuMusicPlaying = true;
 }
 
 // Continuous driver for the whole HOME wizard (all 3 stages) - bypasses
