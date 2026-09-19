@@ -302,7 +302,8 @@ void stepKartRace();
 void drawSkyPilotHub();
 void startSkyPilotFlight(int modeSelected);
 void stepSkyPilotFlight();
-void stepSkyPilotHubPreview();
+void stepSkyPilotHub();
+void skyMenuMusicStop();
 void autoConnectWifi();
 void miniCamJoinNetwork();
 void miniCamLeaveNetwork();
@@ -2831,6 +2832,7 @@ void kartMusicInit() {
   M5Cardputer.Speaker.setChannelVolume(0, 160);
   M5Cardputer.Speaker.setChannelVolume(1, 255);
   M5Cardputer.Speaker.setChannelVolume(2, 200);
+  M5Cardputer.Speaker.setChannelVolume(4, 130);  // Sky Pilot's HOME wizard menu music - quieter, it's meant as background
 }
 void kartMusicUpdate(bool playing) {
   if (!kartMusicOn || !playing) {
@@ -3329,6 +3331,7 @@ int skyTargetAirport = -1;   // airport index for AIRPORT TO AIRPORT; -1 = free 
 int skyStartAirport = 0;     // departure airport for AIRPORT TO AIRPORT (randomized each flight)
 bool skyMissionSuccess = false;
 bool skyFirstPerson = false;   // 'v' during flight, like Kart Racer's own toggle
+float skyFovOffset = 0;        // i/o held during flight, added to each view's base fovY
 bool skyEngineSoundEnabled = true;  // 'm' on the HOME screen, like Kart's M/F
 // 'i' on the HOME screen: tilt the Cardputer itself for pitch/bank instead
 // of ;/./,//, using the ADV's built-in IMU (accelerometer) as a gravity-
@@ -4002,6 +4005,7 @@ void skyReadImuTilt(float& pitchAngle, float& bankAngle) {
 // 2=airport to airport (a random distinct start/destination pair from the
 // airport pool, picked fresh each flight).
 void startSkyPilotFlight(int modeSelected) {
+  skyMenuMusicStop();  // otherwise it loops forever on its channel - nothing else stops it once skyState leaves SKY_HOME
   skyLoadBest();
   skyPlane = SkyPlane();
   skyBankRateCur = skyPitchRateCur = 0;
@@ -4072,10 +4076,37 @@ void startSkyPilotFlight(int modeSelected) {
   skyState = SKY_FLYING;
 }
 
+// A slow drifting starfield behind all three HOME wizard stages (MODE,
+// OPTIONS - PLANE already has its own 3D backdrop) - part of the general
+// "cooler, game-esque menu" pass alongside the looping menu music, the
+// pulsing selected-row glow, and the stage-transition flash. Confined to
+// the content band (never the header/footer strips) and dim enough to
+// stay clearly behind the row text.
+constexpr int SKY_HUB_STAR_COUNT = 26;
+struct SkyHubStar { float x, y, speed; };
+SkyHubStar skyHubStars[SKY_HUB_STAR_COUNT];
+bool skyHubStarsReady = false;
+void skyInitHubStars() {
+  for (int i = 0; i < SKY_HUB_STAR_COUNT; i++) {
+    skyHubStars[i].x = random(0, W);
+    skyHubStars[i].y = HEADER_H + random(0, H - HEADER_H - FOOTER_H);
+    skyHubStars[i].speed = 18.0f + random(0, 35);
+  }
+  skyHubStarsReady = true;
+}
+void skyDrawHubStars(float dt) {
+  if (!skyHubStarsReady) skyInitHubStars();
+  for (int i = 0; i < SKY_HUB_STAR_COUNT; i++) {
+    SkyHubStar& s = skyHubStars[i];
+    s.x -= s.speed * dt;
+    if (s.x < 0) { s.x = W; s.y = HEADER_H + random(0, H - HEADER_H - FOOTER_H); }
+    kartCanvas.drawPixel((int)s.x, (int)s.y, ILI9341_DARKGREY);
+  }
+}
 // A turntable-style showcase for the PLANE stage of the HOME wizard - the
 // camera position/target are fixed in world space (unlike the flight's own
-// moving camera), while skyPreviewSpin (advanced by stepSkyPilotHubPreview()
-// each tick the stage is open) rotates the MODEL's own heading. Rotating the
+// moving camera), while skyPreviewSpin (advanced by stepSkyPilotHub() each
+// tick the stage is open) rotates the MODEL's own heading. Rotating the
 // camera's offset together with the model's heading (the original approach)
 // made the whole rig turn as one rigid unit, which cancels out visually -
 // the model never appeared to spin relative to the screen at all.
@@ -4110,39 +4141,30 @@ void skyDrawPlanePreviewScene() {
   kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_NAVY);
   kartCanvas.setCursor(10, CONTENT_Y + 28); kartCanvas.print(picked.special);
 }
-// Continuous driver for the PLANE stage's rotation - bypasses redrawNeeded
-// like Kart Racer/Sky Pilot's own live view do, self-gated on actually
-// being on that stage so it's a no-op everywhere else. Unlike the one-time
-// full draw (drawSkyPilotHubPlane(), used on stage entry/plane change),
-// this blits only the content band between the header and footer strips
-// and never touches header()/footer() - repainting those every animation
-// tick was what caused the visible flashing.
-unsigned long skyPreviewLastMs = 0;
-void stepSkyPilotHubPreview() {
-  if (page != GAMEHUB || gameMode != 8 || skyState != SKY_HOME || skyHubStage != SkyHubStage::PLANE) { skyPreviewLastMs = 0; return; }
-  if (quickMenuOpen) return;
-  unsigned long now = millis();
-  if (skyPreviewLastMs == 0) skyPreviewLastMs = now;
-  float dt = (now - skyPreviewLastMs) / 1000.0f;
-  skyPreviewLastMs = now;
-  if (dt > 0.1f) dt = 0.1f;
-  skyPreviewSpin += dt * 1.1f;
-  if (skyPreviewSpin > 6.2832f) skyPreviewSpin -= 6.2832f;
-  skyDrawPlanePreviewScene();
-  int bandH = H - HEADER_H - FOOTER_H;
-  tft.drawRGBBitmap(0, HEADER_H, kartCanvas.getBuffer() + (size_t)HEADER_H * kartCanvas.width(), kartCanvas.width(), bandH);
-}
-
-void drawSkyPilotHubMode() {
-  tft.fillScreen(ui.bg); header("GAMES / SKY PILOT / MODE (1 OF 3)");
+// MODE/OPTIONS content, drawn onto kartCanvas (not tft directly) so the
+// continuous stepper below can redraw them every tick - for the starfield
+// and the selected row's pulsing glow to actually read as animated - and
+// blit just the content band, the same "bake into one buffer, blit once"
+// rule the PLANE stage and every other continuously-animated view in this
+// file already follows. dt is 0 for the one-time full-draw callers below
+// (the stars just don't move for that single frame, which is invisible).
+void skyDrawModeScene(float dt) {
+  kartCanvas.fillScreen(ui.bg);
+  skyDrawHubStars(dt);
   static const char* modes[SKY_MODE_OPTION_COUNT] = {"FREE ROAM - RUNWAY START", "FREE ROAM - AIRBORNE START", "AIRPORT TO AIRPORT", "SPECTATE - WATCH BOTS"};
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 6); tft.print("BEST DISTANCE  " + String(skyBestScore));
+  kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(12, CONTENT_Y + 6); kartCanvas.print("BEST DISTANCE  " + String(skyBestScore));
   for (int i = 0; i < SKY_MODE_OPTION_COUNT; ++i) {
-    int y = CONTENT_Y + 32 + i * 24; bool sel = i == skyModeSelected; uint16_t bg = sel ? ui.selected : ui.bg;
-    if (sel) tft.fillRoundRect(8, y - 4, 304, 19, 4, bg);
-    tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  "); tft.print(modes[i]);
+    int y = CONTENT_Y + 32 + i * 24; bool sel = i == skyModeSelected;
+    uint16_t bg = sel ? lerpColor565(ui.bg, ui.selected, 0.6f + 0.4f * sinf(millis() / 180.0f)) : ui.bg;
+    if (sel) kartCanvas.fillRoundRect(8, y - 4, 304, 19, 4, bg);
+    kartCanvas.setTextColor(sel ? ui.text : ui.dim, bg); kartCanvas.setCursor(15, y); kartCanvas.print(sel ? "> " : "  "); kartCanvas.print(modes[i]);
   }
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 130); tft.print("Step 1 of 3 - how you start the flight.");
+  kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(12, CONTENT_Y + 130); kartCanvas.print("Step 1 of 3 - how you start the flight.");
+}
+void drawSkyPilotHubMode() {
+  skyDrawModeScene(0);
+  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  header("GAMES / SKY PILOT / MODE (1 OF 3)");
   footer(";/. SELECT     ENTER NEXT     FN GAMES");
 }
 
@@ -4150,9 +4172,9 @@ void drawSkyPilotHubMode() {
 // fills the whole canvas as a backdrop, so header()/footer() are called AFTER
 // blitting it - they simply paint over the strips they own, same trick the
 // flight HUD uses over the live scene. Used only for the one-time full paint
-// on stage entry/plane change - the continuous rotation animation
-// (stepSkyPilotHubPreview()) blits just the content band instead, since
-// repainting header()/footer() every animation tick visibly flickered.
+// on stage entry/plane change - the continuous stepper (stepSkyPilotHub())
+// blits just the content band instead, since repainting header()/footer()
+// every animation tick visibly flickered.
 void drawSkyPilotHubPlane() {
   skyDrawPlanePreviewScene();
   tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
@@ -4160,28 +4182,109 @@ void drawSkyPilotHubPlane() {
   footer(",/ CHANGE PLANE     ENTER NEXT     FN BACK");
 }
 
-void drawSkyPilotHubOptions() {
-  tft.fillScreen(ui.bg); header("GAMES / SKY PILOT / OPTIONS (3 OF 3)");
+void skyDrawOptionsScene(float dt) {
+  kartCanvas.fillScreen(ui.bg);
+  skyDrawHubStars(dt);
   static const char* optNames[SKY_OPTIONS_COUNT] = {"CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "START FLIGHT"};
   for (int i = 0; i < SKY_OPTIONS_COUNT; ++i) {
-    int y = CONTENT_Y + 14 + i * 24; bool sel = i == skyOptionsSelected; uint16_t bg = sel ? ui.selected : ui.bg;
-    if (sel) tft.fillRoundRect(8, y - 4, 304, 19, 4, bg);
-    tft.setTextColor(sel ? ui.text : ui.dim, bg); tft.setCursor(15, y); tft.print(sel ? "> " : "  ");
+    int y = CONTENT_Y + 14 + i * 24; bool sel = i == skyOptionsSelected;
+    uint16_t bg = sel ? lerpColor565(ui.bg, ui.selected, 0.6f + 0.4f * sinf(millis() / 180.0f)) : ui.bg;
+    if (sel) kartCanvas.fillRoundRect(8, y - 4, 304, 19, 4, bg);
+    kartCanvas.setTextColor(sel ? ui.text : ui.dim, bg); kartCanvas.setCursor(15, y); kartCanvas.print(sel ? "> " : "  ");
     if (i == 5) {
-      tft.setTextColor(sel ? ILI9341_GREEN : ui.dim, bg); tft.print("START FLIGHT");
+      kartCanvas.setTextColor(sel ? ILI9341_GREEN : ui.dim, bg); kartCanvas.print("START FLIGHT");
       continue;
     }
-    tft.print(optNames[i]);
+    kartCanvas.print(optNames[i]);
     String val = i == 0 ? (skyImuControlEnabled ? "TILT" : "KEYS")
                : i == 1 ? (skyEngineSoundEnabled ? "ON" : "OFF")
                : i == 2 ? (skyRadarEnabled ? "ON" : "OFF")
                : i == 3 ? (skyAiBotsEnabled ? "ON" : "OFF")
                         : String(skyBotCount);
-    tft.setTextColor(sel ? ui.text : ui.accent, bg); tft.setCursor(240, y); tft.print(val);
+    kartCanvas.setTextColor(sel ? ui.text : ui.accent, bg); kartCanvas.setCursor(240, y); kartCanvas.print(val);
   }
-  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 180);
-  tft.print("Controls hold their angle. MED/HIGH throttle to take off.");
+  kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(12, CONTENT_Y + 180);
+  kartCanvas.print("Controls hold their angle. MED/HIGH throttle to take off.");
+}
+void drawSkyPilotHubOptions() {
+  skyDrawOptionsScene(0);
+  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  header("GAMES / SKY PILOT / OPTIONS (3 OF 3)");
   footer(";/. SELECT  ,/ ADJUST  ENTER TOGGLE/START  FN BACK");
+}
+
+// A short looping melody for the HOME wizard, on its own speaker channel
+// (4 - Kart Racer's melody/beep/engine use 0/1/2, Sky Pilot's own flight
+// engine drone uses 3) so it never fights either of those, and so a UI
+// click's one-shot tone (playEnterSound() etc, channel 0 by default)
+// doesn't get cut off by it or vice versa. Same "note index + end
+// timestamp" loop as kartMusicUpdate() above.
+struct SkyMenuNote { float freq; uint16_t dur; };
+static const SkyMenuNote skyMenuMelody[] = {
+  {196.00f, 180}, {246.94f, 180}, {293.66f, 180}, {392.00f, 180},
+  {349.23f, 180}, {392.00f, 180}, {440.00f, 180}, {392.00f, 180},
+  {196.00f, 180}, {246.94f, 180}, {293.66f, 180}, {392.00f, 180},
+  {466.16f, 180}, {440.00f, 180}, {392.00f, 180}, {293.66f, 180},
+};
+static const int SKY_MENU_NUM_NOTES = sizeof(skyMenuMelody) / sizeof(skyMenuMelody[0]);
+int skyMenuNoteIndex = -1;
+unsigned long skyMenuNoteEndMs = 0;
+bool skyMenuMusicWasPlaying = false;
+void skyMenuMusicStop() {
+  if (skyMenuMusicWasPlaying) { M5Cardputer.Speaker.stop(4); skyMenuNoteIndex = -1; skyMenuMusicWasPlaying = false; }
+}
+void skyMenuMusicUpdate() {
+  if (!volumeLevel) { skyMenuMusicStop(); return; }
+  unsigned long now = millis();
+  if (!skyMenuMusicWasPlaying || now >= skyMenuNoteEndMs) {
+    skyMenuNoteIndex = (skyMenuNoteIndex + 1) % SKY_MENU_NUM_NOTES;
+    M5Cardputer.Speaker.tone(skyMenuMelody[skyMenuNoteIndex].freq, skyMenuMelody[skyMenuNoteIndex].dur, 4, true);
+    skyMenuNoteEndMs = now + skyMenuMelody[skyMenuNoteIndex].dur;
+  }
+  skyMenuMusicWasPlaying = true;
+}
+
+// Continuous driver for the whole HOME wizard (all 3 stages) - bypasses
+// redrawNeeded like Kart Racer/Sky Pilot's own live view do, self-gated on
+// actually sitting in SKY_HOME so it's a no-op everywhere else. Blits only
+// the content band between the header and footer strips and never touches
+// header()/footer() themselves (those are only painted once, by each
+// stage's own one-time full-draw function above, on entry/on a value
+// change) - repainting them every animation tick is what visibly flickered
+// before. Also drives the looping menu music.
+unsigned long skyHubLastMs = 0;
+void stepSkyPilotHub() {
+  if (page != GAMEHUB || gameMode != 8 || skyState != SKY_HOME) { skyHubLastMs = 0; return; }
+  if (quickMenuOpen) return;
+  unsigned long now = millis();
+  if (skyHubLastMs == 0) skyHubLastMs = now;
+  float dt = (now - skyHubLastMs) / 1000.0f;
+  skyHubLastMs = now;
+  if (dt > 0.1f) dt = 0.1f;
+  skyMenuMusicUpdate();
+  if (skyHubStage == SkyHubStage::PLANE) {
+    skyPreviewSpin += dt * 1.1f;
+    if (skyPreviewSpin > 6.2832f) skyPreviewSpin -= 6.2832f;
+    skyDrawPlanePreviewScene();
+  } else if (skyHubStage == SkyHubStage::OPTIONS) {
+    skyDrawOptionsScene(dt);
+  } else {
+    skyDrawModeScene(dt);
+  }
+  int bandH = H - HEADER_H - FOOTER_H;
+  tft.drawRGBBitmap(0, HEADER_H, kartCanvas.getBuffer() + (size_t)HEADER_H * kartCanvas.width(), kartCanvas.width(), bandH);
+}
+// A quick bright flash over the content band, timed with a light haptic
+// pulse - played right before switching stages (either direction) so
+// moving through the wizard reads as a deliberate "page turn" instead of
+// an instant cut. No tone here (playEnterSound()/playFunctionSound() at the
+// same call sites already own the default speaker channel; a second tone
+// here would just cut theirs off).
+void skyPlayStageTransition() {
+  vibrate(15);
+  tft.fillRect(0, HEADER_H, W, H - HEADER_H - FOOTER_H, ILI9341_WHITE);
+  M5Cardputer.update();
+  delay(50);
 }
 
 void drawSkyPilotHub() {
@@ -4277,6 +4380,11 @@ void stepSkyPilotFlight() {
   bool nowZ = M5Cardputer.Keyboard.isKeyPressed('z');
   bool edgeZ = nowZ && !prevZ; prevZ = nowZ;
   if (edgeZ && skyImuControlEnabled) { skyReadImuTilt(skyImuPitchZero, skyImuBankZero); playFunctionSound(); }
+  // I/O zoom the camera in/out (held, not a toggle) - applied as an offset
+  // on top of each view's own base FOV below, in both the piloted and
+  // spectate camera blocks.
+  if (M5Cardputer.Keyboard.isKeyPressed('i')) skyFovOffset = constrain(skyFovOffset - dt * 40.0f, -30.0f, 30.0f);
+  if (M5Cardputer.Keyboard.isKeyPressed('o')) skyFovOffset = constrain(skyFovOffset + dt * 40.0f, -30.0f, 30.0f);
 
   // Spectate: no piloting at all - just cycle which bot to watch, update the
   // bots, copy the watched bot's state into skyPlane (so the normal
@@ -4310,13 +4418,13 @@ void stepSkyPilotFlight() {
       cam.up = upLevel * cosf(skyPlane.bank) + rightLevel * sinf(skyPlane.bank);
       cam.position = skyPlane.pos + fwd * 0.6f + cam.up * 0.35f;
       cam.forward = fwd;
-      cam.fovY = 75.0f;
+      cam.fovY = 75.0f + skyFovOffset;
     } else {
       cam.position = skyPlane.pos - fwd * 6.0f + KVec3{0, 2.2f, 0};
       cam.forward = knormalized((skyPlane.pos + fwd * 8.0f) - cam.position);
       cam.right = knormalized(kcross(cam.forward, KVec3{0, 1, 0}));
       cam.up = kcross(cam.right, cam.forward);
-      cam.fovY = 68.0f;
+      cam.fovY = 68.0f + skyFovOffset;
     }
     skyRenderScene(cam, fwd, skyFirstPerson);
     skyRenderHud(false, false);
@@ -4532,13 +4640,13 @@ void stepSkyPilotFlight() {
     cam.up = upLevel * cosf(skyPlane.bank) + rightLevel * sinf(skyPlane.bank);
     cam.position = skyPlane.pos + fwd * 0.6f + cam.up * 0.35f;
     cam.forward = fwd;
-    cam.fovY = 75.0f;
+    cam.fovY = 75.0f + skyFovOffset;
   } else {
     cam.position = skyPlane.pos - fwd * 6.0f + KVec3{0, 2.2f, 0};
     cam.forward = knormalized((skyPlane.pos + fwd * 8.0f) - cam.position);
     cam.right = knormalized(kcross(cam.forward, KVec3{0, 1, 0}));
     cam.up = kcross(cam.right, cam.forward);
-    cam.fovY = 68.0f;
+    cam.fovY = 68.0f + skyFovOffset;
   }
 
   skyRenderScene(cam, fwd, skyFirstPerson);
@@ -7658,8 +7766,8 @@ void keyboard() {
   // running and must never leak a Fn press through to it.
   if (fn && !fnLast) {
     if (quickMenuOpen) { quickMenuOpen = false; playExitSound(); closeQuickMenuAnimated(); forceFullRedraw = true; redrawNeeded = true; }
-    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode == 8 && skyState == SKY_HOME && skyHubStage != SkyHubStage::MODE) { skyHubStage = skyHubStage == SkyHubStage::OPTIONS ? SkyHubStage::PLANE : SkyHubStage::MODE; }
-    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
+    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode == 8 && skyState == SKY_HOME && skyHubStage != SkyHubStage::MODE) { skyPlayStageTransition(); skyHubStage = skyHubStage == SkyHubStage::OPTIONS ? SkyHubStage::PLANE : SkyHubStage::MODE; }
+    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyMenuMusicStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
   // Opt toggles the same floating quick-launch overlay from any page, any
@@ -8046,13 +8154,13 @@ void keyboard() {
             if (c == ';') { skyModeSelected = (skyModeSelected + SKY_MODE_OPTION_COUNT - 1) % SKY_MODE_OPTION_COUNT; redrawNeeded = true; }
             else if (c == '.') { skyModeSelected = (skyModeSelected + 1) % SKY_MODE_OPTION_COUNT; redrawNeeded = true; }
           }
-          if (k.enter) { skyHubStage = SkyHubStage::PLANE; playEnterSound(); redrawNeeded = true; }
+          if (k.enter) { skyPlayStageTransition(); skyHubStage = SkyHubStage::PLANE; playEnterSound(); redrawNeeded = true; }
         } else if (skyHubStage == SkyHubStage::PLANE) {
           for (char c : k.word) {
             if (c == ',') { skyPlaneModelIndex = (skyPlaneModelIndex + SKY_PLANE_MODEL_COUNT - 1) % SKY_PLANE_MODEL_COUNT; redrawNeeded = true; }
             else if (c == '/') { skyPlaneModelIndex = (skyPlaneModelIndex + 1) % SKY_PLANE_MODEL_COUNT; redrawNeeded = true; }
           }
-          if (k.enter) { skyHubStage = SkyHubStage::OPTIONS; playEnterSound(); redrawNeeded = true; }
+          if (k.enter) { skyPlayStageTransition(); skyHubStage = SkyHubStage::OPTIONS; playEnterSound(); redrawNeeded = true; }
         } else {  // OPTIONS
           for (char c : k.word) {
             if (c == ';') { skyOptionsSelected = (skyOptionsSelected + SKY_OPTIONS_COUNT - 1) % SKY_OPTIONS_COUNT; redrawNeeded = true; }
@@ -8412,7 +8520,7 @@ void loop() {
   stepBreakoutGame();
   stepTetrisGame();
   stepSkyPilotFlight();
-  stepSkyPilotHubPreview();
+  stepSkyPilotHub();
   stepTrikiScope();
   stepMiniCam();
   // One 16th-note per tick. The grid is refreshed only on the new playhead
