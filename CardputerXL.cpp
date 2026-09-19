@@ -3529,7 +3529,7 @@ int skyPreSpectateModelIndex = 0;  // skyPlaneModelIndex gets overwritten every 
 // special-case) rather than exiting Sky Pilot entirely from PLANE/OPTIONS.
 enum class SkyHubStage { MODE, PLANE, OPTIONS };
 SkyHubStage skyHubStage = SkyHubStage::MODE;
-constexpr int SKY_OPTIONS_COUNT = 14;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, RENDER DISTANCE, AUTOPILOT, CONTINUOUS, FUEL, DAY/NIGHT, WEATHER, SAVE SLOT, ACHIEVEMENTS, START FLIGHT
+constexpr int SKY_OPTIONS_COUNT = 15;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, RENDER DISTANCE, AUTOPILOT, CONTINUOUS, FUEL, FUEL DIFFICULTY, DAY/NIGHT, WEATHER, SAVE SLOT, ACHIEVEMENTS, START FLIGHT
 int skyOptionsSelected = 0;
 
 // Stall/rotate speed, control rates, and throttle targets all now come from
@@ -3702,6 +3702,14 @@ bool skyFuelEnabled = false;
 float skyFuel = 100.0f;  // percent
 constexpr float SKY_FUEL_BURN_PER_THROTTLE[4] = {0.4f, 2.0f, 3.6f, 5.6f};  // %/sec at OFF/LOW/MED/HIGH
 bool skyFuelWarned = false;
+// Difficulty scales how fast that 100% tank drains, not the tank size
+// itself - easier to reason about than juggling two capacity numbers, and
+// it means the HUD bar/ATC thresholds (15%, 0%) stay meaningful at every
+// setting instead of needing their own per-difficulty scaling.
+constexpr int SKY_FUEL_DIFF_COUNT = 4;
+const char* skyFuelDiffNames[SKY_FUEL_DIFF_COUNT] = {"EASY", "NORMAL", "HARD", "INSANE"};
+int skyFuelDifficulty = 1;  // NORMAL
+constexpr float SKY_FUEL_DIFF_BURN_MULT[SKY_FUEL_DIFF_COUNT] = {0.4f, 1.0f, 2.0f, 3.5f};
 
 // ---- Day/night: an OPTIONS 3-way (ALWAYS DAY / ALWAYS NIGHT / CYCLE)
 // rather than a single on/off, since "always day" (today's whole-session
@@ -4796,9 +4804,10 @@ String skyOptionValue(int i) {
     case 6: return skyAutopilotEnabled ? "ON" : "OFF";
     case 7: return skyContinuousEnabled ? "ON" : "OFF";
     case 8: return skyFuelEnabled ? "ON" : "OFF";
-    case 9: return String(skyTimeModeNames[skyTimeMode]);
-    case 10: return skyWeatherEnabled ? "ON" : "OFF";
-    case 11: return "SLOT " + String(skySaveSlot + 1);
+    case 9: return String(skyFuelDiffNames[skyFuelDifficulty]);
+    case 10: return String(skyTimeModeNames[skyTimeMode]);
+    case 11: return skyWeatherEnabled ? "ON" : "OFF";
+    case 12: return "SLOT " + String(skySaveSlot + 1);
     default: return "";
   }
 }
@@ -4807,7 +4816,7 @@ void skyDrawOptionsScene(float dt) {
   skyDrawHubStars(dt);
   static const char* optNames[SKY_OPTIONS_COUNT] = {
     "CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "RENDER DISTANCE",
-    "AUTOPILOT", "CONTINUOUS", "FUEL", "DAY / NIGHT", "WEATHER", "SAVE SLOT", "ACHIEVEMENTS", "START FLIGHT",
+    "AUTOPILOT", "CONTINUOUS", "FUEL", "FUEL DIFFICULTY", "DAY / NIGHT", "WEATHER", "SAVE SLOT", "ACHIEVEMENTS", "START FLIGHT",
   };
   int scrollTop = constrain(skyOptionsSelected - SKY_OPTIONS_VISIBLE / 2, 0, SKY_OPTIONS_COUNT - SKY_OPTIONS_VISIBLE);
   constexpr int ROW_H = 22;
@@ -4824,7 +4833,7 @@ void skyDrawOptionsScene(float dt) {
       kartCanvas.setTextColor(sel ? ILI9341_GREEN : ui.dim, bg); kartCanvas.print("START FLIGHT");
       continue;
     }
-    if (i == 12) {
+    if (i == 13) {
       kartCanvas.print("ACHIEVEMENTS");
       int count = 0; for (int a = 0; a < SKY_ACHIEVEMENT_COUNT; ++a) if (skyAchievements & (1 << a)) count++;
       kartCanvas.setTextColor(sel ? ui.text : ui.accent, bg); kartCanvas.setCursor(240, y); kartCanvas.print(String(count) + "/" + String(SKY_ACHIEVEMENT_COUNT));
@@ -5304,7 +5313,7 @@ void stepSkyPilotFlight() {
   // condition.
   if (skyFuelEnabled) {
     if (skyFuel > 0 && !(skyGrounded && skyThrottleLevel == 0)) {
-      skyFuel = max(0.0f, skyFuel - SKY_FUEL_BURN_PER_THROTTLE[skyThrottleLevel] * dt);
+      skyFuel = max(0.0f, skyFuel - SKY_FUEL_BURN_PER_THROTTLE[skyThrottleLevel] * SKY_FUEL_DIFF_BURN_MULT[skyFuelDifficulty] * dt);
       if (skyFuel <= 15.0f && !skyFuelWarned) { skyFuelWarned = true; skyShowAtc("TOWER: FUEL LOW, ADVISE LANDING", 3500); }
       if (skyFuel <= 0.0f) skyShowAtc("TOWER: ENGINE OUT - YOU ARE GLIDING", 3500);
     }
@@ -8990,9 +8999,11 @@ void keyboard() {
             else if (skyOptionsSelected == 4 && c == '/') { skyBotCount = min(SKY_BOT_MAX, skyBotCount + 1); playFunctionSound(); redrawNeeded = true; }
             else if (skyOptionsSelected == 5 && c == ',') { skyRenderDistLevel = max(0, skyRenderDistLevel - 1); playFunctionSound(); redrawNeeded = true; }
             else if (skyOptionsSelected == 5 && c == '/') { skyRenderDistLevel = min(SKY_RENDER_DIST_LEVELS - 1, skyRenderDistLevel + 1); playFunctionSound(); redrawNeeded = true; }
-            else if (skyOptionsSelected == 9 && c == ',') { skyTimeMode = (skyTimeMode + SKY_TIME_MODES - 1) % SKY_TIME_MODES; playFunctionSound(); redrawNeeded = true; }
-            else if (skyOptionsSelected == 9 && c == '/') { skyTimeMode = (skyTimeMode + 1) % SKY_TIME_MODES; playFunctionSound(); redrawNeeded = true; }
-            else if (skyOptionsSelected == 11 && (c == ',' || c == '/')) {
+            else if (skyOptionsSelected == 9 && c == ',') { skyFuelDifficulty = max(0, skyFuelDifficulty - 1); playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 9 && c == '/') { skyFuelDifficulty = min(SKY_FUEL_DIFF_COUNT - 1, skyFuelDifficulty + 1); playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 10 && c == ',') { skyTimeMode = (skyTimeMode + SKY_TIME_MODES - 1) % SKY_TIME_MODES; playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 10 && c == '/') { skyTimeMode = (skyTimeMode + 1) % SKY_TIME_MODES; playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 12 && (c == ',' || c == '/')) {
               skySaveSlot = (skySaveSlot + (c == '/' ? 1 : SKY_SAVE_SLOTS - 1)) % SKY_SAVE_SLOTS;
               skyLoadBest();  // a different slot's best/achievements/visited airports
               playFunctionSound(); redrawNeeded = true;
@@ -9007,8 +9018,8 @@ void keyboard() {
             else if (skyOptionsSelected == 6) skyAutopilotEnabled = !skyAutopilotEnabled;
             else if (skyOptionsSelected == 7) skyContinuousEnabled = !skyContinuousEnabled;
             else if (skyOptionsSelected == 8) skyFuelEnabled = !skyFuelEnabled;
-            else if (skyOptionsSelected == 10) skyWeatherEnabled = !skyWeatherEnabled;
-            if (skyOptionsSelected != 4 && skyOptionsSelected != 5 && skyOptionsSelected != 9 && skyOptionsSelected != 11 && skyOptionsSelected != 12) { playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 11) skyWeatherEnabled = !skyWeatherEnabled;
+            if (skyOptionsSelected != 4 && skyOptionsSelected != 5 && skyOptionsSelected != 9 && skyOptionsSelected != 10 && skyOptionsSelected != 12 && skyOptionsSelected != 13) { playFunctionSound(); redrawNeeded = true; }
           }
         }
       } else if (k.enter && skyState == SKY_RESULTS) {
