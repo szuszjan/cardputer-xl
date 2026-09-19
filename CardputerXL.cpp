@@ -4704,8 +4704,47 @@ void skyDrawHubStars(float dt) {
     SkyHubStar& s = skyHubStars[i];
     s.x -= s.speed * dt;
     if (s.x < 0) { s.x = W; s.y = HEADER_H + random(0, H - HEADER_H - FOOTER_H); }
-    kartCanvas.drawPixel((int)s.x, (int)s.y, ILI9341_DARKGREY);
+    // Mostly dim slate specks for depth, with the occasional bright twinkle
+    // (every 5th star) - a nod to the little sparkle dots in a Mania-style
+    // menu backdrop without needing per-star animation state of their own.
+    kartCanvas.drawPixel((int)s.x, (int)s.y, (i % 5 == 0) ? ILI9341_WHITE : 0x2965);
   }
+}
+// ---- "Mania menu" look: a deep navy-to-violet vertical gradient behind the
+// content band, a SEGA-style rainbow stripe under the header, and each list
+// row as a slanted (parallelogram, not rectangular) panel with a triangular
+// pointer - the whole set is scoped to the Sky Pilot HOME wizard only (the
+// shared `ui` Theme struct/colors used everywhere else in the OS are left
+// untouched) since this is a one-game aesthetic, not a system-wide reskin.
+uint16_t skyManiaBgAt(int y) {
+  float t = constrain((float)(y - HEADER_H) / (float)(H - HEADER_H - FOOTER_H), 0.0f, 1.0f);
+  return kartLerpColor565(0x0007 /*deep navy*/, 0x2812 /*deep violet*/, t);
+}
+void skyDrawManiaGradient() {
+  // Covers the FULL canvas height, not just the content band - the one-shot
+  // full-screen draws (drawSkyPilotHubMode()/drawSkyPilotHubOptions()) blit
+  // this whole buffer to tft before header()/footer() paint over their own
+  // strips, so leaving those strips un-filled would flash whatever was in
+  // the canvas from the previous screen for a frame first.
+  constexpr int BAND = 6;
+  for (int y = 0; y < H; y += BAND) {
+    kartCanvas.fillRect(0, y, W, min(BAND, H - y), skyManiaBgAt(y));
+  }
+}
+void skyDrawManiaRainbowStripe(int y) {
+  static const uint16_t rainbow[] = {ILI9341_BLUE, ILI9341_CYAN, ILI9341_GREEN, ILI9341_YELLOW, ILI9341_ORANGE, ILI9341_RED, ILI9341_MAGENTA};
+  constexpr int N = sizeof(rainbow) / sizeof(rainbow[0]);
+  int segW = (W + N - 1) / N;
+  for (int i = 0; i < N; ++i) kartCanvas.fillRect(i * segW, y, segW, 3, rainbow[i]);
+}
+// A right-leaning parallelogram (two triangles) instead of a plain
+// rectangle - the diagonal-cut panel behind every row is the single most
+// recognizable piece of a Mania-style menu. skew is how far the top edge
+// leans right of the bottom edge.
+void skyDrawManiaPanel(int x0, int y0, int w, int h, int skew, uint16_t color) {
+  int x1 = x0 + w, y1 = y0 + h;
+  kartCanvas.fillTriangle(x0 + skew, y0, x1 + skew, y0, x1, y1, color);
+  kartCanvas.fillTriangle(x0 + skew, y0, x1, y1, x0, y1, color);
 }
 // A turntable-style showcase for the PLANE stage of the HOME wizard - the
 // camera position/target are fixed in world space (unlike the flight's own
@@ -4715,10 +4754,19 @@ void skyDrawHubStars(float dt) {
 // made the whole rig turn as one rigid unit, which cancels out visually -
 // the model never appeared to spin relative to the screen at all.
 float skyPreviewSpin = 0.8f;
-void skyDrawPlanePreviewScene() {
+void skyDrawPlanePreviewScene(float dt = 0) {
   int w = kartCanvas.width(), h = kartCanvas.height();
-  kartCanvas.fillScreen(ILI9341_NAVY);
-  kartCanvas.fillRect(0, h * 2 / 3, w, h / 3, ILI9341_DARKGREEN);
+  int groundY = h * 2 / 3;
+  // Same navy-to-violet gradient + starfield as MODE/OPTIONS, so the plane
+  // spins on the same "space stage" backdrop instead of a flat navy fill -
+  // stars are spawned/advanced across the whole content band so a few dots
+  // land on the ground strip too, which reads as tiny runway lights rather
+  // than looking wrong.
+  for (int y = 0; y < groundY; y += 6) kartCanvas.fillRect(0, y, w, min(6, groundY - y), kartLerpColor565(0x0007, 0x2812, (float)y / groundY));
+  skyDrawHubStars(dt);
+  kartCanvas.fillRect(0, groundY, w, h - groundY, 0x1082 /*deep plum stage floor*/);
+  kartCanvas.drawFastHLine(0, groundY, w, ILI9341_MAGENTA);
+  skyDrawManiaRainbowStripe(CONTENT_Y - 4);
 
   KVec3 showcasePos{0, 0, 0};
   float pitch = 0.08f, bank = 0.28f;
@@ -4740,9 +4788,15 @@ void skyDrawPlanePreviewScene() {
   // directly to tft every frame, on top of a full-screen blit, was visible
   // as a flash/flicker each tick.
   const SkyPlaneModelParams& picked = skyPlaneModels[skyPlaneModelIndex];
-  kartCanvas.setTextSize(2); kartCanvas.setTextColor(ILI9341_WHITE, ILI9341_NAVY);
+  // Name/special as their own small slanted black name-tag banners (the
+  // same diagonal-panel language as the MODE/OPTIONS rows) instead of a
+  // flat rectangle, so the plane's ID card reads as part of the same
+  // "Mania menu" rather than a leftover plain UI box.
+  skyDrawManiaPanel(6, CONTENT_Y - 2, 210, 22, 14, ILI9341_BLACK);
+  kartCanvas.setTextSize(2); kartCanvas.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
   kartCanvas.setCursor(10, CONTENT_Y + 6); kartCanvas.print(picked.name);
-  kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_NAVY);
+  skyDrawManiaPanel(6, CONTENT_Y + 22, 170, 14, 10, ILI9341_BLACK);
+  kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
   kartCanvas.setCursor(10, CONTENT_Y + 28); kartCanvas.print(picked.special);
 }
 // MODE/OPTIONS content, drawn onto kartCanvas (not tft directly) so the
@@ -4753,17 +4807,19 @@ void skyDrawPlanePreviewScene() {
 // file already follows. dt is 0 for the one-time full-draw callers below
 // (the stars just don't move for that single frame, which is invisible).
 void skyDrawModeScene(float dt) {
-  kartCanvas.fillScreen(ui.bg);
+  skyDrawManiaGradient();
   skyDrawHubStars(dt);
+  skyDrawManiaRainbowStripe(CONTENT_Y - 4);
   static const char* modes[SKY_MODE_OPTION_COUNT] = {"FREE ROAM - RUNWAY START", "FREE ROAM - AIRBORNE START", "AIRPORT TO AIRPORT", "SPECTATE - WATCH BOTS"};
-  kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(12, CONTENT_Y + 6); kartCanvas.print("BEST DISTANCE  " + String(skyBestScore));
+  kartCanvas.setTextColor(ILI9341_WHITE, skyManiaBgAt(CONTENT_Y + 6)); kartCanvas.setCursor(12, CONTENT_Y + 6); kartCanvas.print("BEST DISTANCE  " + String(skyBestScore));
   for (int i = 0; i < SKY_MODE_OPTION_COUNT; ++i) {
     int y = CONTENT_Y + 32 + i * 24; bool sel = i == skyModeSelected;
-    uint16_t bg = sel ? lerpColor565(ui.bg, ui.selected, 0.6f + 0.4f * sinf(millis() / 180.0f)) : ui.bg;
-    if (sel) kartCanvas.fillRoundRect(8, y - 4, 304, 19, 4, bg);
-    kartCanvas.setTextColor(sel ? ui.text : ui.dim, bg); kartCanvas.setCursor(15, y); kartCanvas.print(sel ? "> " : "  "); kartCanvas.print(modes[i]);
+    uint16_t panelCol = sel ? lerpColor565(ILI9341_ORANGE, ILI9341_YELLOW, 0.5f + 0.5f * sinf(millis() / 180.0f)) : ILI9341_BLACK;
+    skyDrawManiaPanel(8, y - 4, 304, 19, 12, panelCol);
+    if (sel) kartCanvas.fillTriangle(2, y - 1, 2, y + 8, 9, y + 3, ILI9341_YELLOW);
+    kartCanvas.setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas.setCursor(15, y); kartCanvas.print(modes[i]);
   }
-  kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(12, CONTENT_Y + 130); kartCanvas.print("Step 1 of 3 - how you start the flight.");
+  kartCanvas.setTextColor(0x8C71, skyManiaBgAt(CONTENT_Y + 130)); kartCanvas.setCursor(12, CONTENT_Y + 130); kartCanvas.print("Step 1 of 3 - how you start the flight.");
 }
 void drawSkyPilotHubMode() {
   skyDrawModeScene(0);
@@ -4812,8 +4868,9 @@ String skyOptionValue(int i) {
   }
 }
 void skyDrawOptionsScene(float dt) {
-  kartCanvas.fillScreen(ui.bg);
+  skyDrawManiaGradient();
   skyDrawHubStars(dt);
+  skyDrawManiaRainbowStripe(CONTENT_Y - 4);
   static const char* optNames[SKY_OPTIONS_COUNT] = {
     "CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "RENDER DISTANCE",
     "AUTOPILOT", "CONTINUOUS", "FUEL", "FUEL DIFFICULTY", "DAY / NIGHT", "WEATHER", "SAVE SLOT", "ACHIEVEMENTS", "START FLIGHT",
@@ -4821,26 +4878,28 @@ void skyDrawOptionsScene(float dt) {
   int scrollTop = constrain(skyOptionsSelected - SKY_OPTIONS_VISIBLE / 2, 0, SKY_OPTIONS_COUNT - SKY_OPTIONS_VISIBLE);
   constexpr int ROW_H = 22;
   int top = CONTENT_Y + 12;
-  if (scrollTop > 0) { kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(152, top - 12); kartCanvas.print("^"); }
-  if (scrollTop + SKY_OPTIONS_VISIBLE < SKY_OPTIONS_COUNT) { kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(152, top + SKY_OPTIONS_VISIBLE * ROW_H + 2); kartCanvas.print("v"); }
+  if (scrollTop > 0) { kartCanvas.setTextColor(0x8C71, skyManiaBgAt(top - 12)); kartCanvas.setCursor(152, top - 12); kartCanvas.print("^"); }
+  if (scrollTop + SKY_OPTIONS_VISIBLE < SKY_OPTIONS_COUNT) { kartCanvas.setTextColor(0x8C71, skyManiaBgAt(top + SKY_OPTIONS_VISIBLE * ROW_H + 2)); kartCanvas.setCursor(152, top + SKY_OPTIONS_VISIBLE * ROW_H + 2); kartCanvas.print("v"); }
   for (int row = 0; row < SKY_OPTIONS_VISIBLE; ++row) {
     int i = scrollTop + row; if (i >= SKY_OPTIONS_COUNT) break;
     int y = top + row * ROW_H; bool sel = i == skyOptionsSelected;
-    uint16_t bg = sel ? lerpColor565(ui.bg, ui.selected, 0.6f + 0.4f * sinf(millis() / 180.0f)) : ui.bg;
-    if (sel) kartCanvas.fillRoundRect(8, y - 4, 304, 18, 4, bg);
-    kartCanvas.setTextColor(sel ? ui.text : ui.dim, bg); kartCanvas.setCursor(15, y); kartCanvas.print(sel ? "> " : "  ");
+    uint16_t panelCol = sel ? lerpColor565(ILI9341_ORANGE, ILI9341_YELLOW, 0.5f + 0.5f * sinf(millis() / 180.0f)) : ILI9341_BLACK;
+    skyDrawManiaPanel(8, y - 4, 304, 18, 10, panelCol);
+    if (sel) kartCanvas.fillTriangle(2, y - 1, 2, y + 7, 9, y + 3, ILI9341_YELLOW);
+    uint16_t valueCol = sel ? ILI9341_BLACK : ILI9341_CYAN;
+    kartCanvas.setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas.setCursor(15, y);
     if (i == SKY_OPTIONS_COUNT - 1) {
-      kartCanvas.setTextColor(sel ? ILI9341_GREEN : ui.dim, bg); kartCanvas.print("START FLIGHT");
+      kartCanvas.setTextColor(sel ? 0x03E0 /*dark green on bright panel*/ : ILI9341_GREEN, panelCol); kartCanvas.print("START FLIGHT");
       continue;
     }
     if (i == 13) {
       kartCanvas.print("ACHIEVEMENTS");
       int count = 0; for (int a = 0; a < SKY_ACHIEVEMENT_COUNT; ++a) if (skyAchievements & (1 << a)) count++;
-      kartCanvas.setTextColor(sel ? ui.text : ui.accent, bg); kartCanvas.setCursor(240, y); kartCanvas.print(String(count) + "/" + String(SKY_ACHIEVEMENT_COUNT));
+      kartCanvas.setTextColor(valueCol, panelCol); kartCanvas.setCursor(240, y); kartCanvas.print(String(count) + "/" + String(SKY_ACHIEVEMENT_COUNT));
       continue;
     }
     kartCanvas.print(optNames[i]);
-    kartCanvas.setTextColor(sel ? ui.text : ui.accent, bg); kartCanvas.setCursor(240, y); kartCanvas.print(skyOptionValue(i));
+    kartCanvas.setTextColor(valueCol, panelCol); kartCanvas.setCursor(240, y); kartCanvas.print(skyOptionValue(i));
   }
 }
 void drawSkyPilotHubOptions() {
@@ -4918,7 +4977,7 @@ void stepSkyPilotHub() {
   if (skyHubStage == SkyHubStage::PLANE) {
     skyPreviewSpin += dt * 1.1f;
     if (skyPreviewSpin > 6.2832f) skyPreviewSpin -= 6.2832f;
-    skyDrawPlanePreviewScene();
+    skyDrawPlanePreviewScene(dt);
   } else if (skyHubStage == SkyHubStage::OPTIONS) {
     skyDrawOptionsScene(dt);
   } else {
