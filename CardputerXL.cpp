@@ -3512,10 +3512,32 @@ enum SkyPilotMode { SKY_MODE_FREEROAM, SKY_MODE_AIRPORT };
 SkyPilotMode skyMode = SKY_MODE_FREEROAM;
 // HOME menu selection: 0=free roam/runway start, 1=free roam/airborne start,
 // 2=airport to airport, 3=spectate (just watch the AI bots fly, no piloting).
-// Kept selected across a RESULTS "fly again" too.
+// Kept selected across a RESULTS "fly again" too. Only ARCADE actually
+// shows this as a pick (see SKY_MODE_ARCADE_VALUES below) - SIMULATION
+// sets it to 2 (Airport to Airport) directly and skips the MODE stage
+// entirely, since it only ever offers that one flight type.
 constexpr int SKY_MODE_OPTION_COUNT = 4;
 constexpr int SKY_MODE_ROW_H = 24;
 int skyModeSelected = 0;
+// The MODE stage is arcade-only (see SkyHubStage's own comment) and shows
+// 3 of the 4 possible skyModeSelected values, skipping index 2 (Airport to
+// Airport, simulation's exclusive mode) - these two helpers translate
+// between "which UI row is this" and "which skyModeSelected value does it
+// actually pick", so skyModeSelected itself stays the single source of
+// truth everywhere else in the file (startSkyPilotFlight(), the HUD's
+// "-> AIRPORT" display, etc.) without needing to know this UI detail.
+constexpr int SKY_MODE_ARCADE_ROWS = 3;
+const int SKY_MODE_ARCADE_VALUES[SKY_MODE_ARCADE_ROWS] = {0, 1, 3};
+int skyModeRowFor(int value) { for (int r = 0; r < SKY_MODE_ARCADE_ROWS; ++r) if (SKY_MODE_ARCADE_VALUES[r] == value) return r; return 0; }
+// ---- Arcade vs Simulation (a Gran Turismo-style top-level split, chosen
+// right after PLAY on the GAMECAT stage): ARCADE is free roam/spectate
+// with no fuel, weather or achievement tracking - pick a plane and fly,
+// no consequences. SIMULATION is Airport to Airport with the full feature
+// set (fuel, day/night, weather, achievements, save slots) engaged. Which
+// OPTIONS rows even exist, and whether skyUnlock()/skyFlushLifetime()/
+// skyMarkVisited() do anything, both key off this.
+enum SkyGameCategory { SKY_CAT_ARCADE, SKY_CAT_SIMULATION };
+SkyGameCategory skyGameCategory = SKY_CAT_ARCADE;
 // Spectate: the player's own plane is never controlled or rendered - the
 // camera instead chase-follows one of the AI bots (skyWatchIndex, cycled
 // with ,/ in flight). skyPlane's pos/heading/pitch/bank/speed are copied
@@ -3533,13 +3555,33 @@ int skyPreSpectateModelIndex = 0;  // skyPlaneModelIndex gets overwritten every 
 // to HOME (H mid-flight, or a non-continuous landing) drops straight back
 // to MODE instead, since at that point the player is already "in" the
 // game and re-showing the title screen would just be friction before
-// configuring the next flight.
-enum class SkyHubStage { START, MODE, PLANE, OPTIONS, INFO };
+// configuring the next flight. GAMECAT (arcade/simulation) sits between
+// START and MODE - ARCADE continues to MODE as before, SIMULATION sets
+// skyModeSelected to Airport to Airport directly and skips straight to
+// PLANE, since simulation only ever offers that one flight type.
+enum class SkyHubStage { START, GAMECAT, MODE, PLANE, OPTIONS, INFO };
 SkyHubStage skyHubStage = SkyHubStage::START;
 constexpr int SKY_START_OPTION_COUNT = 3;  // PLAY, EXIT, INFO
 constexpr int SKY_START_ROW_H = 26;
 int skyStartSelected = 0;
-constexpr int SKY_OPTIONS_COUNT = 15;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, RENDER DISTANCE, AUTOPILOT, CONTINUOUS, FUEL, FUEL DIFFICULTY, DAY/NIGHT, WEATHER, SAVE SLOT, ACHIEVEMENTS, START FLIGHT
+constexpr int SKY_GAMECAT_ROW_H = 46;
+// Every possible OPTIONS row, as stable IDs rather than positional indices
+// - which rows are even shown (and at which position) now depends on
+// skyGameCategory, so keyboard handling and drawing both key off the ID a
+// visible row actually IS, never a raw "index N" that would silently mean
+// a different setting depending on which row list is active.
+enum SkyOptRow {
+  OPT_CONTROL, OPT_SOUND, OPT_RADAR, OPT_AI_BOTS, OPT_BOTS_COUNT, OPT_RENDER_DIST,
+  OPT_AUTOPILOT, OPT_CONTINUOUS, OPT_FUEL, OPT_FUEL_DIFF, OPT_DAYNIGHT, OPT_WEATHER,
+  OPT_SAVE_SLOT, OPT_ACHIEVEMENTS, OPT_START_FLIGHT,
+};
+// ARCADE keeps only the quality-of-life rows (no fuel/weather/day-night/
+// achievements/save-slot/continuous - those are the whole point of
+// SIMULATION); SIMULATION shows everything.
+const SkyOptRow SKY_OPT_ROWS_ARCADE[] = {OPT_CONTROL, OPT_SOUND, OPT_RADAR, OPT_AI_BOTS, OPT_BOTS_COUNT, OPT_RENDER_DIST, OPT_AUTOPILOT, OPT_START_FLIGHT};
+const SkyOptRow SKY_OPT_ROWS_SIM[] = {OPT_CONTROL, OPT_SOUND, OPT_RADAR, OPT_AI_BOTS, OPT_BOTS_COUNT, OPT_RENDER_DIST, OPT_AUTOPILOT, OPT_CONTINUOUS, OPT_FUEL, OPT_FUEL_DIFF, OPT_DAYNIGHT, OPT_WEATHER, OPT_SAVE_SLOT, OPT_ACHIEVEMENTS, OPT_START_FLIGHT};
+int skyOptRowCount() { return skyGameCategory == SKY_CAT_ARCADE ? (int)(sizeof(SKY_OPT_ROWS_ARCADE) / sizeof(SkyOptRow)) : (int)(sizeof(SKY_OPT_ROWS_SIM) / sizeof(SkyOptRow)); }
+SkyOptRow skyOptRowAt(int i) { return skyGameCategory == SKY_CAT_ARCADE ? SKY_OPT_ROWS_ARCADE[i] : SKY_OPT_ROWS_SIM[i]; }
 constexpr int SKY_OPTIONS_ROW_H = 22;
 int skyOptionsSelected = 0;
 
@@ -3816,7 +3858,13 @@ void skyLoadBest() {
 }
 void skySaveBest() { preferences.begin(skyPrefsNS().c_str(), false); preferences.putInt("best", skyBestScore); preferences.end(); }
 void skySaveLifetime() { preferences.begin(skyPrefsNS().c_str(), false); preferences.putULong("lifetime", skyLifetimeDistance); preferences.end(); }
+// Arcade doesn't track achievements/visited-airports/lifetime distance at
+// all - it's the whole point of the Arcade/Simulation split (see
+// SkyGameCategory's own comment) - so all three of the functions below
+// are no-ops outside SIMULATION, rather than every call site needing to
+// remember to check the category itself.
 void skyMarkVisited(int i) {
+  if (skyGameCategory != SKY_CAT_SIMULATION) return;
   if (skyVisitedAirport[i]) return;
   skyVisitedAirport[i] = true;
   preferences.begin(skyPrefsNS().c_str(), false); preferences.putBool((String("v") + i).c_str(), true); preferences.end();
@@ -3824,6 +3872,7 @@ void skyMarkVisited(int i) {
 // One-shot per slot - ATC announces it once via the subtitle system rather
 // than re-checking/re-announcing it every frame after it's already unlocked.
 void skyUnlock(int id) {
+  if (skyGameCategory != SKY_CAT_SIMULATION) return;
   if (skyAchievements & (1 << id)) return;
   skyAchievements |= (1 << id);
   preferences.begin(skyPrefsNS().c_str(), false); preferences.putUChar("ach", skyAchievements); preferences.end();
@@ -3842,6 +3891,7 @@ bool skyAllAirportsVisited() {
 // mutually exclusive per flight: once one fires, skyState leaves
 // SKY_FLYING, so the others can never also fire for that same flight.
 void skyFlushLifetime() {
+  if (skyGameCategory != SKY_CAT_SIMULATION) return;
   skyLifetimeDistance += (unsigned long)skyScore;
   skySaveLifetime();
   if (skyLifetimeDistance >= 5000) skyUnlock(5);  // CROSS COUNTRY
@@ -4797,7 +4847,7 @@ void skyDrawManiaPanel(int x0, int y0, int w, int h, int skew, uint16_t color) {
 // the ease from the current interpolated position rather than snapping,
 // so mashing the selector key stays smooth instead of stuttering.
 struct SkyListScroll { float cur = 0, from = 0, to = 0, t = 1; };
-SkyListScroll skyModeScroll, skyOptScroll, skyStartScroll;
+SkyListScroll skyModeScroll, skyOptScroll, skyStartScroll, skyGameCatScroll;
 void skyListScrollTo(SkyListScroll& s, float target) {
   if (target == s.to) return;
   s.from = s.cur; s.to = target; s.t = 0;
@@ -4926,7 +4976,7 @@ void skyDrawInfoScene(float dt) {
   int y = CONTENT_Y + 4;
   int unlocked = 0; for (int a = 0; a < SKY_ACHIEVEMENT_COUNT; ++a) if (skyAchievements & (1 << a)) unlocked++;
   kartCanvas.setTextColor(ILI9341_YELLOW, skyManiaBgAt(y)); kartCanvas.setCursor(12, y);
-  kartCanvas.print("ACHIEVEMENTS  " + String(unlocked) + "/" + String(SKY_ACHIEVEMENT_COUNT));
+  kartCanvas.print("ACHIEVEMENTS  " + String(unlocked) + "/" + String(SKY_ACHIEVEMENT_COUNT) + " (SIMULATION ONLY)");
   y += 12;
   for (int a = 0; a < SKY_ACHIEVEMENT_COUNT; ++a) {
     bool got = skyAchievements & (1 << a);
@@ -4954,6 +5004,29 @@ void skyDrawInfoScene(float dt) {
     y += 10;
   }
 }
+// The Arcade/Simulation split, shown right after PLAY - only 2 rows, but
+// each carries a description line since (unlike every other list in this
+// wizard) the two choices aren't self-explanatory from their names alone.
+constexpr int SKY_GAMECAT_ANCHOR_Y = CONTENT_Y + 50;
+void skyDrawGameCatScene(float dt) {
+  skyDrawManiaGradient();
+  skyDrawHubStars(dt);
+  skyDrawManiaRainbowStripe(CONTENT_Y - 4);
+  skyListScrollUpdate(skyGameCatScroll, dt);
+  kartCanvas.setTextColor(ILI9341_WHITE, skyManiaBgAt(CONTENT_Y + 6)); kartCanvas.setCursor(12, CONTENT_Y + 6); kartCanvas.print("HOW DO YOU WANT TO FLY?");
+  static const char* names[2] = {"ARCADE", "SIMULATION"};
+  static const char* subs[2] = {"FREE ROAM - NO FUEL, NO ACHIEVEMENTS", "AIRPORT TO AIRPORT - FUEL, WEATHER, ACHIEVEMENTS"};
+  for (int i = 0; i < 2; ++i) {
+    int y = SKY_GAMECAT_ANCHOR_Y + (int)(i * SKY_GAMECAT_ROW_H - skyGameCatScroll.cur);
+    if (y < CONTENT_Y - SKY_GAMECAT_ROW_H || y > H - FOOTER_H) continue;
+    bool sel = i == (int)skyGameCategory;
+    uint16_t panelCol = sel ? lerpColor565(ILI9341_ORANGE, ILI9341_YELLOW, 0.5f + 0.5f * sinf(millis() / 180.0f)) : ILI9341_BLACK;
+    skyDrawManiaPanel(8, y - 4, 304, 19, 12, panelCol);
+    if (sel) kartCanvas.fillTriangle(2, y - 1, 2, y + 8, 9, y + 3, ILI9341_YELLOW);
+    kartCanvas.setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas.setCursor(15, y); kartCanvas.print(names[i]);
+    kartCanvas.setTextColor(0x8C71, skyManiaBgAt(y + 18)); kartCanvas.setCursor(15, y + 18); kartCanvas.print(subs[i]);
+  }
+}
 // MODE/OPTIONS content, drawn onto kartCanvas (not tft directly) so the
 // continuous stepper below can redraw them every tick - for the starfield
 // and the selected row's pulsing glow to actually read as animated - and
@@ -4973,16 +5046,17 @@ void skyDrawModeScene(float dt) {
   skyListScrollUpdate(skyModeScroll, dt);
   static const char* modes[SKY_MODE_OPTION_COUNT] = {"FREE ROAM - RUNWAY START", "FREE ROAM - AIRBORNE START", "AIRPORT TO AIRPORT", "SPECTATE - WATCH BOTS"};
   kartCanvas.setTextColor(ILI9341_WHITE, skyManiaBgAt(CONTENT_Y + 6)); kartCanvas.setCursor(12, CONTENT_Y + 6); kartCanvas.print("BEST DISTANCE  " + String(skyBestScore));
-  for (int i = 0; i < SKY_MODE_OPTION_COUNT; ++i) {
-    int y = SKY_MODE_ANCHOR_Y + (int)(i * SKY_MODE_ROW_H - skyModeScroll.cur);
+  for (int row = 0; row < SKY_MODE_ARCADE_ROWS; ++row) {
+    int y = SKY_MODE_ANCHOR_Y + (int)(row * SKY_MODE_ROW_H - skyModeScroll.cur);
     if (y < CONTENT_Y - SKY_MODE_ROW_H || y > H - FOOTER_H) continue;
-    bool sel = i == skyModeSelected;
+    int value = SKY_MODE_ARCADE_VALUES[row];
+    bool sel = value == skyModeSelected;
     uint16_t panelCol = sel ? lerpColor565(ILI9341_ORANGE, ILI9341_YELLOW, 0.5f + 0.5f * sinf(millis() / 180.0f)) : ILI9341_BLACK;
     skyDrawManiaPanel(8, y - 4, 304, 19, 12, panelCol);
     if (sel) kartCanvas.fillTriangle(2, y - 1, 2, y + 8, 9, y + 3, ILI9341_YELLOW);
-    kartCanvas.setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas.setCursor(15, y); kartCanvas.print(modes[i]);
+    kartCanvas.setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas.setCursor(15, y); kartCanvas.print(modes[value]);
   }
-  kartCanvas.setTextColor(0x8C71, skyManiaBgAt(CONTENT_Y + 130)); kartCanvas.setCursor(12, CONTENT_Y + 130); kartCanvas.print("Step 1 of 3 - how you start the flight.");
+  kartCanvas.setTextColor(0x8C71, skyManiaBgAt(CONTENT_Y + 130)); kartCanvas.setCursor(12, CONTENT_Y + 130); kartCanvas.print("How you start the flight.");
 }
 // Shared with skyPlayStageTransition() below, which needs to paint just the
 // chrome for the stage it's switching to without also blitting the content
@@ -4990,15 +5064,25 @@ void skyDrawModeScene(float dt) {
 // transfer before the still-growing cover panel gets drawn back on top of
 // it - there's no double buffering here, so anything actually written to
 // tft is visible for however long that write takes, however briefly).
+// No "(N OF M)" step counter in these headers any more - the wizard's
+// actual length now depends on skyGameCategory (ARCADE runs GAMECAT ->
+// MODE -> PLANE -> OPTIONS; SIMULATION skips MODE), so a fixed count would
+// just be wrong for one of the two paths.
 void skyPaintHubChrome() {
-  if (skyHubStage == SkyHubStage::PLANE) { header("GAMES / SKY PILOT / PLANE (2 OF 3)"); footer(",/ CHANGE PLANE     ENTER NEXT     FN BACK"); }
-  else if (skyHubStage == SkyHubStage::OPTIONS) { header("GAMES / SKY PILOT / OPTIONS (3 OF 3)"); footer(";/. SELECT  ,/ ADJUST  ENTER TOGGLE/START  FN BACK"); }
-  else if (skyHubStage == SkyHubStage::MODE) { header("GAMES / SKY PILOT / MODE (1 OF 3)"); footer(";/. SELECT     ENTER NEXT     FN GAMES"); }
+  if (skyHubStage == SkyHubStage::PLANE) { header("GAMES / SKY PILOT / PLANE"); footer(",/ CHANGE PLANE     ENTER NEXT     FN BACK"); }
+  else if (skyHubStage == SkyHubStage::OPTIONS) { header("GAMES / SKY PILOT / OPTIONS"); footer(";/. SELECT  ,/ ADJUST  ENTER TOGGLE/START  FN BACK"); }
+  else if (skyHubStage == SkyHubStage::MODE) { header("GAMES / SKY PILOT / MODE"); footer(";/. SELECT     ENTER NEXT     FN BACK"); }
+  else if (skyHubStage == SkyHubStage::GAMECAT) { header("GAMES / SKY PILOT / GAME MODE"); footer(";/. SELECT     ENTER NEXT     FN BACK"); }
   else if (skyHubStage == SkyHubStage::INFO) { header("GAMES / SKY PILOT / INFO"); footer("FN BACK"); }
   else { header("GAMES / SKY PILOT"); footer(";/. SELECT     ENTER CONFIRM"); }
 }
 void drawSkyPilotHubStart() {
   skyDrawStartScene(0);
+  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  skyPaintHubChrome();
+}
+void drawSkyPilotHubGameCat() {
+  skyDrawGameCatScene(0);
   tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
   skyPaintHubChrome();
 }
@@ -5028,64 +5112,81 @@ void drawSkyPilotHubPlane() {
 // either edge - the same idea as a long scrolling list anywhere else, just
 // applied to this one wizard stage.
 constexpr int SKY_OPTIONS_VISIBLE = 7;
-String skyOptionValue(int i) {
-  switch (i) {
-    case 0: return skyImuControlEnabled ? "TILT" : "KEYS";
-    case 1: return skyEngineSoundEnabled ? "ON" : "OFF";
-    case 2: return skyRadarEnabled ? "ON" : "OFF";
-    case 3: return skyAiBotsEnabled ? "ON" : "OFF";
-    case 4: return String(skyBotCount);
-    case 5: return String(skyRenderDistNames[skyRenderDistLevel]);
-    case 6: return skyAutopilotEnabled ? "ON" : "OFF";
-    case 7: return skyContinuousEnabled ? "ON" : "OFF";
-    case 8: return skyFuelEnabled ? "ON" : "OFF";
-    case 9: return String(skyFuelDiffNames[skyFuelDifficulty]);
-    case 10: return String(skyTimeModeNames[skyTimeMode]);
-    case 11: return skyWeatherEnabled ? "ON" : "OFF";
-    case 12: return "SLOT " + String(skySaveSlot + 1);
+String skyOptionValue(SkyOptRow row) {
+  switch (row) {
+    case OPT_CONTROL: return skyImuControlEnabled ? "TILT" : "KEYS";
+    case OPT_SOUND: return skyEngineSoundEnabled ? "ON" : "OFF";
+    case OPT_RADAR: return skyRadarEnabled ? "ON" : "OFF";
+    case OPT_AI_BOTS: return skyAiBotsEnabled ? "ON" : "OFF";
+    case OPT_BOTS_COUNT: return String(skyBotCount);
+    case OPT_RENDER_DIST: return String(skyRenderDistNames[skyRenderDistLevel]);
+    case OPT_AUTOPILOT: return skyAutopilotEnabled ? "ON" : "OFF";
+    case OPT_CONTINUOUS: return skyContinuousEnabled ? "ON" : "OFF";
+    case OPT_FUEL: return skyFuelEnabled ? "ON" : "OFF";
+    case OPT_FUEL_DIFF: return String(skyFuelDiffNames[skyFuelDifficulty]);
+    case OPT_DAYNIGHT: return String(skyTimeModeNames[skyTimeMode]);
+    case OPT_WEATHER: return skyWeatherEnabled ? "ON" : "OFF";
+    case OPT_SAVE_SLOT: return "SLOT " + String(skySaveSlot + 1);
+    default: return "";
+  }
+}
+const char* skyOptRowName(SkyOptRow row) {
+  switch (row) {
+    case OPT_CONTROL: return "CONTROL SCHEME";
+    case OPT_SOUND: return "ENGINE SOUND";
+    case OPT_RADAR: return "RADAR";
+    case OPT_AI_BOTS: return "AI TRAFFIC BOTS";
+    case OPT_BOTS_COUNT: return "BOTS COUNT";
+    case OPT_RENDER_DIST: return "RENDER DISTANCE";
+    case OPT_AUTOPILOT: return "AUTOPILOT";
+    case OPT_CONTINUOUS: return "CONTINUOUS";
+    case OPT_FUEL: return "FUEL";
+    case OPT_FUEL_DIFF: return "FUEL DIFFICULTY";
+    case OPT_DAYNIGHT: return "DAY / NIGHT";
+    case OPT_WEATHER: return "WEATHER";
+    case OPT_SAVE_SLOT: return "SAVE SLOT";
     default: return "";
   }
 }
 // Same fixed-anchor/moving-list scheme as MODE (see SkyListScroll's own
 // comment) in place of the old discrete scrollTop window - the highlight
-// stays at SKY_OPTIONS_ANCHOR_Y and all 15 rows slide past it, culled to
-// whichever ones actually land within the visible band. The up/down
-// chevron hints now just read skyOptScroll directly against its ends
-// instead of tracking a separate window index.
+// stays at SKY_OPTIONS_ANCHOR_Y and every row slides past it, culled to
+// whichever ones actually land within the visible band. Which rows exist
+// at all (skyOptRowCount()/skyOptRowAt()) depends on skyGameCategory - see
+// their own comment. The up/down chevron hints just read skyOptScroll
+// directly against its ends instead of tracking a separate window index.
 constexpr int SKY_OPTIONS_ANCHOR_Y = CONTENT_Y + 12 + (SKY_OPTIONS_VISIBLE / 2) * SKY_OPTIONS_ROW_H;
 void skyDrawOptionsScene(float dt) {
   skyDrawManiaGradient();
   skyDrawHubStars(dt);
   skyDrawManiaRainbowStripe(CONTENT_Y - 4);
   skyListScrollUpdate(skyOptScroll, dt);
-  static const char* optNames[SKY_OPTIONS_COUNT] = {
-    "CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "RENDER DISTANCE",
-    "AUTOPILOT", "CONTINUOUS", "FUEL", "FUEL DIFFICULTY", "DAY / NIGHT", "WEATHER", "SAVE SLOT", "ACHIEVEMENTS", "START FLIGHT",
-  };
+  int rowCount = skyOptRowCount();
   int viewTop = SKY_OPTIONS_ANCHOR_Y - (SKY_OPTIONS_VISIBLE / 2) * SKY_OPTIONS_ROW_H;
   if (skyOptScroll.cur > 0.5f) { kartCanvas.setTextColor(0x8C71, skyManiaBgAt(viewTop - 12)); kartCanvas.setCursor(152, viewTop - 12); kartCanvas.print("^"); }
-  if (skyOptScroll.cur < (SKY_OPTIONS_COUNT - 1) * SKY_OPTIONS_ROW_H - 0.5f) { kartCanvas.setTextColor(0x8C71, skyManiaBgAt(viewTop + SKY_OPTIONS_VISIBLE * SKY_OPTIONS_ROW_H + 2)); kartCanvas.setCursor(152, viewTop + SKY_OPTIONS_VISIBLE * SKY_OPTIONS_ROW_H + 2); kartCanvas.print("v"); }
-  for (int i = 0; i < SKY_OPTIONS_COUNT; ++i) {
+  if (skyOptScroll.cur < (rowCount - 1) * SKY_OPTIONS_ROW_H - 0.5f) { kartCanvas.setTextColor(0x8C71, skyManiaBgAt(viewTop + SKY_OPTIONS_VISIBLE * SKY_OPTIONS_ROW_H + 2)); kartCanvas.setCursor(152, viewTop + SKY_OPTIONS_VISIBLE * SKY_OPTIONS_ROW_H + 2); kartCanvas.print("v"); }
+  for (int i = 0; i < rowCount; ++i) {
     int y = SKY_OPTIONS_ANCHOR_Y + (int)(i * SKY_OPTIONS_ROW_H - skyOptScroll.cur);
     if (y < CONTENT_Y - SKY_OPTIONS_ROW_H || y > H - FOOTER_H) continue;
+    SkyOptRow row = skyOptRowAt(i);
     bool sel = i == skyOptionsSelected;
     uint16_t panelCol = sel ? lerpColor565(ILI9341_ORANGE, ILI9341_YELLOW, 0.5f + 0.5f * sinf(millis() / 180.0f)) : ILI9341_BLACK;
     skyDrawManiaPanel(8, y - 4, 304, 18, 10, panelCol);
     if (sel) kartCanvas.fillTriangle(2, y - 1, 2, y + 7, 9, y + 3, ILI9341_YELLOW);
     uint16_t valueCol = sel ? ILI9341_BLACK : ILI9341_CYAN;
     kartCanvas.setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas.setCursor(15, y);
-    if (i == SKY_OPTIONS_COUNT - 1) {
+    if (row == OPT_START_FLIGHT) {
       kartCanvas.setTextColor(sel ? 0x03E0 /*dark green on bright panel*/ : ILI9341_GREEN, panelCol); kartCanvas.print("START FLIGHT");
       continue;
     }
-    if (i == 13) {
+    if (row == OPT_ACHIEVEMENTS) {
       kartCanvas.print("ACHIEVEMENTS");
       int count = 0; for (int a = 0; a < SKY_ACHIEVEMENT_COUNT; ++a) if (skyAchievements & (1 << a)) count++;
       kartCanvas.setTextColor(valueCol, panelCol); kartCanvas.setCursor(240, y); kartCanvas.print(String(count) + "/" + String(SKY_ACHIEVEMENT_COUNT));
       continue;
     }
-    kartCanvas.print(optNames[i]);
-    kartCanvas.setTextColor(valueCol, panelCol); kartCanvas.setCursor(240, y); kartCanvas.print(skyOptionValue(i));
+    kartCanvas.print(skyOptRowName(row));
+    kartCanvas.setTextColor(valueCol, panelCol); kartCanvas.setCursor(240, y); kartCanvas.print(skyOptionValue(row));
   }
 }
 void drawSkyPilotHubOptions() {
@@ -5156,6 +5257,8 @@ void stepSkyPilotHub() {
     skyDrawOptionsScene(dt);
   } else if (skyHubStage == SkyHubStage::MODE) {
     skyDrawModeScene(dt);
+  } else if (skyHubStage == SkyHubStage::GAMECAT) {
+    skyDrawGameCatScene(dt);
   } else if (skyHubStage == SkyHubStage::INFO) {
     skyDrawInfoScene(dt);
   } else {
@@ -5242,6 +5345,7 @@ void skyPlayStageTransition(int direction) {
   if (skyHubStage == SkyHubStage::PLANE) skyDrawPlanePreviewScene(0);
   else if (skyHubStage == SkyHubStage::OPTIONS) skyDrawOptionsScene(0);
   else if (skyHubStage == SkyHubStage::MODE) skyDrawModeScene(0);
+  else if (skyHubStage == SkyHubStage::GAMECAT) skyDrawGameCatScene(0);
   else if (skyHubStage == SkyHubStage::INFO) skyDrawInfoScene(0);
   else skyDrawStartScene(0);
   int revealed = 0;
@@ -5275,6 +5379,7 @@ void drawSkyPilotHub() {
   if (skyHubStage == SkyHubStage::PLANE) drawSkyPilotHubPlane();
   else if (skyHubStage == SkyHubStage::OPTIONS) drawSkyPilotHubOptions();
   else if (skyHubStage == SkyHubStage::MODE) drawSkyPilotHubMode();
+  else if (skyHubStage == SkyHubStage::GAMECAT) drawSkyPilotHubGameCat();
   else if (skyHubStage == SkyHubStage::INFO) drawSkyPilotHubInfo();
   else drawSkyPilotHubStart();
 }
@@ -8878,7 +8983,13 @@ void keyboard() {
   // running and must never leak a Fn press through to it.
   if (fn && !fnLast) {
     if (quickMenuOpen) { if (controlCenterOpen) { controlCenterOpen = false; closeControlCenterAnimated(); } else closeQuickMenuAnimated(); quickMenuOpen = false; playExitSound(); forceFullRedraw = true; redrawNeeded = true; }
-    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode == 8 && skyState == SKY_HOME && skyHubStage != SkyHubStage::START) { skyHubStage = skyHubStage == SkyHubStage::OPTIONS ? SkyHubStage::PLANE : skyHubStage == SkyHubStage::PLANE ? SkyHubStage::MODE : SkyHubStage::START; skyPlayStageTransition(-1); }
+    else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode == 8 && skyState == SKY_HOME && skyHubStage != SkyHubStage::START) {
+      skyHubStage = skyHubStage == SkyHubStage::OPTIONS ? SkyHubStage::PLANE
+                  : skyHubStage == SkyHubStage::PLANE ? (skyGameCategory == SKY_CAT_SIMULATION ? SkyHubStage::GAMECAT : SkyHubStage::MODE)
+                  : skyHubStage == SkyHubStage::MODE ? SkyHubStage::GAMECAT
+                  : SkyHubStage::START;  // GAMECAT or INFO -> START
+      skyPlayStageTransition(-1);
+    }
     else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyMenuMusicStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
@@ -9282,9 +9393,9 @@ void keyboard() {
     if (gameMode == 8) {
       // SKY_FLYING input (including gear) is polled directly in
       // stepSkyPilotFlight() every frame, not through this per-event
-      // handler. HOME is a 3-stage wizard (MODE -> PLANE -> OPTIONS, see
-      // SkyHubStage) with ENTER advancing a stage and FN backing up one
-      // (handled in the global Fn special-case); the old direct M/P/I/R
+      // handler. HOME is a wizard (GAMECAT -> [MODE, arcade only] -> PLANE
+      // -> OPTIONS, see SkyHubStage) with ENTER advancing a stage and FN
+      // backing up one (handled in the global Fn special-case); the old direct M/P/I/R
       // toggle shortcuts still work from any stage too, for muscle memory.
       if (skyState == SKY_HOME) {
         for (char c : k.word) {
@@ -9299,7 +9410,7 @@ void keyboard() {
             else if (c == '.') { skyStartSelected = (skyStartSelected + 1) % SKY_START_OPTION_COUNT; skyListScrollTo(skyStartScroll, skyStartSelected * SKY_START_ROW_H); redrawNeeded = true; }
           }
           if (k.enter) {
-            if (skyStartSelected == 0) { skyHubStage = SkyHubStage::MODE; skyPlayStageTransition(1); }
+            if (skyStartSelected == 0) { skyHubStage = SkyHubStage::GAMECAT; skyPlayStageTransition(1); }
             else if (skyStartSelected == 1) {
               // EXIT - leave Sky Pilot back to the GAMEHUB app list, the
               // same cleanup the global Fn-exit handler does elsewhere.
@@ -9307,10 +9418,31 @@ void keyboard() {
             } else { skyHubStage = SkyHubStage::INFO; skyPlayStageTransition(1); }
             redrawNeeded = true;
           }
+        } else if (skyHubStage == SkyHubStage::GAMECAT) {
+          for (char c : k.word) {
+            // Only 2 rows, so ;/. both just flip between them.
+            if (c == ';' || c == '.') { skyGameCategory = skyGameCategory == SKY_CAT_ARCADE ? SKY_CAT_SIMULATION : SKY_CAT_ARCADE; skyListScrollTo(skyGameCatScroll, (int)skyGameCategory * SKY_GAMECAT_ROW_H); redrawNeeded = true; }
+          }
+          if (k.enter) {
+            if (skyGameCategory == SKY_CAT_ARCADE) {
+              // Arcade never offers fuel/weather/day-night/continuous -
+              // force them off so a setting left on from a previous
+              // Simulation session can't leak into an arcade flight.
+              skyFuelEnabled = false; skyWeatherEnabled = false; skyTimeMode = 0; skyContinuousEnabled = false;
+              if (skyModeSelected == 2) skyModeSelected = 0;  // was Airport to Airport - arcade doesn't offer it, default to runway start
+              skyHubStage = SkyHubStage::MODE;
+            } else {
+              skyModeSelected = 2;  // Simulation is always Airport to Airport - skip the (now single-choice) MODE screen entirely
+              skyHubStage = SkyHubStage::PLANE;
+            }
+            skyPlayStageTransition(1);
+            redrawNeeded = true;
+          }
         } else if (skyHubStage == SkyHubStage::MODE) {
           for (char c : k.word) {
-            if (c == ';') { skyModeSelected = (skyModeSelected + SKY_MODE_OPTION_COUNT - 1) % SKY_MODE_OPTION_COUNT; skyListScrollTo(skyModeScroll, skyModeSelected * SKY_MODE_ROW_H); redrawNeeded = true; }
-            else if (c == '.') { skyModeSelected = (skyModeSelected + 1) % SKY_MODE_OPTION_COUNT; skyListScrollTo(skyModeScroll, skyModeSelected * SKY_MODE_ROW_H); redrawNeeded = true; }
+            int curModeRow = skyModeRowFor(skyModeSelected);
+            if (c == ';') { curModeRow = (curModeRow + SKY_MODE_ARCADE_ROWS - 1) % SKY_MODE_ARCADE_ROWS; skyModeSelected = SKY_MODE_ARCADE_VALUES[curModeRow]; skyListScrollTo(skyModeScroll, curModeRow * SKY_MODE_ROW_H); redrawNeeded = true; }
+            else if (c == '.') { curModeRow = (curModeRow + 1) % SKY_MODE_ARCADE_ROWS; skyModeSelected = SKY_MODE_ARCADE_VALUES[curModeRow]; skyListScrollTo(skyModeScroll, curModeRow * SKY_MODE_ROW_H); redrawNeeded = true; }
           }
           if (k.enter) { skyHubStage = SkyHubStage::PLANE; skyPlayStageTransition(1); redrawNeeded = true; }
         } else if (skyHubStage == SkyHubStage::PLANE) {
@@ -9320,37 +9452,40 @@ void keyboard() {
           }
           if (k.enter) { skyHubStage = SkyHubStage::OPTIONS; skyPlayStageTransition(1); redrawNeeded = true; }
         } else if (skyHubStage == SkyHubStage::OPTIONS) {
+          int optCount = skyOptRowCount();
           for (char c : k.word) {
-            if (c == ';') { skyOptionsSelected = (skyOptionsSelected + SKY_OPTIONS_COUNT - 1) % SKY_OPTIONS_COUNT; skyListScrollTo(skyOptScroll, skyOptionsSelected * SKY_OPTIONS_ROW_H); redrawNeeded = true; }
-            else if (c == '.') { skyOptionsSelected = (skyOptionsSelected + 1) % SKY_OPTIONS_COUNT; skyListScrollTo(skyOptScroll, skyOptionsSelected * SKY_OPTIONS_ROW_H); redrawNeeded = true; }
-            // BOTS COUNT, RENDER DISTANCE, DAY/NIGHT and SAVE SLOT are
-            // ranges, not toggles - ,/ / adjust them directly (same
-            // convention as the PLANE stage cycling the plane model)
+            SkyOptRow curRow = skyOptRowAt(skyOptionsSelected);  // re-read every char, in case an earlier char this same frame just moved the selection
+            if (c == ';') { skyOptionsSelected = (skyOptionsSelected + optCount - 1) % optCount; skyListScrollTo(skyOptScroll, skyOptionsSelected * SKY_OPTIONS_ROW_H); redrawNeeded = true; }
+            else if (c == '.') { skyOptionsSelected = (skyOptionsSelected + 1) % optCount; skyListScrollTo(skyOptScroll, skyOptionsSelected * SKY_OPTIONS_ROW_H); redrawNeeded = true; }
+            // BOTS COUNT, RENDER DISTANCE, FUEL DIFFICULTY, DAY/NIGHT and
+            // SAVE SLOT are ranges, not toggles - ,/ / adjust them directly
+            // (same convention as the PLANE stage cycling the plane model)
             // instead of ENTER stepping through several values one at a time.
-            else if (skyOptionsSelected == 4 && c == ',') { skyBotCount = max(1, skyBotCount - 1); redrawNeeded = true; }
-            else if (skyOptionsSelected == 4 && c == '/') { skyBotCount = min(SKY_BOT_MAX, skyBotCount + 1); redrawNeeded = true; }
-            else if (skyOptionsSelected == 5 && c == ',') { skyRenderDistLevel = max(0, skyRenderDistLevel - 1); redrawNeeded = true; }
-            else if (skyOptionsSelected == 5 && c == '/') { skyRenderDistLevel = min(SKY_RENDER_DIST_LEVELS - 1, skyRenderDistLevel + 1); redrawNeeded = true; }
-            else if (skyOptionsSelected == 9 && c == ',') { skyFuelDifficulty = max(0, skyFuelDifficulty - 1); redrawNeeded = true; }
-            else if (skyOptionsSelected == 9 && c == '/') { skyFuelDifficulty = min(SKY_FUEL_DIFF_COUNT - 1, skyFuelDifficulty + 1); redrawNeeded = true; }
-            else if (skyOptionsSelected == 10 && c == ',') { skyTimeMode = (skyTimeMode + SKY_TIME_MODES - 1) % SKY_TIME_MODES; redrawNeeded = true; }
-            else if (skyOptionsSelected == 10 && c == '/') { skyTimeMode = (skyTimeMode + 1) % SKY_TIME_MODES; redrawNeeded = true; }
-            else if (skyOptionsSelected == 12 && (c == ',' || c == '/')) {
+            else if (curRow == OPT_BOTS_COUNT && c == ',') { skyBotCount = max(1, skyBotCount - 1); redrawNeeded = true; }
+            else if (curRow == OPT_BOTS_COUNT && c == '/') { skyBotCount = min(SKY_BOT_MAX, skyBotCount + 1); redrawNeeded = true; }
+            else if (curRow == OPT_RENDER_DIST && c == ',') { skyRenderDistLevel = max(0, skyRenderDistLevel - 1); redrawNeeded = true; }
+            else if (curRow == OPT_RENDER_DIST && c == '/') { skyRenderDistLevel = min(SKY_RENDER_DIST_LEVELS - 1, skyRenderDistLevel + 1); redrawNeeded = true; }
+            else if (curRow == OPT_FUEL_DIFF && c == ',') { skyFuelDifficulty = max(0, skyFuelDifficulty - 1); redrawNeeded = true; }
+            else if (curRow == OPT_FUEL_DIFF && c == '/') { skyFuelDifficulty = min(SKY_FUEL_DIFF_COUNT - 1, skyFuelDifficulty + 1); redrawNeeded = true; }
+            else if (curRow == OPT_DAYNIGHT && c == ',') { skyTimeMode = (skyTimeMode + SKY_TIME_MODES - 1) % SKY_TIME_MODES; redrawNeeded = true; }
+            else if (curRow == OPT_DAYNIGHT && c == '/') { skyTimeMode = (skyTimeMode + 1) % SKY_TIME_MODES; redrawNeeded = true; }
+            else if (curRow == OPT_SAVE_SLOT && (c == ',' || c == '/')) {
               skySaveSlot = (skySaveSlot + (c == '/' ? 1 : SKY_SAVE_SLOTS - 1)) % SKY_SAVE_SLOTS;
               skyLoadBest();  // a different slot's best/achievements/visited airports
               redrawNeeded = true;
             }
           }
           if (k.enter) {
-            if (skyOptionsSelected == SKY_OPTIONS_COUNT - 1) { startSkyPilotFlight(skyModeSelected); return; }
-            if (skyOptionsSelected == 0) skyImuControlEnabled = !skyImuControlEnabled;
-            else if (skyOptionsSelected == 1) skyEngineSoundEnabled = !skyEngineSoundEnabled;
-            else if (skyOptionsSelected == 2) skyRadarEnabled = !skyRadarEnabled;
-            else if (skyOptionsSelected == 3) skyAiBotsEnabled = !skyAiBotsEnabled;
-            else if (skyOptionsSelected == 6) skyAutopilotEnabled = !skyAutopilotEnabled;
-            else if (skyOptionsSelected == 7) skyContinuousEnabled = !skyContinuousEnabled;
-            else if (skyOptionsSelected == 8) skyFuelEnabled = !skyFuelEnabled;
-            else if (skyOptionsSelected == 11) skyWeatherEnabled = !skyWeatherEnabled;
+            SkyOptRow curRow = skyOptRowAt(skyOptionsSelected);
+            if (curRow == OPT_START_FLIGHT) { startSkyPilotFlight(skyModeSelected); return; }
+            if (curRow == OPT_CONTROL) skyImuControlEnabled = !skyImuControlEnabled;
+            else if (curRow == OPT_SOUND) skyEngineSoundEnabled = !skyEngineSoundEnabled;
+            else if (curRow == OPT_RADAR) skyRadarEnabled = !skyRadarEnabled;
+            else if (curRow == OPT_AI_BOTS) skyAiBotsEnabled = !skyAiBotsEnabled;
+            else if (curRow == OPT_AUTOPILOT) skyAutopilotEnabled = !skyAutopilotEnabled;
+            else if (curRow == OPT_CONTINUOUS) skyContinuousEnabled = !skyContinuousEnabled;
+            else if (curRow == OPT_FUEL) skyFuelEnabled = !skyFuelEnabled;
+            else if (curRow == OPT_WEATHER) skyWeatherEnabled = !skyWeatherEnabled;
             redrawNeeded = true;
           }
         }
