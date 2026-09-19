@@ -2074,6 +2074,86 @@ void closeQuickMenuAnimated() {
   }
 }
 
+// ---- Control Center: a second Opt overlay, reached by pressing Opt again
+// while the dock is already open (a 3-press cycle: closed -> dock ->
+// control center -> closed - see the k.opt handler in keyboard()). Unlike
+// the dock (which rises from the bottom), this slides down from the top,
+// so the two overlays read as distinct even though they share the same
+// key. Quick hardware toggles that don't deserve a trip into SETTINGS:
+// brightness, volume, theme, Wi-Fi, Bluetooth (BLE HID).
+bool controlCenterOpen = false;
+int controlCenterSelected = 0;
+constexpr int CONTROLCENTER_ROW_COUNT = 5;  // BRIGHTNESS, VOLUME, THEME, WI-FI, BLUETOOTH
+// No persisted "Wi-Fi enabled" concept exists elsewhere in this file - Wi-Fi
+// just auto-reconnects forever via serviceAutoConnectWifi(). This adds the
+// one missing piece (an explicit off switch) that function now also checks.
+bool wifiRadioEnabled = true;
+constexpr int CTRLCTR_W = 280, CTRLCTR_H = 150;
+constexpr int CTRLCTR_X = (W - CTRLCTR_W) / 2;
+// Resting position, docked near the top edge (mirrors QUICKMENU_Y's own
+// "near the opposite edge" role); the slide animation moves the panel
+// between -CTRLCTR_H (fully off-screen above) and this Y.
+constexpr int CTRLCTR_Y = 8;
+constexpr int CTRLCTR_SLIDE_ZONE_H = CTRLCTR_Y + CTRLCTR_H;
+constexpr int CTRLCTR_ROW_H = 24;
+void drawControlCenterRow(int row, bool selected) {
+  int y = CTRLCTR_Y + 24 + row * CTRLCTR_ROW_H;
+  uint16_t bg = selected ? ui.selected : ui.panel;
+  tft.fillRect(CTRLCTR_X + 6, y - 3, CTRLCTR_W - 12, CTRLCTR_ROW_H - 4, bg);
+  static const char* labels[CONTROLCENTER_ROW_COUNT] = {"BRIGHTNESS", "VOLUME", "THEME", "WI-FI", "BLUETOOTH"};
+  tft.setTextSize(1); tft.setTextColor(selected ? ui.text : ui.dim, bg);
+  tft.setCursor(CTRLCTR_X + 10, y + 3); tft.print(labels[row]);
+  String val;
+  switch (row) {
+    case 0: val = String(brightnessLevel) + "/10"; break;
+    case 1: val = String(volumeLevel) + "/10"; break;
+    case 2: val = String(themeIndex + 1) + "/" + String(THEME_COUNT); break;
+    case 3: val = !wifiRadioEnabled ? "OFF" : (WiFi.status() == WL_CONNECTED ? "ON" : "..."); break;
+    default: val = !bleHidEnabled ? "OFF" : (bleKeyboard.isPaired() ? "PAIRED" : "ON"); break;
+  }
+  tft.setTextColor(selected ? ui.text : ui.accent, bg);
+  tft.setCursor(CTRLCTR_X + CTRLCTR_W - 10 - (int)val.length() * 6, y + 3);
+  tft.print(val);
+}
+void drawControlCenter() {
+  tft.fillRoundRect(CTRLCTR_X, CTRLCTR_Y, CTRLCTR_W, CTRLCTR_H, 10, ui.panel);
+  tft.drawRoundRect(CTRLCTR_X, CTRLCTR_Y, CTRLCTR_W, CTRLCTR_H, 10, ui.accent);
+  tft.setTextSize(1); tft.setTextColor(ui.accent, ui.panel);
+  const char* title = "CONTROL CENTER";
+  tft.setCursor(CTRLCTR_X + (CTRLCTR_W - (int)strlen(title) * 6) / 2, CTRLCTR_Y + 6);
+  tft.print(title);
+  for (int i = 0; i < CONTROLCENTER_ROW_COUNT; ++i) drawControlCenterRow(i, i == controlCenterSelected);
+}
+// Same easing/frame-count convention as the dock's own open/close, just
+// travelling from off-screen ABOVE (y = -CTRLCTR_H) down to CTRLCTR_Y
+// instead of from below - the "sliding from the top" the panel is meant to
+// read as.
+void openControlCenterAnimated() {
+  constexpr int FRAMES = 14;
+  for (int f = 1; f <= FRAMES; ++f) {
+    int y = -CTRLCTR_H + (int)((CTRLCTR_H + CTRLCTR_Y) * easeOutCubic((float)f / FRAMES));
+    tft.fillRect(CTRLCTR_X, 0, CTRLCTR_W, CTRLCTR_SLIDE_ZONE_H, ui.bg);
+    tft.fillRoundRect(CTRLCTR_X, y, CTRLCTR_W, CTRLCTR_H, 10, ui.panel);
+    tft.drawRoundRect(CTRLCTR_X, y, CTRLCTR_W, CTRLCTR_H, 10, ui.accent);
+    M5Cardputer.update();
+    delay(9);
+  }
+  drawControlCenter();
+}
+void closeControlCenterAnimated() {
+  constexpr int FRAMES = 14;
+  for (int f = FRAMES; f >= 0; --f) {
+    int y = -CTRLCTR_H + (int)((CTRLCTR_H + CTRLCTR_Y) * easeInCubic((float)f / FRAMES));
+    tft.fillRect(CTRLCTR_X, 0, CTRLCTR_W, CTRLCTR_SLIDE_ZONE_H, ui.bg);
+    if (f > 0) {
+      tft.fillRoundRect(CTRLCTR_X, y, CTRLCTR_W, CTRLCTR_H, 10, ui.panel);
+      tft.drawRoundRect(CTRLCTR_X, y, CTRLCTR_W, CTRLCTR_H, 10, ui.accent);
+    }
+    M5Cardputer.update();
+    delay(9);
+  }
+}
+
 // ---- Per-app opening intro: a ~1.1s icon+name splash plus a short two-note
 // jingle, played whenever navigating into a genuinely different app (see the
 // hook in draw()). Purely decorative - it never touches app state, and
@@ -7758,32 +7838,60 @@ void keyboard() {
   // Fn/"back" behaviour below - the overlay sits on top of whatever page is
   // running and must never leak a Fn press through to it.
   if (fn && !fnLast) {
-    if (quickMenuOpen) { quickMenuOpen = false; playExitSound(); closeQuickMenuAnimated(); forceFullRedraw = true; redrawNeeded = true; }
+    if (quickMenuOpen) { if (controlCenterOpen) { controlCenterOpen = false; closeControlCenterAnimated(); } else closeQuickMenuAnimated(); quickMenuOpen = false; playExitSound(); forceFullRedraw = true; redrawNeeded = true; }
     else if (page != LAUNCHER || !launcherHome) { playExitSound(); if (page == SETTINGS && pinChangeActive) { pinChangeActive = false; pinChangeConfirm = false; pinChangeFirst = ""; pinChangeInput = ""; pinChangeStatus = "PIN change cancelled"; } else if (page == ZABKATOTP && zabkaUnlocking) { zabkaUnlocking = false; zabkaUnlockBuffer = ""; zabkaStatus = "Vault remains locked."; } else if (page == CLAB && cLabNameDialogVisible) { cLabNameDialogVisible = false; cLabNameBuffer = ""; } else if (page == CLAB && cLabSlotDialogVisible) { cLabSlotDialogVisible = false; } else if (page == CLAB && cLabSaveDialogVisible) { cLabSaveDialogVisible = false; } else if (page == CLAB && cLabExplorerVisible) { cardcLedOverride = false; updateStatusLed(); page = LAUNCHER; launcherHome = true; } else if (page == GAMEHUB && gameMode == 8 && skyState == SKY_HOME && skyHubStage != SkyHubStage::MODE) { skyPlayStageTransition(); skyHubStage = skyHubStage == SkyHubStage::OPTIONS ? SkyHubStage::PLANE : SkyHubStage::MODE; }
     else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyMenuMusicStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
-  // Opt toggles the same floating quick-launch overlay from any page, any
-  // time - independent of whatever the current page's own keys mean. It is
-  // edge-triggered the same way Fn is above (optLast mirrors fnLast) so
-  // holding the key doesn't retrigger every loop() tick.
+  // Opt cycles through three states from any page, any time - independent
+  // of whatever the current page's own keys mean: closed -> dock -> control
+  // center -> closed. quickMenuOpen stays the single "an Opt overlay owns
+  // input" flag either overlay sets (every quickMenuOpen check elsewhere in
+  // this file - stepper guards, the sleep/redraw gate, etc. - keeps working
+  // unmodified for both); controlCenterOpen only distinguishes which of the
+  // two is actually showing while it's true. Edge-triggered the same way Fn
+  // is above (optLast mirrors fnLast) so holding the key doesn't retrigger
+  // every loop() tick.
   if (k.opt && !optLast) {
-    quickMenuOpen = !quickMenuOpen;
-    quickMenuSelected = 0;
     playMenuSound();
-    // Opening animates and paints immediately so the overlay appears the
-    // instant the key is pressed, rather than waiting on the
-    // redrawNeeded/draw() dispatch further down in loop() - that dispatch
-    // doesn't know about this overlay and would just redraw the page
-    // underneath it.
-    if (quickMenuOpen) openQuickMenuAnimated();
-    // Closing animates it away, then leans on the same dispatch: the panel
-    // is write-only so there is no way to "erase" just the covered pixels,
-    // so forceFullRedraw asks loop() for one full draw() of the current
-    // page even though `page` itself never changed.
-    else { closeQuickMenuAnimated(); forceFullRedraw = true; redrawNeeded = true; }
+    if (!quickMenuOpen) {
+      quickMenuOpen = true; quickMenuSelected = 0;
+      openQuickMenuAnimated();
+    } else if (!controlCenterOpen) {
+      controlCenterOpen = true; controlCenterSelected = 0;
+      openControlCenterAnimated();
+    } else {
+      quickMenuOpen = false; controlCenterOpen = false;
+      closeControlCenterAnimated();
+      forceFullRedraw = true; redrawNeeded = true;
+    }
   }
   optLast = k.opt;
+  if (controlCenterOpen) {
+    // Same "owns all input while open" rule as the dock below - ;/. move
+    // between rows, ,// adjust the selected row's value (a toggle for
+    // Wi-Fi/Bluetooth, a stepped level for the other three).
+    if (!event || !M5Cardputer.Keyboard.isPressed()) return;
+    int oldSel = controlCenterSelected;
+    if (wordContains(k.word, ';')) controlCenterSelected = (controlCenterSelected + CONTROLCENTER_ROW_COUNT - 1) % CONTROLCENTER_ROW_COUNT;
+    else if (wordContains(k.word, '.')) controlCenterSelected = (controlCenterSelected + 1) % CONTROLCENTER_ROW_COUNT;
+    if (controlCenterSelected != oldSel) { playMenuSound(); drawControlCenterRow(oldSel, false); drawControlCenterRow(controlCenterSelected, true); }
+    bool dec = wordContains(k.word, ','), inc = wordContains(k.word, '/');
+    if (dec || inc) {
+      switch (controlCenterSelected) {
+        case 0: brightnessLevel = constrain((int)brightnessLevel + (inc ? 1 : -1), 1, 10); applyBacklight(); break;
+        case 1: volumeLevel = constrain((int)volumeLevel + (inc ? 1 : -1), 0, 10); applyVolume(); break;
+        case 2: themeIndex = (themeIndex + (inc ? 1 : THEME_COUNT - 1)) % THEME_COUNT; applyTheme(); break;
+        case 3: wifiRadioEnabled = !wifiRadioEnabled; if (wifiRadioEnabled) autoConnectWifi(); else { WiFi.disconnect(true); WiFi.mode(WIFI_OFF); } break;
+        default: bleHidEnabled = !bleHidEnabled; if (bleHidEnabled) ensureBleReady(); break;
+      }
+      playFunctionSound(); markStateDirty();
+      // A theme change recolors every row's background, not just the
+      // selected one's value - the only case needing a full repaint here.
+      if (controlCenterSelected == 2) drawControlCenter(); else drawControlCenterRow(controlCenterSelected, true);
+    }
+    return;
+  }
   if (quickMenuOpen) {
     // The overlay owns all input while open; the page underneath must not
     // also react to the same keystroke (e.g. GAMEHUB's own ;/. handling).
