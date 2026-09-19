@@ -3495,7 +3495,7 @@ int skyPreSpectateModelIndex = 0;  // skyPlaneModelIndex gets overwritten every 
 // special-case) rather than exiting Sky Pilot entirely from PLANE/OPTIONS.
 enum class SkyHubStage { MODE, PLANE, OPTIONS };
 SkyHubStage skyHubStage = SkyHubStage::MODE;
-constexpr int SKY_OPTIONS_COUNT = 7;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, RENDER DISTANCE, START FLIGHT
+constexpr int SKY_OPTIONS_COUNT = 8;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, RENDER DISTANCE, AUTOPILOT, START FLIGHT
 int skyOptionsSelected = 0;
 
 // Stall/rotate speed, control rates, and throttle targets all now come from
@@ -3624,6 +3624,12 @@ const int skyRenderDistGrid[SKY_RENDER_DIST_LEVELS] = {10, 16, 20, 26};
 const float skyRenderDistBotCull[SKY_RENDER_DIST_LEVELS] = {400.0f, 700.0f, 1000.0f, 1400.0f};
 const float skyRenderDistLabelCull[SKY_RENDER_DIST_LEVELS] = {500.0f, 900.0f, 1300.0f, 1800.0f};
 int skyRenderDistLevel = 1;
+// A visual navigation aid, not real autopilot flight control - the plane
+// still needs to be hand-flown. A trail of chevrons floating above the
+// terrain, pointing from the plane toward the A2A target airport, for
+// players who'd rather glance at a guide line than triangulate off the
+// minimap/compass on a long cross-country leg.
+bool skyAutopilotEnabled = false;
 // 'R' on the HOME screen - shows bots (as blips) on the same minimap
 // airports already use, regardless of game mode.
 bool skyRadarEnabled = true;
@@ -4008,6 +4014,31 @@ void skyDrawAirportLabels(const KartCam& cam) {
     kartCanvas.setCursor(sx - textW / 2, sy - 8); kartCanvas.print(skyAirports[i].name);
   }
 }
+// The AUTOPILOT toggle's guide trail: chevrons ">" spaced along the
+// straight-line path from the plane to the A2A target, floating above the
+// terrain at each point (not a fixed altitude - the ground it's floating
+// over is anything but flat) so it stays visible over hills instead of
+// burying itself in one. Only computed out to MAX_SHOW ahead, not the
+// (possibly 1000+ unit) full remaining distance - chevrons past render
+// distance would just be wasted work, kartDrawSeg would never show them.
+void skyDrawAutopilotGuide(const KartCam& cam) {
+  if (!skyAutopilotEnabled || skyMode != SKY_MODE_AIRPORT || skyTargetAirport < 0) return;
+  const SkyAirport& target = skyAirports[skyTargetAirport];
+  float dx = target.pos.x - skyPlane.pos.x, dz = target.pos.z - skyPlane.pos.z;
+  float dist = sqrtf(dx * dx + dz * dz);
+  if (dist < 1.0f) return;
+  float dirX = dx / dist, dirZ = dz / dist;
+  KVec3 dirFwd{dirX, 0, dirZ};
+  KVec3 rightDir = knormalized(kcross(dirFwd, KVec3{0, 1, 0}));
+  constexpr float SPACING = 55.0f, MAX_SHOW = 500.0f, CLEARANCE = 22.0f, WING = 6.0f, LENGTH = 9.0f;
+  for (float travel = SPACING; travel < dist && travel < MAX_SHOW; travel += SPACING) {
+    float px = skyPlane.pos.x + dirX * travel, pz = skyPlane.pos.z + dirZ * travel;
+    KVec3 tip{px, skyTerrainHeight(px, pz) + CLEARANCE, pz};
+    KVec3 back = tip - dirFwd * LENGTH;
+    kartDrawSeg(cam, back + rightDir * WING, tip, ILI9341_YELLOW);
+    kartDrawSeg(cam, back - rightDir * WING, tip, ILI9341_YELLOW);
+  }
+}
 void skyInitBots() {
   for (int i = 0; i < skyBotCount; i++) {
     float ang = (2 * KART_PI * i) / skyBotCount + (random(0, 100) / 100.0f);
@@ -4097,6 +4128,7 @@ void skyRenderScene(const KartCam& cam, const KVec3& fwd, bool firstPerson) {
   }
   skyDrawBots(cam);
   skyDrawAirportLabels(cam);
+  skyDrawAutopilotGuide(cam);
 }
 // Bottom instrument strip: a rotating/tilting attitude indicator (per-column
 // fill against the tilted horizon line - cheap way to get a properly clipped
@@ -4158,15 +4190,27 @@ void skyDrawCompass(int x0, int y0, int w, int h) {
   char buf[5]; snprintf(buf, sizeof(buf), "%03d", (int)headingDeg);
   kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK); kartCanvas.setCursor(cx - 9, y0 + h - 9); kartCanvas.print(buf);
 }
-// A fixed-scale radar: the plane always sits at the center (a north-up map,
-// not heading-up, since the compass strip already covers "which way am I
-// facing" - this one is for "where is everything else"), with airports as
-// blips pinned to the edge when out of range so their direction is never
-// lost even far from either of them. The background is sampled straight
-// from the same terrain height/water functions the live 3D view uses (one
-// sample per pixel row/column, skyIsWater() for the color) instead of a
-// flat black square, so lakes and the general shape of nearby high ground
-// actually show up on it, not just the blips.
+// A fixed-scale, heading-up radar: the plane always sits at the center
+// facing "up" on screen (rotating with it, like a real moving-map display)
+// rather than a fixed north-up map - the compass strip already covers "what
+// heading am I on" as a number, so this one is purely "where's everything
+// else relative to which way I'm actually pointing", which a north-up map
+// makes you translate in your head every time you turn. World offsets are
+// rotated by -heading (skyMinimapRotate()) before mapping to screen pixels;
+// its inverse (skyMinimapUnrotate()) does the same for the background scan
+// below, which walks screen pixels and needs the world point each one
+// corresponds to. Airports/bots are pinned to the edge when out of range so
+// their direction is never lost even far from either of them.
+void skyMinimapRotate(float dx, float dz, float& outRight, float& outFwd) {
+  float c = cosf(skyPlane.heading), s = sinf(skyPlane.heading);
+  outRight = dx * c - dz * s;
+  outFwd = dx * s + dz * c;
+}
+void skyMinimapUnrotate(float right, float fwd, float& outDx, float& outDz) {
+  float c = cosf(skyPlane.heading), s = sinf(skyPlane.heading);
+  outDx = right * c + fwd * s;
+  outDz = -right * s + fwd * c;
+}
 void skyDrawMinimap(int x0, int y0, int size) {
   kartCanvas.drawRect(x0, y0, size, size, ILI9341_DARKGREY);
   const float unitsPerPixel = 9.0f;
@@ -4178,8 +4222,9 @@ void skyDrawMinimap(int x0, int y0, int size) {
   constexpr int SAMPLE_STEP = 3;
   for (int py = y0 + 1; py < y0 + size - 1; py += SAMPLE_STEP) {
     for (int px = x0 + 1; px < x0 + size - 1; px += SAMPLE_STEP) {
-      float wx = skyPlane.pos.x + (px - cx) * unitsPerPixel;
-      float wz = skyPlane.pos.z - (py - cy) * unitsPerPixel;
+      float dx, dz;
+      skyMinimapUnrotate((px - cx) * unitsPerPixel, -(py - cy) * unitsPerPixel, dx, dz);
+      float wx = skyPlane.pos.x + dx, wz = skyPlane.pos.z + dz;
       bool water = skyIsWater(wx, wz);
       float h = skyTerrainHeight(wx, wz);
       uint16_t col = water ? 0x1B5F : (h > SKY_RUNWAY_ELEVATION + 15.0f ? 0x2AA0 : 0x1A05);
@@ -4188,27 +4233,26 @@ void skyDrawMinimap(int x0, int y0, int size) {
     }
   }
   for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) {
-    float dx = (skyAirports[i].pos.x - skyPlane.pos.x) / unitsPerPixel;
-    float dz = (skyAirports[i].pos.z - skyPlane.pos.z) / unitsPerPixel;
-    float dist = sqrtf(dx * dx + dz * dz);
+    float dx = skyAirports[i].pos.x - skyPlane.pos.x, dz = skyAirports[i].pos.z - skyPlane.pos.z;
+    float dist = sqrtf(dx * dx + dz * dz) / unitsPerPixel;
     if (dist > maxR && dist > 0.001f) { float s = maxR / dist; dx *= s; dz *= s; }
+    float right, fwd; skyMinimapRotate(dx / unitsPerPixel, dz / unitsPerPixel, right, fwd);
     bool isTarget = skyMode == SKY_MODE_AIRPORT && i == skyTargetAirport;
-    kartCanvas.fillCircle(cx + (int)dx, cy - (int)dz, 2, isTarget ? ILI9341_YELLOW : ILI9341_CYAN);
+    kartCanvas.fillCircle(cx + (int)right, cy - (int)fwd, 2, isTarget ? ILI9341_YELLOW : ILI9341_CYAN);
   }
   if (skyRadarEnabled && skyAiBotsEnabled) {
     for (int i = 0; i < skyBotCount; ++i) {
-      float dx = (skyBots[i].pos.x - skyPlane.pos.x) / unitsPerPixel;
-      float dz = (skyBots[i].pos.z - skyPlane.pos.z) / unitsPerPixel;
-      float dist = sqrtf(dx * dx + dz * dz);
+      float dx = skyBots[i].pos.x - skyPlane.pos.x, dz = skyBots[i].pos.z - skyPlane.pos.z;
+      float dist = sqrtf(dx * dx + dz * dz) / unitsPerPixel;
       if (dist > maxR && dist > 0.001f) { float s = maxR / dist; dx *= s; dz *= s; }
-      kartCanvas.fillCircle(cx + (int)dx, cy - (int)dz, 1, ILI9341_ORANGE);
+      float right, fwd; skyMinimapRotate(dx / unitsPerPixel, dz / unitsPerPixel, right, fwd);
+      kartCanvas.fillCircle(cx + (int)right, cy - (int)fwd, 1, ILI9341_ORANGE);
     }
   }
-  // Heading arrow: a direct top-down projection of the real flight direction
-  // (not the compass's display-negated heading, which only exists to make
-  // the compass NUMBER read in the standard clockwise sense).
-  float ax = sinf(skyPlane.heading), az = cosf(skyPlane.heading);
-  kartCanvas.drawLine(cx - (int)(ax * 4), cy + (int)(az * 4), cx + (int)(ax * 7), cy - (int)(az * 7), ILI9341_WHITE);
+  // The plane's own indicator is now a fixed upward-pointing arrow (heading
+  // is always "up" by construction), not something that itself needs to
+  // rotate with heading the way the old north-up version's did.
+  kartCanvas.fillTriangle(cx, cy - 6, cx - 4, cy + 4, cx + 4, cy + 4, ILI9341_WHITE);
 }
 // The minimap grew from 52 to 72px (see skyDrawMinimap()'s own comment on
 // why) - these two derive the rest of the top-right HUD layout from that
@@ -4491,13 +4535,13 @@ void drawSkyPilotHubPlane() {
 void skyDrawOptionsScene(float dt) {
   kartCanvas.fillScreen(ui.bg);
   skyDrawHubStars(dt);
-  static const char* optNames[SKY_OPTIONS_COUNT] = {"CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "RENDER DISTANCE", "START FLIGHT"};
+  static const char* optNames[SKY_OPTIONS_COUNT] = {"CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "RENDER DISTANCE", "AUTOPILOT", "START FLIGHT"};
   for (int i = 0; i < SKY_OPTIONS_COUNT; ++i) {
-    int y = CONTENT_Y + 12 + i * 22; bool sel = i == skyOptionsSelected;
+    int y = CONTENT_Y + 10 + i * 20; bool sel = i == skyOptionsSelected;
     uint16_t bg = sel ? lerpColor565(ui.bg, ui.selected, 0.6f + 0.4f * sinf(millis() / 180.0f)) : ui.bg;
-    if (sel) kartCanvas.fillRoundRect(8, y - 4, 304, 18, 4, bg);
+    if (sel) kartCanvas.fillRoundRect(8, y - 4, 304, 16, 4, bg);
     kartCanvas.setTextColor(sel ? ui.text : ui.dim, bg); kartCanvas.setCursor(15, y); kartCanvas.print(sel ? "> " : "  ");
-    if (i == 6) {
+    if (i == 7) {
       kartCanvas.setTextColor(sel ? ILI9341_GREEN : ui.dim, bg); kartCanvas.print("START FLIGHT");
       continue;
     }
@@ -4507,10 +4551,11 @@ void skyDrawOptionsScene(float dt) {
                : i == 2 ? (skyRadarEnabled ? "ON" : "OFF")
                : i == 3 ? (skyAiBotsEnabled ? "ON" : "OFF")
                : i == 4 ? String(skyBotCount)
-                        : String(skyRenderDistNames[skyRenderDistLevel]);
+               : i == 5 ? String(skyRenderDistNames[skyRenderDistLevel])
+                        : (skyAutopilotEnabled ? "ON" : "OFF");
     kartCanvas.setTextColor(sel ? ui.text : ui.accent, bg); kartCanvas.setCursor(240, y); kartCanvas.print(val);
   }
-  kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(12, CONTENT_Y + 172);
+  kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(12, CONTENT_Y + 184);
   kartCanvas.print("Controls hold their angle. MED/HIGH throttle to take off.");
 }
 void drawSkyPilotHubOptions() {
@@ -8618,11 +8663,12 @@ void keyboard() {
             else if (skyOptionsSelected == 5 && c == '/') { skyRenderDistLevel = min(SKY_RENDER_DIST_LEVELS - 1, skyRenderDistLevel + 1); playFunctionSound(); redrawNeeded = true; }
           }
           if (k.enter) {
-            if (skyOptionsSelected == 6) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
+            if (skyOptionsSelected == 7) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
             if (skyOptionsSelected == 0) skyImuControlEnabled = !skyImuControlEnabled;
             else if (skyOptionsSelected == 1) skyEngineSoundEnabled = !skyEngineSoundEnabled;
             else if (skyOptionsSelected == 2) skyRadarEnabled = !skyRadarEnabled;
             else if (skyOptionsSelected == 3) skyAiBotsEnabled = !skyAiBotsEnabled;
+            else if (skyOptionsSelected == 6) skyAutopilotEnabled = !skyAutopilotEnabled;
             if (skyOptionsSelected != 4 && skyOptionsSelected != 5) { playFunctionSound(); redrawNeeded = true; }
           }
         }
