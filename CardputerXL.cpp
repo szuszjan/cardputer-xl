@@ -4294,41 +4294,36 @@ void drawSkyPilotHubOptions() {
   footer(";/. SELECT  ,/ ADJUST  ENTER TOGGLE/START  FN BACK");
 }
 
-// An 8-second loop from the user's own chiptune collection ("shock therapy
-// 23", trimmed past its intro) for the HOME wizard, on its own speaker
-// channel (4 - Kart Racer's melody/beep/engine use 0/1/2, Sky Pilot's own
-// flight engine drone uses 3) so it never fights either of those, and so a
-// UI click's one-shot tone (playEnterSound() etc, channel 0 by default)
-// doesn't get cut off by it or vice versa. Stored as headerless 16kHz mono
-// 16-bit PCM (sky_menu_music.h) rather than a WAV container - playRaw()
-// takes the raw samples directly, sidestepping playWav()'s stricter header
-// parsing. repeat=0 means "loop forever" (M5Unified's own convention, see
-// Speaker_Class.cpp's _play_raw) - the driver handles the actual seamless
-// looping in its own audio task, so this only needs to kick it off once,
-// not re-trigger it every tick like a procedural note sequence would.
+// A ~3.5s loop from the user's own chiptune collection ("shock therapy 23")
+// for the HOME wizard, on its own speaker channel (4 - Kart Racer's melody/
+// beep/engine use 0/1/2, Sky Pilot's own flight engine drone uses 3) so it
+// never fights either of those, and so a UI click's one-shot tone
+// (playEnterSound() etc, channel 0 by default) doesn't get cut off by it or
+// vice versa. Two earlier automated trims (4-12s, then 20-28s) both landed
+// on spans that sounded like they kept "cutting off" - confirmed via
+// waveform renders to be sparse/quiet sections of the track, not a
+// playback bug - so this final clip is the user's own hand-picked trim
+// instead. Stored as headerless 16kHz mono 16-bit PCM (sky_menu_music.h)
+// rather than a WAV container - playRaw() takes the raw samples directly,
+// sidestepping playWav()'s stricter header parsing.
+//
+// Uses playRaw(repeat=0) - M5Unified's own "loop forever" - which wraps the
+// buffer sample-accurately inside its own audio task, with no gap. An
+// earlier version drove the repeat itself instead (a single play-through
+// re-triggered on this file's own millis() timer), from back when repeat=0
+// was mistakenly suspected of being the cause of the trim-related cutting
+// off above; that self-driven version introduced a real, audible ~50ms gap
+// of its own, since loop() (keyboard scanning, other steppers, etc.) can't
+// guarantee firing the retrigger the instant the clip actually ends the way
+// the audio task's own internal wraparound can.
 bool skyMenuMusicPlaying = false;
-unsigned long skyMenuClipStartMs = 0;
-// The clip's own real length (256000 bytes / 2 bytes-per-sample / 16000 Hz).
-// M5Unified's playRaw(..., repeat=0) is documented as "loop forever", but on
-// this buffer length/rate it audibly restarts every ~2s instead of the true
-// 8s - a bug somewhere in its internal infinite-repeat bookkeeping, not in
-// this data or this call (verified: a one-time diagnostic print confirmed
-// the full 128000-sample/8s buffer really is what gets passed in, and
-// playRaw() reports success). Rather than debug a third-party library's
-// internal state machine further, this drives the repeat itself: a single
-// play-through (repeat=1) re-triggered on this file's own wall-clock timer
-// every SKY_MENU_CLIP_MS, sidestepping whatever that internal mechanism
-// gets wrong for a clip this long.
-constexpr unsigned long SKY_MENU_CLIP_MS = 8000;
 void skyMenuMusicStop() {
   if (skyMenuMusicPlaying) { M5Cardputer.Speaker.stop(4); skyMenuMusicPlaying = false; }
 }
 void skyMenuMusicUpdate() {
   if (!volumeLevel) { skyMenuMusicStop(); return; }
-  unsigned long now = millis();
-  if (skyMenuMusicPlaying && now - skyMenuClipStartMs < SKY_MENU_CLIP_MS) return;
-  M5Cardputer.Speaker.playRaw(reinterpret_cast<const int16_t*>(SKY_MENU_MUSIC_PCM), SKY_MENU_MUSIC_PCM_LEN / 2, 16000, false, 1, 4, true);
-  skyMenuClipStartMs = now;
+  if (skyMenuMusicPlaying) return;
+  M5Cardputer.Speaker.playRaw(reinterpret_cast<const int16_t*>(SKY_MENU_MUSIC_PCM), SKY_MENU_MUSIC_PCM_LEN / 2, 16000, false, 0, 4, true);
   skyMenuMusicPlaying = true;
 }
 
@@ -4341,6 +4336,18 @@ void skyMenuMusicUpdate() {
 // change) - repainting them every animation tick is what visibly flickered
 // before. Also drives the looping menu music.
 unsigned long skyHubLastMs = 0;
+// The redraw (starfield + a full content-band blit) doesn't need to run
+// uncapped - it's a static list with a subtle background animation, not
+// something that benefits from more than ~24fps, so this caps it to reduce
+// needless continuous SPI/canvas work. (Originally added chasing a
+// suspected audio-starvation cause for the menu music cutting out; that
+// turned out to be a bad trim point in the audio itself, not a rendering
+// issue - see sky_menu_music.h's own comment - but the throttle is still a
+// reasonable efficiency win on its own, so it stayed.) skyMenuMusicUpdate()
+// itself still runs every tick regardless (cheap, no drawing) so audio
+// timing doesn't depend on this throttle either way.
+constexpr unsigned long SKY_HUB_FRAME_MS = 41;
+unsigned long skyHubLastFrameMs = 0;
 void stepSkyPilotHub() {
   if (page != GAMEHUB || gameMode != 8 || skyState != SKY_HOME) { skyHubLastMs = 0; return; }
   if (quickMenuOpen) return;
@@ -4350,6 +4357,8 @@ void stepSkyPilotHub() {
   skyHubLastMs = now;
   if (dt > 0.1f) dt = 0.1f;
   skyMenuMusicUpdate();
+  if (now - skyHubLastFrameMs < SKY_HUB_FRAME_MS) return;
+  skyHubLastFrameMs = now;
   if (skyHubStage == SkyHubStage::PLANE) {
     skyPreviewSpin += dt * 1.1f;
     if (skyPreviewSpin > 6.2832f) skyPreviewSpin -= 6.2832f;
