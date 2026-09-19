@@ -3495,7 +3495,7 @@ int skyPreSpectateModelIndex = 0;  // skyPlaneModelIndex gets overwritten every 
 // special-case) rather than exiting Sky Pilot entirely from PLANE/OPTIONS.
 enum class SkyHubStage { MODE, PLANE, OPTIONS };
 SkyHubStage skyHubStage = SkyHubStage::MODE;
-constexpr int SKY_OPTIONS_COUNT = 8;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, RENDER DISTANCE, AUTOPILOT, START FLIGHT
+constexpr int SKY_OPTIONS_COUNT = 9;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, RENDER DISTANCE, AUTOPILOT, CONTINUOUS, START FLIGHT
 int skyOptionsSelected = 0;
 
 // Stall/rotate speed, control rates, and throttle targets all now come from
@@ -3630,6 +3630,14 @@ int skyRenderDistLevel = 1;
 // players who'd rather glance at a guide line than triangulate off the
 // minimap/compass on a long cross-country leg.
 bool skyAutopilotEnabled = false;
+// Airport-to-Airport, but the flight keeps going after a successful
+// landing instead of ending there - a fresh distinct target is picked from
+// the one just landed at (now skyStartAirport for the new leg) and the
+// plane sits ready to take off again, still fully grounded/stopped from
+// the landing rollout that just finished. skyScore deliberately keeps
+// accumulating across legs rather than resetting, so BEST tracks the
+// longest continuous run, not any one leg.
+bool skyContinuousEnabled = false;
 // 'R' on the HOME screen - shows bots (as blips) on the same minimap
 // airports already use, regardless of game mode.
 bool skyRadarEnabled = true;
@@ -4535,13 +4543,16 @@ void drawSkyPilotHubPlane() {
 void skyDrawOptionsScene(float dt) {
   kartCanvas.fillScreen(ui.bg);
   skyDrawHubStars(dt);
-  static const char* optNames[SKY_OPTIONS_COUNT] = {"CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "RENDER DISTANCE", "AUTOPILOT", "START FLIGHT"};
+  static const char* optNames[SKY_OPTIONS_COUNT] = {"CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "RENDER DISTANCE", "AUTOPILOT", "CONTINUOUS", "START FLIGHT"};
+  // Down to 17px rows (from 20) and the old description caption dropped
+  // entirely - 9 rows plus that line no longer fit above the footer at the
+  // previous, more spaced-out sizing.
   for (int i = 0; i < SKY_OPTIONS_COUNT; ++i) {
-    int y = CONTENT_Y + 10 + i * 20; bool sel = i == skyOptionsSelected;
+    int y = CONTENT_Y + 8 + i * 17; bool sel = i == skyOptionsSelected;
     uint16_t bg = sel ? lerpColor565(ui.bg, ui.selected, 0.6f + 0.4f * sinf(millis() / 180.0f)) : ui.bg;
-    if (sel) kartCanvas.fillRoundRect(8, y - 4, 304, 16, 4, bg);
+    if (sel) kartCanvas.fillRoundRect(8, y - 3, 304, 14, 4, bg);
     kartCanvas.setTextColor(sel ? ui.text : ui.dim, bg); kartCanvas.setCursor(15, y); kartCanvas.print(sel ? "> " : "  ");
-    if (i == 7) {
+    if (i == 8) {
       kartCanvas.setTextColor(sel ? ILI9341_GREEN : ui.dim, bg); kartCanvas.print("START FLIGHT");
       continue;
     }
@@ -4552,11 +4563,10 @@ void skyDrawOptionsScene(float dt) {
                : i == 3 ? (skyAiBotsEnabled ? "ON" : "OFF")
                : i == 4 ? String(skyBotCount)
                : i == 5 ? String(skyRenderDistNames[skyRenderDistLevel])
-                        : (skyAutopilotEnabled ? "ON" : "OFF");
+               : i == 6 ? (skyAutopilotEnabled ? "ON" : "OFF")
+                        : (skyContinuousEnabled ? "ON" : "OFF");
     kartCanvas.setTextColor(sel ? ui.text : ui.accent, bg); kartCanvas.setCursor(240, y); kartCanvas.print(val);
   }
-  kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(12, CONTENT_Y + 184);
-  kartCanvas.print("Controls hold their angle. MED/HIGH throttle to take off.");
 }
 void drawSkyPilotHubOptions() {
   skyDrawOptionsScene(0);
@@ -4834,6 +4844,18 @@ void stepSkyPilotFlight() {
       if ((int)skyScore > skyBestScore) { skyBestScore = (int)skyScore; skySaveBest(); }
       skyEngineToneStop();
       skyPlayEndSequence("LANDED", ILI9341_GREEN, true);
+      if (skyContinuousEnabled) {
+        // Next leg from here instead of ending the flight - the plane is
+        // already grounded/stopped at what was the target; that becomes the
+        // new departure, and a fresh distinct target is picked.
+        skyStartAirport = skyTargetAirport;
+        do { skyTargetAirport = random(0, SKY_AIRPORT_COUNT); } while (skyTargetAirport == skyStartAirport);
+        skyGearDown = true;
+        skyThrottleLevel = 0;
+        skyHasClearedGround = false;
+        redrawNeeded = true;
+        return;
+      }
       skyState = SKY_RESULTS;
       redrawNeeded = true;
     }
@@ -8663,12 +8685,13 @@ void keyboard() {
             else if (skyOptionsSelected == 5 && c == '/') { skyRenderDistLevel = min(SKY_RENDER_DIST_LEVELS - 1, skyRenderDistLevel + 1); playFunctionSound(); redrawNeeded = true; }
           }
           if (k.enter) {
-            if (skyOptionsSelected == 7) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
+            if (skyOptionsSelected == 8) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
             if (skyOptionsSelected == 0) skyImuControlEnabled = !skyImuControlEnabled;
             else if (skyOptionsSelected == 1) skyEngineSoundEnabled = !skyEngineSoundEnabled;
             else if (skyOptionsSelected == 2) skyRadarEnabled = !skyRadarEnabled;
             else if (skyOptionsSelected == 3) skyAiBotsEnabled = !skyAiBotsEnabled;
             else if (skyOptionsSelected == 6) skyAutopilotEnabled = !skyAutopilotEnabled;
+            else if (skyOptionsSelected == 7) skyContinuousEnabled = !skyContinuousEnabled;
             if (skyOptionsSelected != 4 && skyOptionsSelected != 5) { playFunctionSound(); redrawNeeded = true; }
           }
         }
