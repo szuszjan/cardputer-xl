@@ -305,6 +305,7 @@ void startSkyPilotFlight(int modeSelected);
 void stepSkyPilotFlight();
 void stepSkyPilotHub();
 void skyMenuMusicStop();
+float skyDayFraction();
 void autoConnectWifi();
 void miniCamJoinNetwork();
 void miniCamLeaveNetwork();
@@ -3159,14 +3160,47 @@ static void kartDrawFinishGate(const KartCam& cam, const KartTrack& track) {
   kartDrawSeg(cam, track.right[0], rTop, ILI9341_YELLOW);
   kartDrawSeg(cam, lTop, rTop, ILI9341_YELLOW);
 }
+// Lerps two RGB565 colors component-wise - used to fade the sky/mountains
+// between day and night rather than hard-cutting, since skyDayFraction()
+// itself blends smoothly across dawn/dusk.
+static uint16_t kartLerpColor565(uint16_t a, uint16_t b, float t) {
+  t = constrain(t, 0.0f, 1.0f);
+  int ar = (a >> 11) & 0x1F, ag = (a >> 5) & 0x3F, ab = a & 0x1F;
+  int br = (b >> 11) & 0x1F, bg = (b >> 5) & 0x3F, bb = b & 0x1F;
+  int r = ar + (int)((br - ar) * t), g = ag + (int)((bg - ag) * t), bl = ab + (int)((bb - ab) * t);
+  return (r << 11) | (g << 5) | bl;
+}
 static void kartDrawSky(const KartCam& cam) {
   int w = kartCanvas.width(), h = kartCanvas.height();
   KVec3 farLevel = cam.position + cam.forward * 200.0f;
   farLevel.y = cam.position.y;
   int hx, horizonY = h / 2;
   if (cam.project(farLevel, w, h, hx, horizonY)) horizonY = constrain(horizonY, 0, h);
-  kartCanvas.fillRect(0, 0, w, horizonY, ILI9341_NAVY);
+  // skyDayFraction() defaults to a constant 1.0 (full day) unless Sky
+  // Pilot's day/night option has actually been engaged, so this blend is a
+  // no-op - and Kart Racer, which also calls this function, never touches
+  // skyTimeMode at all and always sees the original navy sky.
+  float dayT = skyDayFraction();
+  uint16_t skyCol = kartLerpColor565(0x0006, ILI9341_NAVY, dayT);
+  kartCanvas.fillRect(0, 0, w, horizonY, skyCol);
+  if (dayT < 0.5f) {
+    // Fixed screen-space star field (not world-space - the sky itself is
+    // just a flat-filled band, so there's no "real" star position to
+    // project) - a deterministic pseudo-random pattern so stars don't
+    // flicker/jump between frames.
+    float starT = 1.0f - dayT * 2.0f;
+    uint32_t seed = 1;
+    for (int i = 0; i < 40; ++i) {
+      seed = seed * 1103515245u + 12345u;
+      int sx = (seed >> 8) % w;
+      seed = seed * 1103515245u + 12345u;
+      int sy = (seed >> 8) % max(1, horizonY);
+      if (((seed >> 20) % 100) / 100.0f > starT) continue;
+      kartCanvas.drawPixel(sx, sy, ILI9341_WHITE);
+    }
+  }
   const int NMTN = 12; const float MTN_RADIUS = 300.0f, MTN_SPREAD = 45.0f;
+  uint16_t mtnCol = kartLerpColor565(0x2007, ILI9341_PURPLE, dayT);
   for (int i = 0; i < NMTN; ++i) {
     float ang = (2 * KART_PI * i) / NMTN;
     KVec3 dir{cosf(ang), 0, sinf(ang)};
@@ -3177,7 +3211,7 @@ static void kartDrawSky(const KartCam& cam) {
     KVec3 peak = baseCenter + KVec3{0, peakHeight, 0};
     int x0, y0, x1, y1, x2, y2;
     if (cam.project(base1, w, h, x0, y0) && cam.project(base2, w, h, x1, y1) && cam.project(peak, w, h, x2, y2))
-      kartCanvas.fillTriangle(x0, y0, x1, y1, x2, y2, ILI9341_PURPLE);
+      kartCanvas.fillTriangle(x0, y0, x1, y1, x2, y2, mtnCol);
   }
 }
 void kartRenderScene() {
@@ -3495,7 +3529,7 @@ int skyPreSpectateModelIndex = 0;  // skyPlaneModelIndex gets overwritten every 
 // special-case) rather than exiting Sky Pilot entirely from PLANE/OPTIONS.
 enum class SkyHubStage { MODE, PLANE, OPTIONS };
 SkyHubStage skyHubStage = SkyHubStage::MODE;
-constexpr int SKY_OPTIONS_COUNT = 9;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, RENDER DISTANCE, AUTOPILOT, CONTINUOUS, START FLIGHT
+constexpr int SKY_OPTIONS_COUNT = 14;  // CONTROL, SOUND, RADAR, AI BOTS, BOTS COUNT, RENDER DISTANCE, AUTOPILOT, CONTINUOUS, FUEL, DAY/NIGHT, WEATHER, SAVE SLOT, ACHIEVEMENTS, START FLIGHT
 int skyOptionsSelected = 0;
 
 // Stall/rotate speed, control rates, and throttle targets all now come from
@@ -3646,17 +3680,153 @@ bool skyAiBotsEnabled = true;  // 'B' (or the OPTIONS stage) - bots stop updatin
 float skyScore = 0;      // distance flown this flight, in world units
 int skyBestScore = 0;
 unsigned long skyLastFrameMs = 0;
-bool skyLoadedBest = false;
 float skyFpsSmoothed = 0;
 
-void skyLoadBest() {
-  if (skyLoadedBest) return;
-  preferences.begin("skypilot", true);
-  skyBestScore = preferences.getInt("best", 0);
-  preferences.end();
-  skyLoadedBest = true;
+// ---- ATC subtitle: a single-message queue (a NEW call just replaces
+// whatever's showing, rather than actually queuing) for short callouts -
+// weather/turbulence/fuel warnings, achievement unlocks - drawn as a
+// bottom-of-screen subtitle rather than a modal, so it never blocks flying.
+String skyAtcMessage = "";
+unsigned long skyAtcUntil = 0;
+void skyShowAtc(const String& msg, unsigned long durationMs) {
+  skyAtcMessage = msg;
+  skyAtcUntil = millis() + durationMs;
 }
-void skySaveBest() { preferences.begin("skypilot", false); preferences.putInt("best", skyBestScore); preferences.end(); }
+
+// ---- Fuel: an OPTIONS toggle, off by default (existing flights - free
+// roam especially - were never designed around a range limit). Burn rate
+// scales with throttle notch, like real fuel flow does; running out just
+// forces the throttle to OFF (an engine-out glide, still flyable) rather
+// than an instant failure - the plane becomes a glider, not a brick.
+bool skyFuelEnabled = false;
+float skyFuel = 100.0f;  // percent
+constexpr float SKY_FUEL_BURN_PER_THROTTLE[4] = {0.4f, 2.0f, 3.6f, 5.6f};  // %/sec at OFF/LOW/MED/HIGH
+bool skyFuelWarned = false;
+
+// ---- Day/night: an OPTIONS 3-way (ALWAYS DAY / ALWAYS NIGHT / CYCLE)
+// rather than a single on/off, since "always day" (today's whole-session
+// behavior) is worth keeping as an explicit choice, not just the absence
+// of night. skyTimeOfDay is hours 0-24; CYCLE completes a full day every
+// SKY_DAY_LENGTH_MS of real flight time - short enough to actually see a
+// sunset/sunrise in one sitting instead of needing an hour-long flight.
+constexpr int SKY_TIME_MODES = 3;
+const char* skyTimeModeNames[SKY_TIME_MODES] = {"ALWAYS DAY", "ALWAYS NIGHT", "CYCLE"};
+int skyTimeMode = 0;
+float skyTimeOfDay = 12.0f;
+constexpr unsigned long SKY_DAY_LENGTH_MS = 10UL * 60UL * 1000UL;
+// 0=full night, 1=full day - smoothly blended near dawn(6h)/dusk(18h)
+// rather than an abrupt cut, so the sky/lighting actually transitions.
+float skyDayFraction() {
+  if (skyTimeMode == 0) return 1.0f;
+  if (skyTimeMode == 1) return 0.0f;
+  float h = skyTimeOfDay;
+  float distFromNoon = fabsf(fmodf(h - 12.0f + 36.0f, 24.0f) - 12.0f);  // 0 at noon, 12 at midnight
+  return constrain(1.0f - (distFromNoon - 4.0f) / 3.0f, 0.0f, 1.0f);  // full day until +-4h from noon, full night past +-7h
+}
+bool skyIsNight() { return skyDayFraction() < 0.35f; }
+
+// ---- Weather: a handful of slow-drifting storm cells. Inside one, random
+// jitter is added to bank/pitch each frame (turbulence) instead of
+// touching the underlying flight model - it reads as rough air without
+// needing a separate physics path.
+bool skyWeatherEnabled = false;
+constexpr int SKY_WEATHER_CELL_COUNT = 3;
+struct SkyWeatherCell { KVec3 pos; float radius; float driftHeading; };
+SkyWeatherCell skyWeatherCells[SKY_WEATHER_CELL_COUNT];
+bool skyInStorm = false;
+float skyStormSurviveTimer = 0;  // seconds continuously inside a cell, for the STORM SURVIVOR achievement
+int skyContinuousLegs = 0;  // legs completed so far this Continuous-mode run, for the MARATHON achievement
+void skyInitWeather() {
+  for (int i = 0; i < SKY_WEATHER_CELL_COUNT; ++i) {
+    skyWeatherCells[i].pos = {(float)random(-1400, 1400), 0, (float)random(-1400, 1400)};
+    skyWeatherCells[i].radius = 180.0f + random(0, 120);
+    skyWeatherCells[i].driftHeading = (random(0, 628)) / 100.0f;
+  }
+}
+void skyUpdateWeather(float dt) {
+  if (!skyWeatherEnabled) return;
+  for (int i = 0; i < SKY_WEATHER_CELL_COUNT; ++i) {
+    SkyWeatherCell& c = skyWeatherCells[i];
+    c.pos.x += sinf(c.driftHeading) * 6.0f * dt;
+    c.pos.z += cosf(c.driftHeading) * 6.0f * dt;
+  }
+}
+bool skyWeatherCellAt(float x, float z, int* outIdx = nullptr) {
+  for (int i = 0; i < SKY_WEATHER_CELL_COUNT; ++i) {
+    float dx = x - skyWeatherCells[i].pos.x, dz = z - skyWeatherCells[i].pos.z;
+    if (dx * dx + dz * dz < skyWeatherCells[i].radius * skyWeatherCells[i].radius) { if (outIdx) *outIdx = i; return true; }
+  }
+  return false;
+}
+
+// 8 airports (was 5), spread much further apart (minimum pairwise distance
+// ~780 units, versus ~600-730 before) so Airport-to-Airport draws a real,
+// sustained cross-country flight instead of a short hop - a deliberate
+// difficulty increase, not just more content. Declared here (ahead of the
+// airport struct/array below) since the save-slot achievement state right
+// below also needs the count to size skyVisitedAirport[].
+constexpr int SKY_AIRPORT_COUNT = 8;
+
+// ---- Save slots: 3 independent pilot profiles (best distance,
+// achievements, which airports have been landed at, lifetime distance),
+// each its own NVS namespace so switching slots is just a different
+// preferences.begin() target, not a data migration.
+constexpr int SKY_SAVE_SLOTS = 3;
+int skySaveSlot = 0;
+int skyLoadedSlot = -1;  // which slot the globals below currently reflect; -1 = none loaded yet
+String skyPrefsNS() { return "skypilot" + String(skySaveSlot); }
+
+constexpr int SKY_ACHIEVEMENT_COUNT = 8;
+const char* skyAchievementNames[SKY_ACHIEVEMENT_COUNT] = {
+  "FIRST FLIGHT", "FIRST LANDING", "ALL AIRPORTS", "SOUND BARRIER",
+  "STORM SURVIVOR", "CROSS COUNTRY", "MARATHON", "NIGHT OWL",
+};
+uint8_t skyAchievements = 0;
+bool skyVisitedAirport[SKY_AIRPORT_COUNT] = {false};
+unsigned long skyLifetimeDistance = 0;
+
+void skyLoadBest() {
+  if (skyLoadedSlot == skySaveSlot) return;
+  preferences.begin(skyPrefsNS().c_str(), true);
+  skyBestScore = preferences.getInt("best", 0);
+  skyAchievements = preferences.getUChar("ach", 0);
+  skyLifetimeDistance = preferences.getULong("lifetime", 0);
+  for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) skyVisitedAirport[i] = preferences.getBool((String("v") + i).c_str(), false);
+  preferences.end();
+  skyLoadedSlot = skySaveSlot;
+}
+void skySaveBest() { preferences.begin(skyPrefsNS().c_str(), false); preferences.putInt("best", skyBestScore); preferences.end(); }
+void skySaveLifetime() { preferences.begin(skyPrefsNS().c_str(), false); preferences.putULong("lifetime", skyLifetimeDistance); preferences.end(); }
+void skyMarkVisited(int i) {
+  if (skyVisitedAirport[i]) return;
+  skyVisitedAirport[i] = true;
+  preferences.begin(skyPrefsNS().c_str(), false); preferences.putBool((String("v") + i).c_str(), true); preferences.end();
+}
+// One-shot per slot - ATC announces it once via the subtitle system rather
+// than re-checking/re-announcing it every frame after it's already unlocked.
+void skyUnlock(int id) {
+  if (skyAchievements & (1 << id)) return;
+  skyAchievements |= (1 << id);
+  preferences.begin(skyPrefsNS().c_str(), false); preferences.putUChar("ach", skyAchievements); preferences.end();
+  skyShowAtc(String("ACHIEVEMENT: ") + skyAchievementNames[id], 3000);
+}
+bool skyAllAirportsVisited() {
+  for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) if (!skyVisitedAirport[i]) return false;
+  return true;
+}
+// Banks this flight's (or, in Continuous mode, this whole run's) distance
+// into the lifetime total - called at every actual way a flight can end
+// (crash, a non-continuous landing, or leaving via H mid-flight), not just
+// the "normal" ending, so a session quit early still counts. Doesn't zero
+// skyScore (the RESULTS screen still needs it to show DISTANCE) - safe to
+// not guard against double-counting since these three call sites are
+// mutually exclusive per flight: once one fires, skyState leaves
+// SKY_FLYING, so the others can never also fire for that same flight.
+void skyFlushLifetime() {
+  skyLifetimeDistance += (unsigned long)skyScore;
+  skySaveLifetime();
+  if (skyLifetimeDistance >= 5000) skyUnlock(5);  // CROSS COUNTRY
+}
 
 // Five fixed airports - AIRPORT TO AIRPORT picks a random distinct
 // start/destination pair from this pool each flight (see
@@ -3664,11 +3834,6 @@ void skySaveBest() { preferences.begin("skypilot", false); preferences.putInt("b
 // runway-start spawn point. pos.y is a placeholder; the actual runway
 // elevation is wherever skyTerrainHeight() flattens to near it.
 struct SkyAirport { KVec3 pos; float heading; float length, width; const char* name; };
-// 8 airports (was 5), spread much further apart (minimum pairwise distance
-// ~780 units, versus ~600-730 before) so Airport-to-Airport draws a real,
-// sustained cross-country flight instead of a short hop - a deliberate
-// difficulty increase, not just more content.
-constexpr int SKY_AIRPORT_COUNT = 8;
 SkyAirport skyAirports[SKY_AIRPORT_COUNT] = {
   {{0, 0, 0}, 0.0f, 110.0f, 16.0f, "ALPHA"},
   {{900, 0, 750}, 2.1f, 110.0f, 16.0f, "BRAVO"},
@@ -4047,6 +4212,32 @@ void skyDrawAutopilotGuide(const KartCam& cam) {
     kartDrawSeg(cam, back - rightDir * WING, tip, ILI9341_YELLOW);
   }
 }
+// Storm cells as billboarded cloud blobs (a cluster of overlapping filled
+// circles, screen-space sized by distance) - the same project-then-cull
+// pattern as skyDrawAirportLabels()/skyDrawBots(), not real 3D cloud
+// geometry, since at this resolution a soft blob reads as a storm just as
+// well as a proper volumetric shape would.
+void skyDrawWeatherCells(const KartCam& cam) {
+  if (!skyWeatherEnabled) return;
+  int stormIdx = -1;
+  bool inStormNow = skyWeatherCellAt(skyPlane.pos.x, skyPlane.pos.z, &stormIdx);
+  for (int i = 0; i < SKY_WEATHER_CELL_COUNT; ++i) {
+    SkyWeatherCell& c = skyWeatherCells[i];
+    KVec3 center{c.pos.x, skyTerrainHeight(c.pos.x, c.pos.z) + 90.0f, c.pos.z};
+    KVec3 rel = center - cam.position;
+    float dist = sqrtf(kdot(rel, rel));
+    if (dist > skyRenderDistLabelCull[skyRenderDistLevel] * 1.5f) continue;
+    int sx, sy;
+    if (!cam.project(center, kartCanvas.width(), kartCanvas.height(), sx, sy)) continue;
+    if (sx < -80 || sx > kartCanvas.width() + 80 || sy < -80 || sy > kartCanvas.height() + 80) continue;
+    float scale = constrain(4500.0f / dist, 6.0f, 70.0f);
+    uint16_t col = (inStormNow && stormIdx == i) ? 0x4A69 : 0x39C7;  // lighter/angrier when the player is actually inside this one
+    kartCanvas.fillCircle(sx - (int)(scale * 0.5f), sy, (int)(scale * 0.6f), col);
+    kartCanvas.fillCircle(sx + (int)(scale * 0.4f), sy - (int)(scale * 0.2f), (int)(scale * 0.55f), col);
+    kartCanvas.fillCircle(sx, sy - (int)(scale * 0.35f), (int)(scale * 0.7f), col);
+    kartCanvas.fillCircle(sx - (int)(scale * 0.2f), sy + (int)(scale * 0.3f), (int)(scale * 0.5f), col);
+  }
+}
 void skyInitBots() {
   for (int i = 0; i < skyBotCount; i++) {
     float ang = (2 * KART_PI * i) / skyBotCount + (random(0, 100) / 100.0f);
@@ -4119,6 +4310,7 @@ void skyDrawBots(const KartCam& cam) {
 void skyRenderScene(const KartCam& cam, const KVec3& fwd, bool firstPerson) {
   kartCanvas.fillScreen(ILI9341_BLACK);
   kartDrawSky(cam);
+  skyDrawWeatherCells(cam);
   skyDrawTerrain(cam, fwd);
   for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) { skyDrawRunway(cam, skyAirports[i]); skyDrawAirportBuilding(cam, skyAirports[i]); }
   if (firstPerson) skyDrawCockpitOverlay();
@@ -4236,6 +4428,7 @@ void skyDrawMinimap(int x0, int y0, int size) {
       bool water = skyIsWater(wx, wz);
       float h = skyTerrainHeight(wx, wz);
       uint16_t col = water ? 0x1B5F : (h > SKY_RUNWAY_ELEVATION + 15.0f ? 0x2AA0 : 0x1A05);
+      if (skyWeatherEnabled && skyWeatherCellAt(wx, wz)) col = 0x630C;  // storm cell overlay, drawn over terrain/water alike
       int bw = min(SAMPLE_STEP, x0 + size - 1 - px), bh = min(SAMPLE_STEP, y0 + size - 1 - py);
       kartCanvas.fillRect(px, py, bw, bh, col);
     }
@@ -4296,6 +4489,29 @@ void skyRenderHud(bool stalling, bool pullUp) {
   kartCanvas.fillRect(kartCanvas.width() + SKY_MINIMAP_X0, fpsY, SKY_MINIMAP_SIZE, 10, ILI9341_BLACK);
   kartCanvas.setTextColor(ILI9341_GREEN, ILI9341_BLACK);
   kartCanvas.setCursor(kartCanvas.width() - 4 - 6 * strlen(fpsBuf), fpsY + 1); kartCanvas.print(fpsBuf);
+  // Clock, formatted off the same skyTimeOfDay the day/night cycle already
+  // tracks - shown under the FPS readout regardless of time mode, since it's
+  // a harmless static "12:00" in ALWAYS DAY/NIGHT and only actually moves
+  // once CYCLE is picked in Options.
+  {
+    int clockY = fpsY + 11;
+    kartCanvas.fillRect(kartCanvas.width() + SKY_MINIMAP_X0, clockY, SKY_MINIMAP_SIZE, 10, ILI9341_BLACK);
+    int hh = (int)skyTimeOfDay, mm = (int)((skyTimeOfDay - hh) * 60.0f);
+    char clockBuf[8]; snprintf(clockBuf, sizeof(clockBuf), "%02d:%02d", hh, mm);
+    kartCanvas.setTextColor(skyIsNight() ? 0x841F /*dim blue*/ : ILI9341_YELLOW, ILI9341_BLACK);
+    kartCanvas.setCursor(kartCanvas.width() - 4 - 6 * strlen(clockBuf), clockY + 1); kartCanvas.print(clockBuf);
+  }
+  // ATC subtitle - a single centered line just above the instrument strip,
+  // shown only while skyAtcUntil hasn't passed (skyShowAtc() is the only
+  // writer, called from fuel/weather/achievement triggers).
+  if (millis() < skyAtcUntil) {
+    kartCanvas.setTextSize(1);
+    int textW = (int)skyAtcMessage.length() * 6;
+    int tx = kartCanvas.width() / 2 - textW / 2, ty = hudY - 12;
+    kartCanvas.fillRect(tx - 3, ty - 2, textW + 6, 11, ILI9341_BLACK);
+    kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+    kartCanvas.setCursor(tx, ty); kartCanvas.print(skyAtcMessage);
+  }
   // GPWS-style terrain warning - large and center-screen (not tucked into a
   // corner strip like STALL) since this one means impact is imminent.
   if (pullUp) {
@@ -4314,6 +4530,17 @@ void skyRenderHud(bool stalling, bool pullUp) {
   kartCanvas.print(skySpectating ? skyPlaneModels[skyPlaneModelIndex].name : skyThrottleNames[skyThrottleLevel]);
   kartCanvas.setTextColor(clearance < 8.0f ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
   snprintf(buf, sizeof(buf), "%3d", (int)skyPlane.speed); kartCanvas.setCursor(4, hudY + 15); kartCanvas.print(buf);
+
+  // Fuel gauge - a small bar in the strip's third row (only used when the
+  // option is on), red under the same 15% threshold that triggers the
+  // FUEL LOW ATC call so the visual and the warning agree.
+  if (skyFuelEnabled) {
+    constexpr int BAR_X = 4, BAR_Y_OFF = 27, BAR_W = 55, BAR_H = 5;
+    kartCanvas.drawRect(BAR_X, hudY + BAR_Y_OFF, BAR_W, BAR_H, ILI9341_LIGHTGREY);
+    int fillW = (int)((BAR_W - 2) * (skyFuel / 100.0f));
+    uint16_t fuelCol = skyFuel <= 15.0f ? ILI9341_RED : (skyFuel <= 40.0f ? ILI9341_ORANGE : ILI9341_GREEN);
+    if (fillW > 0) kartCanvas.fillRect(BAR_X + 1, hudY + BAR_Y_OFF + 1, fillW, BAR_H - 2, fuelCol);
+  }
 
   skyDrawAttitudeIndicator(95, hudY + SKY_HUD_H / 2, 15);
   skyDrawCompass(140, hudY + 2, 100, SKY_HUD_H - 4);
@@ -4378,6 +4605,17 @@ void startSkyPilotFlight(int modeSelected) {
   skyStopping = false;
   skySpectating = (modeSelected == 3);
   skyWatchIndex = 0;
+  skyFuel = 100.0f;
+  skyFuelWarned = false;
+  // CYCLE always starts at dawn (a fixed, predictable start rather than
+  // real-world-clock-driven) so a flight's day/night arc is reproducible.
+  skyTimeOfDay = skyTimeMode == 1 ? 0.0f : (skyTimeMode == 2 ? 6.0f : 12.0f);
+  skyInitWeather();
+  skyInStorm = false;
+  skyStormSurviveTimer = 0;
+  skyContinuousLegs = 0;
+  skyAtcMessage = "";
+  skyUnlock(0);  // FIRST FLIGHT
 
   if (skySpectating) {
     // Player state barely matters here (never controlled or rendered) - just
@@ -4540,32 +4778,60 @@ void drawSkyPilotHubPlane() {
   footer(",/ CHANGE PLANE     ENTER NEXT     FN BACK");
 }
 
+// 14 rows no longer fit in one screen even at the tightest reasonable row
+// height, so this scrolls: a fixed-size visible window follows the
+// selection, centering it when there's room and clamping at both ends of
+// the list, with small up/down chevrons hinting there's more content off
+// either edge - the same idea as a long scrolling list anywhere else, just
+// applied to this one wizard stage.
+constexpr int SKY_OPTIONS_VISIBLE = 7;
+String skyOptionValue(int i) {
+  switch (i) {
+    case 0: return skyImuControlEnabled ? "TILT" : "KEYS";
+    case 1: return skyEngineSoundEnabled ? "ON" : "OFF";
+    case 2: return skyRadarEnabled ? "ON" : "OFF";
+    case 3: return skyAiBotsEnabled ? "ON" : "OFF";
+    case 4: return String(skyBotCount);
+    case 5: return String(skyRenderDistNames[skyRenderDistLevel]);
+    case 6: return skyAutopilotEnabled ? "ON" : "OFF";
+    case 7: return skyContinuousEnabled ? "ON" : "OFF";
+    case 8: return skyFuelEnabled ? "ON" : "OFF";
+    case 9: return String(skyTimeModeNames[skyTimeMode]);
+    case 10: return skyWeatherEnabled ? "ON" : "OFF";
+    case 11: return "SLOT " + String(skySaveSlot + 1);
+    default: return "";
+  }
+}
 void skyDrawOptionsScene(float dt) {
   kartCanvas.fillScreen(ui.bg);
   skyDrawHubStars(dt);
-  static const char* optNames[SKY_OPTIONS_COUNT] = {"CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "RENDER DISTANCE", "AUTOPILOT", "CONTINUOUS", "START FLIGHT"};
-  // Down to 17px rows (from 20) and the old description caption dropped
-  // entirely - 9 rows plus that line no longer fit above the footer at the
-  // previous, more spaced-out sizing.
-  for (int i = 0; i < SKY_OPTIONS_COUNT; ++i) {
-    int y = CONTENT_Y + 8 + i * 17; bool sel = i == skyOptionsSelected;
+  static const char* optNames[SKY_OPTIONS_COUNT] = {
+    "CONTROL SCHEME", "ENGINE SOUND", "RADAR", "AI TRAFFIC BOTS", "BOTS COUNT", "RENDER DISTANCE",
+    "AUTOPILOT", "CONTINUOUS", "FUEL", "DAY / NIGHT", "WEATHER", "SAVE SLOT", "ACHIEVEMENTS", "START FLIGHT",
+  };
+  int scrollTop = constrain(skyOptionsSelected - SKY_OPTIONS_VISIBLE / 2, 0, SKY_OPTIONS_COUNT - SKY_OPTIONS_VISIBLE);
+  constexpr int ROW_H = 22;
+  int top = CONTENT_Y + 12;
+  if (scrollTop > 0) { kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(152, top - 12); kartCanvas.print("^"); }
+  if (scrollTop + SKY_OPTIONS_VISIBLE < SKY_OPTIONS_COUNT) { kartCanvas.setTextColor(ui.dim, ui.bg); kartCanvas.setCursor(152, top + SKY_OPTIONS_VISIBLE * ROW_H + 2); kartCanvas.print("v"); }
+  for (int row = 0; row < SKY_OPTIONS_VISIBLE; ++row) {
+    int i = scrollTop + row; if (i >= SKY_OPTIONS_COUNT) break;
+    int y = top + row * ROW_H; bool sel = i == skyOptionsSelected;
     uint16_t bg = sel ? lerpColor565(ui.bg, ui.selected, 0.6f + 0.4f * sinf(millis() / 180.0f)) : ui.bg;
-    if (sel) kartCanvas.fillRoundRect(8, y - 3, 304, 14, 4, bg);
+    if (sel) kartCanvas.fillRoundRect(8, y - 4, 304, 18, 4, bg);
     kartCanvas.setTextColor(sel ? ui.text : ui.dim, bg); kartCanvas.setCursor(15, y); kartCanvas.print(sel ? "> " : "  ");
-    if (i == 8) {
+    if (i == SKY_OPTIONS_COUNT - 1) {
       kartCanvas.setTextColor(sel ? ILI9341_GREEN : ui.dim, bg); kartCanvas.print("START FLIGHT");
       continue;
     }
+    if (i == 12) {
+      kartCanvas.print("ACHIEVEMENTS");
+      int count = 0; for (int a = 0; a < SKY_ACHIEVEMENT_COUNT; ++a) if (skyAchievements & (1 << a)) count++;
+      kartCanvas.setTextColor(sel ? ui.text : ui.accent, bg); kartCanvas.setCursor(240, y); kartCanvas.print(String(count) + "/" + String(SKY_ACHIEVEMENT_COUNT));
+      continue;
+    }
     kartCanvas.print(optNames[i]);
-    String val = i == 0 ? (skyImuControlEnabled ? "TILT" : "KEYS")
-               : i == 1 ? (skyEngineSoundEnabled ? "ON" : "OFF")
-               : i == 2 ? (skyRadarEnabled ? "ON" : "OFF")
-               : i == 3 ? (skyAiBotsEnabled ? "ON" : "OFF")
-               : i == 4 ? String(skyBotCount)
-               : i == 5 ? String(skyRenderDistNames[skyRenderDistLevel])
-               : i == 6 ? (skyAutopilotEnabled ? "ON" : "OFF")
-                        : (skyContinuousEnabled ? "ON" : "OFF");
-    kartCanvas.setTextColor(sel ? ui.text : ui.accent, bg); kartCanvas.setCursor(240, y); kartCanvas.print(val);
+    kartCanvas.setTextColor(sel ? ui.text : ui.accent, bg); kartCanvas.setCursor(240, y); kartCanvas.print(skyOptionValue(i));
   }
 }
 void drawSkyPilotHubOptions() {
@@ -4790,7 +5056,7 @@ void stepSkyPilotFlight() {
   static bool prevH = false, prevQ = false, prevV = false, prevZ = false, prevTilde = false;
   bool nowH = M5Cardputer.Keyboard.isKeyPressed('h');
   bool edgeH = nowH && !prevH; prevH = nowH;
-  if (edgeH) { skyEngineToneStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyPaused = false; if (skySpectating) skyPlaneModelIndex = skyPreSpectateModelIndex; redrawNeeded = true; return; }
+  if (edgeH) { skyEngineToneStop(); if (!skySpectating) skyFlushLifetime(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyPaused = false; if (skySpectating) skyPlaneModelIndex = skyPreSpectateModelIndex; redrawNeeded = true; return; }
   bool nowTilde = M5Cardputer.Keyboard.isKeyPressed('`');
   bool edgeTilde = nowTilde && !prevTilde; prevTilde = nowTilde;
   if (edgeTilde) { skyPaused = !skyPaused; playFunctionSound(); if (skyPaused) skyEngineToneStop(); }
@@ -4802,6 +5068,8 @@ void stepSkyPilotFlight() {
     tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
     return;
   }
+  if (skyTimeMode == 2) { skyTimeOfDay = fmodf(skyTimeOfDay + dt * (24.0f * 1000.0f / SKY_DAY_LENGTH_MS), 24.0f); }
+  skyUpdateWeather(dt);
   bool nowQ = M5Cardputer.Keyboard.isKeyPressed('q');
   bool edgeQ = nowQ && !prevQ; prevQ = nowQ;
   if (edgeQ) { skyGearDown = !skyGearDown; playFunctionSound(); }
@@ -4848,6 +5116,8 @@ void stepSkyPilotFlight() {
         // Next leg from here instead of ending the flight - the plane is
         // already grounded/stopped at what was the target; that becomes the
         // new departure, and a fresh distinct target is picked.
+        skyContinuousLegs++;
+        if (skyContinuousLegs >= 5) skyUnlock(6);  // MARATHON
         skyStartAirport = skyTargetAirport;
         do { skyTargetAirport = random(0, SKY_AIRPORT_COUNT); } while (skyTargetAirport == skyStartAirport);
         skyGearDown = true;
@@ -4856,6 +5126,7 @@ void stepSkyPilotFlight() {
         redrawNeeded = true;
         return;
       }
+      skyFlushLifetime();
       skyState = SKY_RESULTS;
       redrawNeeded = true;
     }
@@ -4984,6 +5255,23 @@ void stepSkyPilotFlight() {
     skyPlane.pitch = constrain(skyPlane.pitch + skyPitchRateCur * dt, -PITCH_MAX, PITCH_MAX);
     if (stalling) skyPlane.pitch = max(skyPlane.pitch - 0.5f * dt, -PITCH_MAX);  // the nose drops on its own
 
+    // Weather: random bank/pitch jitter while inside a storm cell instead of
+    // touching the underlying flight model - reads as rough air without a
+    // separate turbulence physics path. The survive timer (STORM SURVIVOR
+    // achievement) only counts continuous time in-cell, reset the instant
+    // you leave one.
+    bool wasInStorm = skyInStorm;
+    skyInStorm = skyWeatherEnabled && skyWeatherCellAt(skyPlane.pos.x, skyPlane.pos.z);
+    if (skyInStorm) {
+      if (!wasInStorm) skyShowAtc("TOWER: CAUTION - TURBULENCE AHEAD", 3000);
+      skyPlane.bank = constrain(skyPlane.bank + ((random(0, 200) - 100) / 100.0f) * 0.6f * dt, -BANK_MAX, BANK_MAX);
+      skyPlane.pitch = constrain(skyPlane.pitch + ((random(0, 200) - 100) / 100.0f) * 0.5f * dt, -PITCH_MAX, PITCH_MAX);
+      skyStormSurviveTimer += dt;
+      if (skyStormSurviveTimer >= 5.0f) skyUnlock(4);  // STORM SURVIVOR
+    } else {
+      skyStormSurviveTimer = 0;
+    }
+
     skyPlane.heading -= sinf(skyPlane.bank) * TURN_RATE_PER_BANK * dt;
   }
 
@@ -5009,6 +5297,19 @@ void stepSkyPilotFlight() {
   // shrugs off could wipe a bush plane's effective target to zero and stall
   // it within a couple of seconds of leaving a short runway - the opposite
   // of what a short-field plane is supposed to be good at.
+  // Fuel: burns while the engine is actually running (not grounded with
+  // throttle off), scaled by throttle notch like real fuel flow. Running
+  // out forces the throttle lookup below to OFF - an engine-out glide, not
+  // an instant failure - rather than being checked as a separate crash
+  // condition.
+  if (skyFuelEnabled) {
+    if (skyFuel > 0 && !(skyGrounded && skyThrottleLevel == 0)) {
+      skyFuel = max(0.0f, skyFuel - SKY_FUEL_BURN_PER_THROTTLE[skyThrottleLevel] * dt);
+      if (skyFuel <= 15.0f && !skyFuelWarned) { skyFuelWarned = true; skyShowAtc("TOWER: FUEL LOW, ADVISE LANDING", 3500); }
+      if (skyFuel <= 0.0f) skyShowAtc("TOWER: ENGINE OUT - YOU ARE GLIDING", 3500);
+    }
+    if (skyFuel <= 0.0f) skyThrottleLevel = 0;
+  }
   static const float SPEED_APPROACH_RATE = 7.0f;
   constexpr float SKY_CLIMB_TARGET_FRACTION = 0.20f, SKY_GEAR_TARGET_FRACTION = 0.05f;
   float maxSpeed = model.throttleTargets[SKY_THROTTLE_LEVELS - 1];
@@ -5030,6 +5331,7 @@ void stepSkyPilotFlight() {
     vibrate(180);
     if (volumeLevel) { M5Cardputer.Speaker.tone(3200, 15); delay(15); M5Cardputer.Speaker.tone(75, 260); }
     skyBoomFlashUntil = now + SKY_BOOM_EFFECT_MS;
+    skyUnlock(3);  // SOUND BARRIER
   }
   skyWasSupersonic = supersonic;
 
@@ -5072,6 +5374,10 @@ void stepSkyPilotFlight() {
         skyPlane.heading = skyAirports[nearAirport].heading;
         skyBankRateCur = skyPitchRateCur = 0;
         vibrate(30); if (volumeLevel) M5Cardputer.Speaker.tone(500, 80);
+        skyUnlock(1);  // FIRST LANDING
+        skyMarkVisited(nearAirport);
+        if (skyAllAirportsVisited()) skyUnlock(2);  // ALL AIRPORTS
+        if (skyIsNight()) skyUnlock(7);  // NIGHT OWL
         if (skyMode == SKY_MODE_AIRPORT && nearAirport == skyTargetAirport) {
           // Touching down safely isn't the end - the plane still has to
           // actually stop. skyStopping's own branch above takes over next
@@ -5088,6 +5394,7 @@ void stepSkyPilotFlight() {
         skyMissionSuccess = false;
         skyEngineToneStop();
         skyPlayEndSequence("CRASHED", ILI9341_RED, false);
+        skyFlushLifetime();
         skyState = SKY_RESULTS;
         redrawNeeded = true;
         return;
@@ -8675,24 +8982,33 @@ void keyboard() {
           for (char c : k.word) {
             if (c == ';') { skyOptionsSelected = (skyOptionsSelected + SKY_OPTIONS_COUNT - 1) % SKY_OPTIONS_COUNT; redrawNeeded = true; }
             else if (c == '.') { skyOptionsSelected = (skyOptionsSelected + 1) % SKY_OPTIONS_COUNT; redrawNeeded = true; }
-            // BOTS COUNT and RENDER DISTANCE are ranges, not toggles - ,/ /
-            // adjust them directly (same convention as the PLANE stage
-            // cycling the plane model) instead of ENTER stepping through
-            // several values one at a time.
+            // BOTS COUNT, RENDER DISTANCE, DAY/NIGHT and SAVE SLOT are
+            // ranges, not toggles - ,/ / adjust them directly (same
+            // convention as the PLANE stage cycling the plane model)
+            // instead of ENTER stepping through several values one at a time.
             else if (skyOptionsSelected == 4 && c == ',') { skyBotCount = max(1, skyBotCount - 1); playFunctionSound(); redrawNeeded = true; }
             else if (skyOptionsSelected == 4 && c == '/') { skyBotCount = min(SKY_BOT_MAX, skyBotCount + 1); playFunctionSound(); redrawNeeded = true; }
             else if (skyOptionsSelected == 5 && c == ',') { skyRenderDistLevel = max(0, skyRenderDistLevel - 1); playFunctionSound(); redrawNeeded = true; }
             else if (skyOptionsSelected == 5 && c == '/') { skyRenderDistLevel = min(SKY_RENDER_DIST_LEVELS - 1, skyRenderDistLevel + 1); playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 9 && c == ',') { skyTimeMode = (skyTimeMode + SKY_TIME_MODES - 1) % SKY_TIME_MODES; playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 9 && c == '/') { skyTimeMode = (skyTimeMode + 1) % SKY_TIME_MODES; playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 11 && (c == ',' || c == '/')) {
+              skySaveSlot = (skySaveSlot + (c == '/' ? 1 : SKY_SAVE_SLOTS - 1)) % SKY_SAVE_SLOTS;
+              skyLoadBest();  // a different slot's best/achievements/visited airports
+              playFunctionSound(); redrawNeeded = true;
+            }
           }
           if (k.enter) {
-            if (skyOptionsSelected == 8) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
+            if (skyOptionsSelected == SKY_OPTIONS_COUNT - 1) { playEnterSound(); startSkyPilotFlight(skyModeSelected); return; }
             if (skyOptionsSelected == 0) skyImuControlEnabled = !skyImuControlEnabled;
             else if (skyOptionsSelected == 1) skyEngineSoundEnabled = !skyEngineSoundEnabled;
             else if (skyOptionsSelected == 2) skyRadarEnabled = !skyRadarEnabled;
             else if (skyOptionsSelected == 3) skyAiBotsEnabled = !skyAiBotsEnabled;
             else if (skyOptionsSelected == 6) skyAutopilotEnabled = !skyAutopilotEnabled;
             else if (skyOptionsSelected == 7) skyContinuousEnabled = !skyContinuousEnabled;
-            if (skyOptionsSelected != 4 && skyOptionsSelected != 5) { playFunctionSound(); redrawNeeded = true; }
+            else if (skyOptionsSelected == 8) skyFuelEnabled = !skyFuelEnabled;
+            else if (skyOptionsSelected == 10) skyWeatherEnabled = !skyWeatherEnabled;
+            if (skyOptionsSelected != 4 && skyOptionsSelected != 5 && skyOptionsSelected != 9 && skyOptionsSelected != 11 && skyOptionsSelected != 12) { playFunctionSound(); redrawNeeded = true; }
           }
         }
       } else if (k.enter && skyState == SKY_RESULTS) {
