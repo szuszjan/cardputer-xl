@@ -8621,6 +8621,25 @@ void startBleCompanion() {
     redrawNeeded = true;
     return;
   }
+  // NimBLE's own init needs a real, roughly ~55KB contiguous heap block
+  // (see ensureBleReady()'s own comment) that this device - no PSRAM, and
+  // kartCanvas alone permanently holds ~150KB - doesn't always have free.
+  // Confirmed by an actual crash report: "BLE_INIT: Malloc failed" logged
+  // three times in a row from inside bleKeyboard.begin() itself, then heap
+  // corruption once something wrote through a pointer from one of those
+  // failed allocations. Checking first and failing loud (a status message,
+  // not a crash) beats finding out the hard way whether this boot's heap
+  // state happens to have room - the exact threshold is a reasoned margin
+  // above NimBLE's own stated need, not a measured exact figure.
+  if (!bleStackReady) {
+    uint32_t freeHeap = ESP.getFreeHeap();
+    Serial.printf("[BLE COMPANION] free heap before ensureBleReady(): %u bytes\n", freeHeap);
+    if (freeHeap < 65536) {
+      bleCompanionStatus = "Not enough free memory (" + String(freeHeap / 1024) + "KB free) for BLE - reboot the device and open BLE COMPANION first, before other apps";
+      redrawNeeded = true;
+      return;
+    }
+  }
   ensureBleReady();
   if (!bleCompanionService) {
     NimBLEServer* server = NimBLEDevice::getServer();
