@@ -4307,13 +4307,28 @@ void drawSkyPilotHubOptions() {
 // looping in its own audio task, so this only needs to kick it off once,
 // not re-trigger it every tick like a procedural note sequence would.
 bool skyMenuMusicPlaying = false;
+unsigned long skyMenuClipStartMs = 0;
+// The clip's own real length (256000 bytes / 2 bytes-per-sample / 16000 Hz).
+// M5Unified's playRaw(..., repeat=0) is documented as "loop forever", but on
+// this buffer length/rate it audibly restarts every ~2s instead of the true
+// 8s - a bug somewhere in its internal infinite-repeat bookkeeping, not in
+// this data or this call (verified: a one-time diagnostic print confirmed
+// the full 128000-sample/8s buffer really is what gets passed in, and
+// playRaw() reports success). Rather than debug a third-party library's
+// internal state machine further, this drives the repeat itself: a single
+// play-through (repeat=1) re-triggered on this file's own wall-clock timer
+// every SKY_MENU_CLIP_MS, sidestepping whatever that internal mechanism
+// gets wrong for a clip this long.
+constexpr unsigned long SKY_MENU_CLIP_MS = 8000;
 void skyMenuMusicStop() {
   if (skyMenuMusicPlaying) { M5Cardputer.Speaker.stop(4); skyMenuMusicPlaying = false; }
 }
 void skyMenuMusicUpdate() {
   if (!volumeLevel) { skyMenuMusicStop(); return; }
-  if (skyMenuMusicPlaying) return;
-  M5Cardputer.Speaker.playRaw(reinterpret_cast<const int16_t*>(SKY_MENU_MUSIC_PCM), SKY_MENU_MUSIC_PCM_LEN / 2, 16000, false, 0, 4, true);
+  unsigned long now = millis();
+  if (skyMenuMusicPlaying && now - skyMenuClipStartMs < SKY_MENU_CLIP_MS) return;
+  M5Cardputer.Speaker.playRaw(reinterpret_cast<const int16_t*>(SKY_MENU_MUSIC_PCM), SKY_MENU_MUSIC_PCM_LEN / 2, 16000, false, 1, 4, true);
+  skyMenuClipStartMs = now;
   skyMenuMusicPlaying = true;
 }
 
