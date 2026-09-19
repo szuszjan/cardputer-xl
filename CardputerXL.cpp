@@ -85,6 +85,7 @@
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <PubSubClient.h>
 #include <Preferences.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
@@ -131,7 +132,7 @@ struct Theme { uint16_t bg, panel, accent, text, dim, selected; };
 // numeric (Page - 1) indices into appNames[], so slotting a new page into
 // the middle would silently renumber every app after it. Appending at the
 // end only ever adds a new index, never reassigns an existing one.
-enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, TRIKISCOPE, MINICAM, BLECOMPANION, WIFISETUP, LOCKSCREEN, SCREENSAVER };
+enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, TRIKISCOPE, MINICAM, BLECOMPANION, BAMBUMONITOR, WIFISETUP, LOCKSCREEN, SCREENSAVER };
 
 struct CVar { String name; long value; };
 
@@ -430,6 +431,7 @@ String uptime(); void applyTheme(); void setBacklight(bool on); void header(cons
 void drawLauncher(); void drawSystem(); const char* enc(wifi_auth_mode_t e); void drawWifi(); void drawNotes(); void drawClock();
 void drawTextTools(); void drawFavourites(); void drawWifiMonitor(); void drawFileBrowser(); void drawWebCompanion(); void drawHomeEditor(); void startWebCompanion(); void applyWebInput(); void applyWebAction(const String& action);
 void drawBleCompanion(); void startBleCompanion(); void applyBleInput();
+void drawBambuMonitor(); void startBambuMonitor(); void applyBambuInput();
 void drawCalc(); void updateClockValue(); void updateCalcPanel(); void updateNotesLine(); void updateSettingsRow(int index);
 void drawCLab(); void drawCLabQR(); void drawCardCRepl(); void drawQRText(); void drawQRTextField(); void drawQRModules(); void drawCLabEditor(); void drawCLabCodeLine(int lineIndex); void drawCLabExamples(); void loadCLabExample(int example); void drawCLabExplorer(); void drawCLabSaveDialog(); void drawCLabSlotDialog(); void drawCLabNameDialog(); void openNewCLabFile(); void saveCLabFile(); void openCLabUserApp(int slot, bool runNow); void captureCLabUserApp();
 void runCLab(); void runCardCRepl(); void loadCLabDemo(); String settingValue(int i); void drawSettings(); void draw(); void startScan(); void checkScan(); void calcResult();
@@ -601,15 +603,15 @@ Page previousPage = LAUNCHER;
 Page screensaverReturnPage = LAUNCHER;
 unsigned long screensaverStartedAt = 0;
 unsigned long screensaverLastFrameAt = 0;
-const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES", "TRIKI SCOPE", "MINI CAM", "BLE COMPANION"};
-const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt", "Zabka Triki motion controller over BLE", "MiniCam network camera preview and shutter", "Android companion app: remote control, notes and C LAB over BLE"};
-constexpr int APP_COUNT = 32;
+const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES", "TRIKI SCOPE", "MINI CAM", "BLE COMPANION", "BAMBU MONITOR"};
+const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt", "Zabka Triki motion controller over BLE", "MiniCam network camera preview and shutter", "Android companion app: remote control, notes and C LAB over BLE", "Bambu Lab printer status over local LAN mode"};
+constexpr int APP_COUNT = 33;
 constexpr int APP_VISIBLE = 5;
 // Abstract two-character glyphs for the APPS grid (see drawLauncherTileColored()
 // below), same punctuation-icon style as Home's homeTileIcons[] - the default
 // GFX font is ASCII-only, so these are stand-ins rather than literal pictograms.
 // Indexed identically to appNames[]/appInfo[] (i.e. by Page - 1).
-const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><", "^y", "(o", "B)"};
+const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><", "^y", "(o", "B)", "3d"};
 // appNames[] is indexed by (Page - 1) and only covers pages up to GAMEHUB -
 // WIFISETUP/LOCKSCREEN/SCREENSAVER aren't "apps" and have no entry, so a raw
 // appNames[(int)p - 1] lookup on an arbitrary Page is not always safe. This
@@ -627,8 +629,8 @@ constexpr int HOME_TILE_COUNT = 6;
 int homeAppIndices[5] = {5, 2, 6, 4, 8}; // C LAB, Notes, REPL, Calc, Settings
 const char* homeTileIcons[HOME_TILE_COUNT] = {"{}", "[]", ">_", "+-", "*", "::"};
 // Entry 0 is a navigation action; the remaining entries open secondary apps.
-const int secondaryAppIndices[27] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
-constexpr int SECONDARY_APP_COUNT = 28;
+const int secondaryAppIndices[28] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
+constexpr int SECONDARY_APP_COUNT = 29;
 bool launcherHome = true;
 int homeSelected = 0;
 int appSelected = 0, appScroll = 0;
@@ -687,6 +689,26 @@ bool bleCompanionAdvertising = false;
 String bleCompanionStatus = "Press ENTER to advertise over BLE";
 String bleRxBuffer = "";        // accumulates incoming bytes until a '\n' completes a command line
 String pendingBleCommand = "";  // one complete command line, drained by applyBleInput() in loop()
+// ---- BAMBU MONITOR: live print status from a Bambu Lab printer's LOCAL
+// LAN-mode API (MQTT over TLS, port 8883) - no Bambu account/cloud
+// credentials ever touch this device, only the printer's own IP, its
+// 8-digit LAN "Access Code" (Settings > Network on the printer itself),
+// and its serial number. The printer uses a self-signed cert, hence
+// setInsecure() below (already this file's established pattern for local
+// HTTPS - see the InPost tracker's own WiFiClientSecure use); this is a
+// private local-network connection, not a public one.
+String bambuIp = "", bambuAccessCode = "", bambuSerial = "";
+constexpr int BAMBU_FIELD_COUNT = 3;  // IP, ACCESS CODE, SERIAL
+int bambuSetupField = 0;
+bool bambuSetupEditing = false;
+bool bambuConnected = false;
+String bambuStatusMsg = "ENTER to set up IP / access code / serial";
+WiFiClientSecure bambuTlsClient;
+PubSubClient bambuMqtt(bambuTlsClient);
+unsigned long bambuLastPushAt = 0;
+float bambuNozzleTemp = 0, bambuNozzleTarget = 0, bambuBedTemp = 0, bambuBedTarget = 0;
+int bambuProgress = 0, bambuRemainingMin = 0;
+String bambuGcodeState = "-", bambuTaskName = "";
 // Wi-Fi setup uses a scanned SSID and a RAM-only password entry field. The
 // chosen credentials are persisted only after the user presses ENTER to connect.
 int wifiSetupSelected = 0;
@@ -1036,6 +1058,11 @@ void updateBuiltinDisplay(bool force) {
 void markStateDirty() { stateDirty = true; stateChangedAt = millis(); }
 
 void loadPersistentState() {
+  preferences.begin("bambu", true);
+  bambuIp = preferences.getString("ip", "");
+  bambuAccessCode = preferences.getString("code", "");
+  bambuSerial = preferences.getString("serial", "");
+  preferences.end();
   preferences.begin("cyberdeck", true);
   themeIndex = constrain(preferences.getInt("theme", themeIndex), 0, THEME_COUNT - 1);
   displayRotation = preferences.getUChar("rotation", displayRotation);
@@ -8676,6 +8703,162 @@ void drawBleCompanion() {
   footer(bleCompanionEnabled ? "ENTER STOP     FN BACK" : "ENTER ADVERTISE     FN BACK");
 }
 
+// ---- BAMBU MONITOR --------------------------------------------------------
+// Finds the first top-level "\"key\":value" occurrence anywhere in a JSON
+// blob and returns its raw value text (unquoted for strings, verbatim for
+// numbers/bools) - not a real JSON parser, just enough to pull a handful of
+// known scalar fields out of Bambu's status payload without pulling in a
+// JSON library for it. Good enough because none of the fields this reads
+// (nozzle_temper, bed_temper, mc_percent, mc_remaining_time, gcode_state,
+// subtask_name) are ever duplicated elsewhere in that same payload.
+String jsonFindRaw(const String& json, const String& key) {
+  String needle = "\"" + key + "\":";
+  int at = json.indexOf(needle);
+  if (at < 0) return "";
+  int start = at + needle.length();
+  while (start < (int)json.length() && json[start] == ' ') start++;
+  if (start >= (int)json.length()) return "";
+  if (json[start] == '"') {
+    int end = json.indexOf('"', start + 1);
+    return end < 0 ? "" : json.substring(start + 1, end);
+  }
+  int end = start;
+  while (end < (int)json.length() && json[end] != ',' && json[end] != '}' && json[end] != ']') end++;
+  String s = json.substring(start, end); s.trim(); return s;
+}
+void bambuParseStatus(const String& json) {
+  String v;
+  v = jsonFindRaw(json, "nozzle_temper"); if (!v.isEmpty()) bambuNozzleTemp = v.toFloat();
+  v = jsonFindRaw(json, "nozzle_target_temper"); if (!v.isEmpty()) bambuNozzleTarget = v.toFloat();
+  v = jsonFindRaw(json, "bed_temper"); if (!v.isEmpty()) bambuBedTemp = v.toFloat();
+  v = jsonFindRaw(json, "bed_target_temper"); if (!v.isEmpty()) bambuBedTarget = v.toFloat();
+  v = jsonFindRaw(json, "mc_percent"); if (!v.isEmpty()) bambuProgress = v.toInt();
+  v = jsonFindRaw(json, "mc_remaining_time"); if (!v.isEmpty()) bambuRemainingMin = v.toInt();
+  v = jsonFindRaw(json, "gcode_state"); if (!v.isEmpty()) bambuGcodeState = v;
+  v = jsonFindRaw(json, "subtask_name"); if (!v.isEmpty()) bambuTaskName = v;
+  bambuStatusMsg = "Live";
+  if (page == BAMBUMONITOR) redrawNeeded = true;
+}
+// PubSubClient wants a plain function pointer (MQTT_CALLBACK_SIGNATURE),
+// not a capturing lambda, so this has to be a free function - matches
+// BleCompanionRxCallbacks's own "defer, don't process inline" instinct
+// less strictly here since PubSubClient's own loop() (called from this
+// file's loop(), not a separate task) is what invokes this, so it's
+// already running on the single main task, unlike NimBLE's callbacks.
+void bambuMqttCallback(char* topic, byte* payload, unsigned int length) {
+  String json; json.reserve(length + 1);
+  for (unsigned int i = 0; i < length; ++i) json += (char)payload[i];
+  bambuParseStatus(json);
+}
+void startBambuMonitor() {
+  if (bambuConnected) {
+    bambuMqtt.disconnect();
+    bambuConnected = false;
+    bambuStatusMsg = "Disconnected";
+    redrawNeeded = true;
+    return;
+  }
+  if (bambuIp.isEmpty() || bambuAccessCode.isEmpty() || bambuSerial.isEmpty()) {
+    bambuStatusMsg = "Set IP / access code / serial first (ENTER to edit)";
+    redrawNeeded = true;
+    return;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    bambuStatusMsg = "Connect Wi-Fi first (Web Companion or Wi-Fi Setup)";
+    redrawNeeded = true;
+    return;
+  }
+  // TLS's own handshake/session buffers are a real, separate heap cost on
+  // top of whatever else is running - the same category of problem BLE
+  // Companion's own heap guard exists for (see its comment), just a
+  // different subsystem. Fail loud here too rather than risk the same
+  // kind of crash.
+  uint32_t freeHeap = ESP.getFreeHeap();
+  Serial.printf("[BAMBU] free heap before TLS/MQTT connect: %u bytes\n", freeHeap);
+  if (freeHeap < 60000) {
+    bambuStatusMsg = "Not enough free memory (" + String(freeHeap / 1024) + "KB free) for a TLS connection";
+    redrawNeeded = true;
+    return;
+  }
+  bambuTlsClient.setInsecure();  // LAN-only, self-signed printer cert - see this section's own header comment
+  bambuMqtt.setServer(bambuIp.c_str(), 8883);
+  bambuMqtt.setBufferSize(4096);  // Bambu's full status payload runs well past PubSubClient's 256-byte default
+  bambuMqtt.setCallback(bambuMqttCallback);
+  bambuStatusMsg = "Connecting...";
+  redrawNeeded = true;
+  String clientId = "cardputerxl-" + String((uint32_t)(ESP.getEfuseMac() & 0xFFFFFFFF), HEX);
+  if (bambuMqtt.connect(clientId.c_str(), "bblp", bambuAccessCode.c_str())) {
+    bambuMqtt.subscribe(("device/" + bambuSerial + "/report").c_str());
+    bambuMqtt.publish(("device/" + bambuSerial + "/request").c_str(), "{\"pushing\":{\"sequence_id\":\"0\",\"command\":\"pushall\"}}");
+    bambuLastPushAt = millis();
+    bambuConnected = true;
+    bambuStatusMsg = "Connected - waiting for status...";
+  } else {
+    bambuStatusMsg = "MQTT connect failed (code " + String(bambuMqtt.state()) + ") - check IP/access code";
+    bambuConnected = false;
+  }
+  redrawNeeded = true;
+}
+// Polled from loop() the same way webRunning/bleCompanionEnabled are - see
+// their own call sites.
+void applyBambuInput() {
+  if (!bambuConnected) return;
+  if (!bambuMqtt.connected()) {
+    bambuConnected = false;
+    bambuStatusMsg = "Disconnected";
+    redrawNeeded = true;
+    return;
+  }
+  bambuMqtt.loop();
+  unsigned long now = millis();
+  if (now - bambuLastPushAt > 15000UL) {
+    bambuLastPushAt = now;
+    bambuMqtt.publish(("device/" + bambuSerial + "/request").c_str(), "{\"pushing\":{\"sequence_id\":\"0\",\"command\":\"pushall\"}}");
+  }
+}
+void drawBambuMonitor() {
+  tft.fillScreen(ui.bg); header("BAMBU MONITOR"); tft.setTextSize(1);
+  if (bambuSetupEditing) {
+    static const char* fieldLabels[BAMBU_FIELD_COUNT] = {"PRINTER IP", "ACCESS CODE", "SERIAL NUMBER"};
+    String* fields[BAMBU_FIELD_COUNT] = {&bambuIp, &bambuAccessCode, &bambuSerial};
+    for (int i = 0; i < BAMBU_FIELD_COUNT; ++i) {
+      int y = CONTENT_Y + 10 + i * 34; bool sel = i == bambuSetupField;
+      tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, y); tft.print(fieldLabels[i]);
+      tft.fillRoundRect(8, y + 10, 304, 20, 4, sel ? ui.selected : ILI9341_DARKGREY);
+      tft.setTextColor(ui.text, sel ? ui.selected : ILI9341_DARKGREY); tft.setCursor(13, y + 16);
+      tft.print(*fields[i]); if (sel) tft.print("_");
+    }
+    footer("TAB NEXT FIELD     ENTER SAVE/CONNECT     FN BACK");
+    return;
+  }
+  tft.setTextColor(bambuConnected ? ILI9341_GREEN : ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 6);
+  tft.print(bambuConnected ? "CONNECTED" : "NOT CONNECTED");
+  tft.setTextColor(ui.text, ui.bg); tft.setCursor(12, CONTENT_Y + 22); tft.print(bambuStatusMsg);
+  if (bambuConnected) {
+    char buf[48];
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 46); tft.print("STATE"); tft.setCursor(90, CONTENT_Y + 46); tft.setTextColor(ILI9341_YELLOW, ui.bg); tft.print(bambuGcodeState);
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 62); tft.print("PROGRESS");
+    snprintf(buf, sizeof(buf), "%d%%  (%dmin left)", bambuProgress, bambuRemainingMin);
+    tft.setTextColor(ui.text, ui.bg); tft.setCursor(90, CONTENT_Y + 62); tft.print(buf);
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 78); tft.print("NOZZLE");
+    snprintf(buf, sizeof(buf), "%.0fC / %.0fC target", bambuNozzleTemp, bambuNozzleTarget);
+    tft.setTextColor(ILI9341_ORANGE, ui.bg); tft.setCursor(90, CONTENT_Y + 78); tft.print(buf);
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 94); tft.print("BED");
+    snprintf(buf, sizeof(buf), "%.0fC / %.0fC target", bambuBedTemp, bambuBedTarget);
+    tft.setTextColor(ILI9341_ORANGE, ui.bg); tft.setCursor(90, CONTENT_Y + 94); tft.print(buf);
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 110); tft.print("FILE");
+    String task = bambuTaskName; if (task.length() > 28) task = task.substring(0, 28);
+    tft.setTextColor(ui.text, ui.bg); tft.setCursor(90, CONTENT_Y + 110); tft.print(task);
+  } else {
+    tft.setTextColor(ui.dim, ui.bg);
+    tft.setCursor(12, CONTENT_Y + 46); tft.print("Local LAN mode only - no Bambu account");
+    tft.setCursor(12, CONTENT_Y + 59); tft.print("credentials touch this device. Printer's");
+    tft.setCursor(12, CONTENT_Y + 72); tft.print("own Settings > Network screen has the");
+    tft.setCursor(12, CONTENT_Y + 85); tft.print("IP, Access Code and serial number.");
+  }
+  footer(bambuConnected ? "ENTER DISCONNECT     TAB EDIT     FN BACK" : "ENTER CONNECT     TAB EDIT     FN BACK");
+}
+
 void startWebCompanion() {
   if (webRunning) {
     webServer.stop();
@@ -8931,7 +9114,7 @@ void draw() {
   // itself (Home/Apps aren't "an app" to splash into) - see
   // playAppIntroAnimation()'s own comment for what this actually plays.
   if (realAppTransition && page != LAUNCHER) playAppIntroAnimation(page);
-  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) { ensureBleReady(); drawBleKeyboard(); } else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else if (page == MINICAM) { miniCamJoinNetwork(); drawMiniCam(); } else if (page == BLECOMPANION) drawBleCompanion(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
+  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) { ensureBleReady(); drawBleKeyboard(); } else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else if (page == MINICAM) { miniCamJoinNetwork(); drawMiniCam(); } else if (page == BLECOMPANION) drawBleCompanion(); else if (page == BAMBUMONITOR) drawBambuMonitor(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
 
 // Repaint only a changed application's content. Headers and footers are kept
 // intact; full draw() remains reserved for entering a different scene, modal
@@ -9010,6 +9193,7 @@ void refreshLocalPage() {
     case CLABEXAMPLES: updateCLabExamplesList(); break;
     case WEBCOMPANION: drawWebCompanion(); break;
     case BLECOMPANION: drawBleCompanion(); break;
+    case BAMBUMONITOR: drawBambuMonitor(); break;
     case BLEKEYBOARD: drawBleKeyboard(); break;
     case CARDCREPL: drawCardCRepl(); break;
     case CLAB: drawCLab(); break;
@@ -9881,6 +10065,28 @@ void keyboard() {
   if (page == FILEBROWSER) { if (k.enter) { String content = localFiles[fileSelected]; noteCount = 1; noteLine = 0; int start = 0; for (int i = 0; i < 15; ++i) { int end = content.indexOf('\n', start); notes[i] = end < 0 ? content.substring(start, start + 50) : content.substring(start, end).substring(0, 50); noteCount = i + 1; if (end < 0) break; start = end + 1; } markStateDirty(); page = NOTES; redrawNeeded = true; return; } if (k.del) { localFiles[fileSelected] = ""; markStateDirty(); redrawNeeded = true; return; } for (char c : k.word) if (c == ';') { fileSelected = (fileSelected + 2) % 3; redrawNeeded = true; } else if (c == '.') { fileSelected = (fileSelected + 1) % 3; redrawNeeded = true; } return; }
   if (page == WEBCOMPANION) { if (k.enter) startWebCompanion(); return; }
   if (page == BLECOMPANION) { if (k.enter) startBleCompanion(); return; }
+  if (page == BAMBUMONITOR) {
+    if (bambuSetupEditing) {
+      if (k.tab) { bambuSetupField = (bambuSetupField + 1) % BAMBU_FIELD_COUNT; playTabSound(); redrawNeeded = true; return; }
+      String* fields[BAMBU_FIELD_COUNT] = {&bambuIp, &bambuAccessCode, &bambuSerial};
+      if (k.del) { String& f = *fields[bambuSetupField]; if (!f.isEmpty()) { f.remove(f.length() - 1); playBackspaceSound(); redrawNeeded = true; } return; }
+      if (k.enter) {
+        preferences.begin("bambu", false);
+        preferences.putString("ip", bambuIp); preferences.putString("code", bambuAccessCode); preferences.putString("serial", bambuSerial);
+        preferences.end();
+        bambuSetupEditing = false;
+        playEnterSound();
+        startBambuMonitor();
+        return;
+      }
+      String& f = *fields[bambuSetupField];
+      bool changed = false; for (char c : k.word) if (c >= 32 && c <= 126 && f.length() < 40) { f += c; changed = true; }
+      if (changed) { playTypingSound(); redrawNeeded = true; } return;
+    }
+    if (k.tab) { bambuSetupField = 0; bambuSetupEditing = true; playTabSound(); redrawNeeded = true; return; }
+    if (k.enter) startBambuMonitor();
+    return;
+  }
   if (page == CLABEXAMPLES) {
     // Examples is entered from C LAB FILES, so use its robust key path too.
     bool up = wordContains(k.word, ';') || M5Cardputer.Keyboard.isKeyPressed(';');
@@ -10011,6 +10217,7 @@ void loop() {
   serviceStatusSounds();
   if (webRunning) { webServer.handleClient(); applyWebInput(); }
   if (bleCompanionEnabled) applyBleInput();
+  if (bambuConnected) applyBambuInput();
   keyboard();
   if (page == MIC && !sleeping) updateMicMonitor();
   auto keys = M5Cardputer.Keyboard.keysState();
