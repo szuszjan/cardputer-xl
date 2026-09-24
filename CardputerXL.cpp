@@ -97,6 +97,7 @@
 #include <mbedtls/md.h>
 #include <mbedtls/aes.h>
 #include <esp_system.h>
+#include <nvs_flash.h>
 #include <time.h>
 #include <HijelHID_BLEKeyboard.h>
 #include <vector>  // TrikiFrameParser's re-sync buffer, see "---- TRIKI SCOPE"
@@ -10273,6 +10274,87 @@ void keyboard() {
     for (char c : k.word) { if (c == ';') { int old = settingSelected; settingSelected = (settingSelected + SETTINGS_COUNT - 1) % SETTINGS_COUNT; playMenuSound(); updateSettingsRow(old); updateSettingsRow(settingSelected); } else if (c == '.') { int old = settingSelected; settingSelected = (settingSelected + 1) % SETTINGS_COUNT; playMenuSound(); updateSettingsRow(old); updateSettingsRow(settingSelected); } else if (c == ',' && settingSelected < 7) { playMenuSound(); changeSetting(-1); } else if (c == '/' && settingSelected < 7) { playMenuSound(); changeSetting(1); } }
   }
 }
+// ---- RECOVERY MODE: hold ` while powering on/resetting to get a small
+// menu instead of the normal boot flow - a way back in if something in
+// Preferences/NVS ever leaves the device in a state the normal UI can't
+// escape from (a bad saved theme index, a corrupted C LAB slot, etc.).
+// Deliberately self-contained (direct tft/Keyboard calls, no page/draw()
+// dispatch) since it runs from setup() before most of the app's own state
+// is meaningfully initialized - REBOOT and FACTORY RESET never return to
+// the caller; HW TEST just sets page and lets setup() continue normally
+// into its usual end-of-boot draw().
+void drawRecoveryMenu(int selected) {
+  constexpr int PANEL_H = 96, PANEL_Y = H - PANEL_H;
+  tft.fillRect(0, PANEL_Y, W, PANEL_H, ILI9341_BLACK);
+  tft.drawRect(0, PANEL_Y, W, PANEL_H, ILI9341_DARKGREY);
+  tft.setTextSize(1); tft.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
+  tft.setCursor(10, PANEL_Y + 6); tft.print("RECOVERY MODE");
+  tft.setTextColor(ILI9341_DARKGREY, ILI9341_BLACK);
+  tft.setCursor(10, PANEL_Y + 18); tft.print(";/. SELECT   ENTER CONFIRM");
+  static const char* items[3] = {"REBOOT", "FACTORY RESET", "HW TEST"};
+  for (int i = 0; i < 3; ++i) {
+    int y = PANEL_Y + 36 + i * 18; bool sel = i == selected;
+    uint16_t bg = sel ? ILI9341_DARKGREY : ILI9341_BLACK;
+    tft.fillRect(6, y - 3, W - 12, 16, bg);
+    tft.setTextColor(sel ? ILI9341_YELLOW : ILI9341_WHITE, bg);
+    tft.setCursor(14, y); tft.print(sel ? "> " : "  "); tft.print(items[i]);
+  }
+}
+// A real erase-everything action needs its own explicit confirmation
+// beyond just navigating to and selecting the menu row - ENTER erases,
+// any other key backs out to the menu untouched.
+void runFactoryResetConfirm() {
+  constexpr int PANEL_H = 96, PANEL_Y = H - PANEL_H;
+  tft.fillRect(0, PANEL_Y, W, PANEL_H, ILI9341_BLACK);
+  tft.drawRect(0, PANEL_Y, W, PANEL_H, ILI9341_RED);
+  tft.setTextSize(1); tft.setTextColor(ILI9341_RED, ILI9341_BLACK);
+  tft.setCursor(10, PANEL_Y + 8); tft.print("ERASE ALL SAVED DATA?");
+  tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+  tft.setCursor(10, PANEL_Y + 26); tft.print("Wi-Fi, settings, achievements,");
+  tft.setCursor(10, PANEL_Y + 39); tft.print("notes, C LAB projects - everything.");
+  tft.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+  tft.setCursor(10, PANEL_Y + 64); tft.print("ENTER = ERASE");
+  tft.setTextColor(ILI9341_DARKGREY, ILI9341_BLACK);
+  tft.setCursor(10, PANEL_Y + 78); tft.print("any other key = cancel");
+  while (true) {
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isPressed()) {
+      auto k = M5Cardputer.Keyboard.keysState();
+      if (k.enter) {
+        tft.setTextColor(ILI9341_ORANGE, ILI9341_BLACK); tft.setCursor(10, PANEL_Y + 64); tft.print("ERASING...      ");
+        nvs_flash_erase();
+        nvs_flash_init();
+        delay(300);
+        ESP.restart();
+      }
+      return;
+    }
+    delay(20);
+  }
+}
+void runRecoveryMode() {
+  int selected = 0;
+  drawRecoveryMenu(selected);
+  while (true) {
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isPressed()) {
+      auto k = M5Cardputer.Keyboard.keysState();
+      bool moved = false;
+      for (char c : k.word) {
+        if (c == ';') { selected = (selected + 2) % 3; moved = true; }
+        else if (c == '.') { selected = (selected + 1) % 3; moved = true; }
+      }
+      if (moved) { drawRecoveryMenu(selected); delay(150); }
+      if (k.enter) {
+        if (selected == 0) { ESP.restart(); }
+        else if (selected == 1) { runFactoryResetConfirm(); drawRecoveryMenu(selected); delay(150); }
+        else { page = DEVICECHECK; return; }
+      }
+    }
+    delay(20);
+  }
+}
+
 // Runs once: bring up the board, restore saved settings from flash, then
 // show the boot log / splash before handing off to the normal loop().
 void setup() {
@@ -10319,10 +10401,22 @@ void setup() {
   SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS); tft.begin(); tft.setRotation(displayRotation); tft.setTextWrap(false); applyTheme(); drawLinuxBoot(); drawBootScreen();
   // One clear boot confirmation through the ready-made motor driver.
   vibrate(700);
+  // RECOVERY MODE: checked once, right here - keyboard and display are
+  // both ready, and nothing about the normal boot flow (lock screen,
+  // launcher, Wi-Fi reconnect UI) has been shown yet. Holding ` at exactly
+  // this moment (power-on or a manual reset) is the trigger; a plain
+  // isKeyPressed() check needs a fresh scan first, hence the update().
+  // REBOOT/FACTORY RESET never return (ESP.restart() inside); HW TEST sets
+  // page itself and returns, so the default page assignment right below
+  // must be skipped for it - otherwise it would immediately overwrite
+  // HW TEST's own choice with the normal lock screen/launcher.
+  M5Cardputer.update();
+  bool wentToRecovery = M5Cardputer.Keyboard.isKeyPressed('`');
+  if (wentToRecovery) runRecoveryMode();
   // Begin at the visible PIN gate by default, unless the "Lock on startup"
   // Settings toggle has been turned off - either way, never expose the
   // last app that happened to be open before power-off.
-  page = lockOnStartupEnabled ? LOCKSCREEN : LAUNCHER; launcherHome = true;
+  if (!wentToRecovery) { page = lockOnStartupEnabled ? LOCKSCREEN : LAUNCHER; launcherHome = true; }
   sleeping = false; setBacklight(true); updateStatusLed(); lastActivity = millis(); draw();
 }
 // Runs forever. Roughly: poll input (keyboard()) -> let any continuously-
