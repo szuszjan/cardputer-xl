@@ -516,7 +516,7 @@ bool screensaverDimmed = false;
 // The wallpaper is transferred once whenever the lock scene opens. Subsequent
 // PIN, clock and battery changes repaint only their opaque panel rectangles.
 bool lockScreenBaseDrawn = false;
-uint8_t volumeLevel = 10;  // 0..10, persisted; 0 is silent.
+uint8_t volumeLevel = 2;  // 0..10, persisted; 0 is silent. Default (and post-factory-reset) volume is 20%.
 uint8_t brightnessLevel = 10; // 1..10, persisted; PWM duty for the ILI backlight.
 // The PIN itself is never retained. Only its SHA-256 verification hash is
 // stored in Preferences. Default PIN for a fresh device: 1234.
@@ -1104,7 +1104,7 @@ void loadPersistentState() {
   lockAfterScreensaverIndex = constrain(preferences.getInt("lock_after_ss", lockAfterScreensaverIndex), 0, 4);
   // Migrate the old Sound ON/OFF preference to a full-volume/default setting.
   if (preferences.isKey("volume")) volumeLevel = constrain(preferences.getUChar("volume", volumeLevel), 0, 10);
-  else volumeLevel = preferences.getBool("sound", true) ? 10 : 0;
+  else volumeLevel = preferences.getBool("sound", true) ? 2 : 0;
   String storedNotes = preferences.getString("notes", "");
   String storedCode = preferences.getString("code", "");
   cLabFileName = preferences.getString("clab_name", cLabFileName);
@@ -10278,50 +10278,57 @@ void keyboard() {
 // menu instead of the normal boot flow - a way back in if something in
 // Preferences/NVS ever leaves the device in a state the normal UI can't
 // escape from (a bad saved theme index, a corrupted C LAB slot, etc.).
-// Deliberately self-contained (direct tft/Keyboard calls, no page/draw()
+// Drawn on the Cardputer's own small built-in screen (M5Cardputer.Display,
+// the same object updateBuiltinDisplay() already uses elsewhere in this
+// file), NOT the external ILI9341 panel this whole file otherwise renders
+// everything on - the external panel's backlight is switched off for the
+// duration instead, since it has nothing to show here. Deliberately self-
+// contained (direct M5Cardputer.Display/Keyboard calls, no page/draw()
 // dispatch) since it runs from setup() before most of the app's own state
 // is meaningfully initialized - REBOOT and FACTORY RESET never return to
-// the caller; HW TEST just sets page and lets setup() continue normally
-// into its usual end-of-boot draw().
+// the caller; HW TEST runs its own little loop right here rather than
+// handing off to the normal DEVICECHECK app (which lives on the external
+// panel this mode is deliberately keeping dark).
 void drawRecoveryMenu(int selected) {
-  constexpr int PANEL_H = 96, PANEL_Y = H - PANEL_H;
-  tft.fillRect(0, PANEL_Y, W, PANEL_H, ILI9341_BLACK);
-  tft.drawRect(0, PANEL_Y, W, PANEL_H, ILI9341_DARKGREY);
-  tft.setTextSize(1); tft.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
-  tft.setCursor(10, PANEL_Y + 6); tft.print("RECOVERY MODE");
-  tft.setTextColor(ILI9341_DARKGREY, ILI9341_BLACK);
-  tft.setCursor(10, PANEL_Y + 18); tft.print(";/. SELECT   ENTER CONFIRM");
+  auto& screen = M5Cardputer.Display;
+  int w = screen.width(), h = screen.height();
+  screen.fillScreen(ILI9341_BLACK);
+  screen.setTextSize(1); screen.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
+  screen.setCursor(6, 4); screen.print("RECOVERY MODE");
+  screen.setTextColor(ILI9341_DARKGREY, ILI9341_BLACK);
+  screen.setCursor(6, 16); screen.print(";/. SELECT   ENTER CONFIRM");
+  screen.drawFastHLine(6, 27, w - 12, ILI9341_DARKGREY);
   static const char* items[3] = {"REBOOT", "FACTORY RESET", "HW TEST"};
+  int rowH = (h - 34) / 3;
   for (int i = 0; i < 3; ++i) {
-    int y = PANEL_Y + 36 + i * 18; bool sel = i == selected;
+    int y = 32 + i * rowH; bool sel = i == selected;
     uint16_t bg = sel ? ILI9341_DARKGREY : ILI9341_BLACK;
-    tft.fillRect(6, y - 3, W - 12, 16, bg);
-    tft.setTextColor(sel ? ILI9341_YELLOW : ILI9341_WHITE, bg);
-    tft.setCursor(14, y); tft.print(sel ? "> " : "  "); tft.print(items[i]);
+    screen.fillRect(3, y, w - 6, rowH - 2, bg);
+    screen.setTextColor(sel ? ILI9341_YELLOW : ILI9341_WHITE, bg);
+    screen.setCursor(10, y + rowH / 2 - 4); screen.print(sel ? "> " : "  "); screen.print(items[i]);
   }
 }
 // A real erase-everything action needs its own explicit confirmation
 // beyond just navigating to and selecting the menu row - ENTER erases,
 // any other key backs out to the menu untouched.
 void runFactoryResetConfirm() {
-  constexpr int PANEL_H = 96, PANEL_Y = H - PANEL_H;
-  tft.fillRect(0, PANEL_Y, W, PANEL_H, ILI9341_BLACK);
-  tft.drawRect(0, PANEL_Y, W, PANEL_H, ILI9341_RED);
-  tft.setTextSize(1); tft.setTextColor(ILI9341_RED, ILI9341_BLACK);
-  tft.setCursor(10, PANEL_Y + 8); tft.print("ERASE ALL SAVED DATA?");
-  tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
-  tft.setCursor(10, PANEL_Y + 26); tft.print("Wi-Fi, settings, achievements,");
-  tft.setCursor(10, PANEL_Y + 39); tft.print("notes, C LAB projects - everything.");
-  tft.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
-  tft.setCursor(10, PANEL_Y + 64); tft.print("ENTER = ERASE");
-  tft.setTextColor(ILI9341_DARKGREY, ILI9341_BLACK);
-  tft.setCursor(10, PANEL_Y + 78); tft.print("any other key = cancel");
+  auto& screen = M5Cardputer.Display;
+  screen.fillScreen(ILI9341_BLACK);
+  screen.setTextSize(1); screen.setTextColor(ILI9341_RED, ILI9341_BLACK);
+  screen.setCursor(6, 4); screen.print("ERASE ALL SAVED DATA?");
+  screen.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+  screen.setCursor(6, 20); screen.print("Wi-Fi, settings, achievements,");
+  screen.setCursor(6, 32); screen.print("notes, C LAB projects - everything.");
+  screen.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+  screen.setCursor(6, 54); screen.print("ENTER = ERASE");
+  screen.setTextColor(ILI9341_DARKGREY, ILI9341_BLACK);
+  screen.setCursor(6, 66); screen.print("any other key = cancel");
   while (true) {
     M5Cardputer.update();
     if (M5Cardputer.Keyboard.isPressed()) {
       auto k = M5Cardputer.Keyboard.keysState();
       if (k.enter) {
-        tft.setTextColor(ILI9341_ORANGE, ILI9341_BLACK); tft.setCursor(10, PANEL_Y + 64); tft.print("ERASING...      ");
+        screen.setTextColor(ILI9341_ORANGE, ILI9341_BLACK); screen.setCursor(6, 54); screen.print("ERASING...      ");
         nvs_flash_erase();
         nvs_flash_init();
         delay(300);
@@ -10332,7 +10339,90 @@ void runFactoryResetConfirm() {
     delay(20);
   }
 }
+// A real, self-contained hardware check (screen, keys, speaker, battery) -
+// runs entirely on the built-in screen rather than opening the normal
+// DEVICECHECK app, since that app lives on the external panel this mode
+// deliberately keeps dark except for the C screen-test check below. Keys:
+// every key pressed echoes live. Speaker: ENTER beeps. Battery: level (and
+// charging state) shown continuously.
+void runScreenTest() {
+  // The external panel is otherwise kept dark throughout recovery mode - this
+  // is the one moment it's actually lit, so a dead backlight/panel can still
+  // be diagnosed.
+  ledcWrite(TFT_BL, 255);
+  int pattern = 0;
+  constexpr int PATTERN_COUNT = 6; // red, green, blue, white, checker, inverse checker
+  constexpr int CELL = 20;
+  auto drawPattern = [](int p) {
+    switch (p) {
+      case 0: tft.fillScreen(ILI9341_RED); break;
+      case 1: tft.fillScreen(ILI9341_GREEN); break;
+      case 2: tft.fillScreen(ILI9341_BLUE); break;
+      case 3: tft.fillScreen(ILI9341_WHITE); break;
+      default: {
+        bool startBlack = (p == 4);
+        for (int y = 0; y < tft.height(); y += CELL)
+          for (int x = 0; x < tft.width(); x += CELL) {
+            bool black = ((x / CELL + y / CELL) % 2 == 0) == startBlack;
+            tft.fillRect(x, y, CELL, CELL, black ? ILI9341_BLACK : ILI9341_WHITE);
+          }
+        break;
+      }
+    }
+  };
+  drawPattern(pattern);
+  while (true) {
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isPressed()) {
+      auto k = M5Cardputer.Keyboard.keysState();
+      if (k.fn) break;
+      bool advance = false;
+      for (char c : k.word) if (c == 'c') advance = true;
+      if (advance) { pattern = (pattern + 1) % PATTERN_COUNT; drawPattern(pattern); delay(150); }
+    }
+    delay(20);
+  }
+  ledcWrite(TFT_BL, 0);  // back to dark - recovery mode's default state
+}
+void runHwTest() {
+  auto& screen = M5Cardputer.Display;
+  String lastKeys = "(none yet)";
+  while (true) {
+    M5Cardputer.update();
+    screen.fillScreen(ILI9341_BLACK);
+    screen.setTextSize(1);
+    screen.setTextColor(ILI9341_CYAN, ILI9341_BLACK); screen.setCursor(6, 4); screen.print("HW TEST");
+    screen.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+    int batt = M5Cardputer.Power.getBatteryLevel();
+    bool charging = (int)M5Cardputer.Power.isCharging() == 1;
+    screen.setCursor(6, 20); screen.print("BATTERY  " + (batt < 0 ? String("--") : String(batt) + "%") + (charging ? " (CHARGING)" : ""));
+    screen.setCursor(6, 34); screen.print("LAST KEY(S): " + lastKeys);
+    screen.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+    screen.setCursor(6, 58); screen.print("ENTER BEEP   C SCREEN TEST   FN EXIT");
+
+    if (M5Cardputer.Keyboard.isPressed()) {
+      auto k = M5Cardputer.Keyboard.keysState();
+      if (k.fn) return;
+      if (k.enter) M5Cardputer.Speaker.tone(1000, 200);
+      bool screenTest = false;
+      String keys;
+      for (char c : k.word) { keys += c; if (c == 'c') screenTest = true; }
+      if (k.del) keys += "[DEL]";
+      if (k.tab) keys += "[TAB]";
+      if (!keys.isEmpty()) lastKeys = keys;
+      if (screenTest) runScreenTest();
+    }
+    delay(60);
+  }
+}
 void runRecoveryMode() {
+  // The external panel's own bring-up normally happens later in setup(), after
+  // the boot animations recovery mode is specifically trying to skip - do the
+  // minimum here instead (no theme/splash) so HW TEST's screen-pattern check
+  // has something to draw to. Its backlight stays off except during that check.
+  SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS); tft.begin(); tft.setRotation(displayRotation); tft.setTextWrap(false);
+  ledcAttach(TFT_BL, TFT_BL_PWM_HZ, TFT_BL_PWM_BITS);
+  ledcWrite(TFT_BL, 0);
   int selected = 0;
   drawRecoveryMenu(selected);
   while (true) {
@@ -10348,7 +10438,7 @@ void runRecoveryMode() {
       if (k.enter) {
         if (selected == 0) { ESP.restart(); }
         else if (selected == 1) { runFactoryResetConfirm(); drawRecoveryMenu(selected); delay(150); }
-        else { page = DEVICECHECK; return; }
+        else { runHwTest(); drawRecoveryMenu(selected); delay(150); }
       }
     }
     delay(20);
@@ -10359,6 +10449,16 @@ void runRecoveryMode() {
 // show the boot log / splash before handing off to the normal loop().
 void setup() {
   auto cfg = M5.config(); M5Cardputer.begin(cfg, true); loadPersistentState(); applyVolume();
+  // RECOVERY MODE: checked immediately, before any boot animation, splash, or
+  // external-panel init - keyboard and the built-in display are both ready
+  // right after begin(). Holding ` at power-on (or a manual reset) is the
+  // trigger; a plain isKeyPressed() check needs a fresh scan first, hence the
+  // explicit update(). runRecoveryMode() never actually returns in practice -
+  // REBOOT and a completed FACTORY RESET both ESP.restart(), and HW TEST
+  // loops back into the recovery menu rather than exiting - so everything
+  // below this point only ever runs for a normal boot.
+  M5Cardputer.update();
+  if (M5Cardputer.Keyboard.isKeyPressed('`')) runRecoveryMode();
   pinMode(BTNA_PIN, INPUT_PULLUP);
   pinMode(HAPTIC_IN_PIN, OUTPUT);
   digitalWrite(HAPTIC_IN_PIN, LOW); // Keep the motor module off by default.
@@ -10401,22 +10501,10 @@ void setup() {
   SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS); tft.begin(); tft.setRotation(displayRotation); tft.setTextWrap(false); applyTheme(); drawLinuxBoot(); drawBootScreen();
   // One clear boot confirmation through the ready-made motor driver.
   vibrate(700);
-  // RECOVERY MODE: checked once, right here - keyboard and display are
-  // both ready, and nothing about the normal boot flow (lock screen,
-  // launcher, Wi-Fi reconnect UI) has been shown yet. Holding ` at exactly
-  // this moment (power-on or a manual reset) is the trigger; a plain
-  // isKeyPressed() check needs a fresh scan first, hence the update().
-  // REBOOT/FACTORY RESET never return (ESP.restart() inside); HW TEST sets
-  // page itself and returns, so the default page assignment right below
-  // must be skipped for it - otherwise it would immediately overwrite
-  // HW TEST's own choice with the normal lock screen/launcher.
-  M5Cardputer.update();
-  bool wentToRecovery = M5Cardputer.Keyboard.isKeyPressed('`');
-  if (wentToRecovery) runRecoveryMode();
   // Begin at the visible PIN gate by default, unless the "Lock on startup"
   // Settings toggle has been turned off - either way, never expose the
   // last app that happened to be open before power-off.
-  if (!wentToRecovery) { page = lockOnStartupEnabled ? LOCKSCREEN : LAUNCHER; launcherHome = true; }
+  page = lockOnStartupEnabled ? LOCKSCREEN : LAUNCHER; launcherHome = true;
   sleeping = false; setBacklight(true); updateStatusLed(); lastActivity = millis(); draw();
 }
 // Runs forever. Roughly: poll input (keyboard()) -> let any continuously-
