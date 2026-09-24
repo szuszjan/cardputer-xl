@@ -8916,12 +8916,17 @@ void startRadio() {
     return;
   }
   // Same defensive check BLE Companion/Bambu Monitor's own heap guards
-  // use - MP3 decode + network buffering is much lighter than either of
-  // those (tens of KB, not ~55-65KB), but this device has no PSRAM and no
-  // margin to spare, so check first rather than find out mid-stream.
+  // use, but recalibrated rather than copying their threshold verbatim:
+  // this path has no TLS at all, and its own allocations are a 4KB stream
+  // buffer plus the MP3 decoder's own working state (libhelix-mp3's
+  // internal buffers/tables, historically only a handful of KB) - a real
+  // requirement closer to 15-25KB, not the ~55-65KB BLE/TLS need. 30KB
+  // keeps a genuine safety margin above that without failing needlessly
+  // on a device this heap-constrained (no PSRAM, kartCanvas alone holds
+  // ~150KB permanently).
   uint32_t freeHeap = ESP.getFreeHeap();
   Serial.printf("[RADIO] free heap before stream start: %u bytes\n", freeHeap);
-  if (freeHeap < 50000) {
+  if (freeHeap < 30000) {
     radioStatusMsg = "Not enough free memory (" + String(freeHeap / 1024) + "KB free) to stream";
     redrawNeeded = true;
     return;
