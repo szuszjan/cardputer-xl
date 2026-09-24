@@ -4314,7 +4314,7 @@ void skyDrawAirportBuilding(const KartCam& cam, const SkyAirport& a) {
 // what actually sells "you're sitting in the aircraft" instead of a bare
 // view: a top visor strip, a center windscreen pillar, angled corner
 // pillars, and a glareshield with a couple of decorative gauge bezels and
-// switches sitting right above the real instrument strip (SKY_HUD_H, 34px).
+// switches along the bottom edge.
 void skyDrawCockpitOverlay() {
   int w = kartCanvas.width(), h = kartCanvas.height();
   const uint16_t DASH = 0x2987, TRIM = ILI9341_LIGHTGREY;
@@ -4325,8 +4325,12 @@ void skyDrawCockpitOverlay() {
   kartCanvas.fillTriangle(0, 0, 24, 0, 0, 52, DASH);
   kartCanvas.fillTriangle(w - 1, 0, w - 25, 0, w - 1, 52, DASH);
 
-  int sillTop = h - 34 - 16;  // 16px glareshield band directly above the HUD's instrument strip
-  kartCanvas.fillRoundRect(-6, sillTop, w + 12, 34 + 22, 12, DASH);
+  // A slim decorative glareshield band - the real instruments it used to
+  // sit directly above no longer render here (they moved to the built-in
+  // screen; see drawSkyPilotSmallHud()), so this no longer needs to reserve
+  // extra height to merge visually with a strip below it.
+  int sillTop = h - 20;
+  kartCanvas.fillRoundRect(-6, sillTop, w + 12, 26, 12, DASH);
   kartCanvas.drawFastHLine(0, sillTop, w, TRIM);
   kartCanvas.drawCircle(26, sillTop + 10, 7, TRIM);
   kartCanvas.drawCircle(w - 26, sillTop + 10, 7, TRIM);
@@ -4499,16 +4503,20 @@ void skyRenderScene(const KartCam& cam, const KVec3& fwd, bool firstPerson) {
   skyDrawAirportLabels(cam);
   skyDrawAutopilotGuide(cam);
 }
-// Bottom instrument strip: a rotating/tilting attitude indicator (per-column
-// fill against the tilted horizon line - cheap way to get a properly clipped
-// gauge without true polygon clipping on hardware this small) plus a
-// compass tape, speed and altitude.
-constexpr int SKY_HUD_H = 34;
+// A rotating/tilting attitude indicator (per-column fill against the tilted
+// horizon line - cheap way to get a properly clipped gauge without true
+// polygon clipping on hardware this small) plus a compass tape, speed and
+// altitude - all part of the plane's instrument cluster on the built-in
+// screen (drawSkyPilotSmallHud()), not the external panel this HUD lives on.
 // A round gauge (a real attitude indicator is round, not a square LCD tile)
 // - per-column fill clipped to the circle's chord at each column, the same
 // cheap trick as before, just bounded by sqrt(r^2-col^2) instead of a
 // fixed-height square.
+// Both gauges below now draw to the built-in Cardputer screen (see
+// drawSkyPilotSmallHud()), not the external panel - the plane's instrument
+// cluster lives there so the main view is unobstructed.
 void skyDrawAttitudeIndicator(int cx, int cy, int radius) {
+  auto& screen = M5Cardputer.Display;
   // Vertical pixel offset of the horizon at bank=0, scaled so a generous
   // pitch angle reaches near the gauge edge.
   float pitchPx = constrain(skyPlane.pitch / 1.4f, -1.0f, 1.0f) * (radius * 0.85f);
@@ -4524,18 +4532,19 @@ void skyDrawAttitudeIndicator(int cx, int cy, int radius) {
     if (fabsf(cosB) < 0.05f) lineY = cy;  // banked ~90 deg: fall back to level, an edge case
     else lineY = (cy + pitchPx) + col * (sinB / cosB);
     int split = (int)constrain(lineY, (float)yTop, (float)yBot);
-    kartCanvas.drawFastVLine(x, yTop, split - yTop, sky);
-    kartCanvas.drawFastVLine(x, split, yBot - split, ground);
+    screen.drawFastVLine(x, yTop, split - yTop, sky);
+    screen.drawFastVLine(x, split, yBot - split, ground);
   }
   // Fixed aircraft reference (never rotates) - bank/pitch read as the
   // horizon moving against this, exactly like a real attitude indicator.
-  kartCanvas.drawFastHLine(cx - radius + 3, cy, radius - 6, ILI9341_YELLOW);
-  kartCanvas.drawFastHLine(cx + 3, cy, radius - 6, ILI9341_YELLOW);
-  kartCanvas.drawCircle(cx, cy, radius, ILI9341_LIGHTGREY);
+  screen.drawFastHLine(cx - radius + 3, cy, radius - 6, ILI9341_YELLOW);
+  screen.drawFastHLine(cx + 3, cy, radius - 6, ILI9341_YELLOW);
+  screen.drawCircle(cx, cy, radius, ILI9341_LIGHTGREY);
 }
 void skyDrawCompass(int x0, int y0, int w, int h) {
-  kartCanvas.fillRect(x0, y0, w, h, ILI9341_BLACK);
-  kartCanvas.drawRect(x0, y0, w, h, ILI9341_LIGHTGREY);
+  auto& screen = M5Cardputer.Display;
+  screen.fillRect(x0, y0, w, h, ILI9341_BLACK);
+  screen.drawRect(x0, y0, w, h, ILI9341_LIGHTGREY);
   // Standard compass sense (turning right increases the number), which is
   // the opposite of this game's internal heading convention - see the
   // comment on TURN_RATE_PER_BANK in stepSkyPilotFlight().
@@ -4543,21 +4552,71 @@ void skyDrawCompass(int x0, int y0, int w, int h) {
   const float degPerPixel = 2.2f;
   int cx = x0 + w / 2;
   static const struct { float deg; const char* label; } marks[] = {{0, "N"}, {45, "NE"}, {90, "E"}, {135, "SE"}, {180, "S"}, {225, "SW"}, {270, "W"}, {315, "NW"}};
-  kartCanvas.setTextSize(1);
+  screen.setTextSize(1);
   for (auto& m : marks) {
     float rel = m.deg - headingDeg;
     while (rel > 180) rel -= 360;
     while (rel < -180) rel += 360;
     int px = cx + (int)(rel / degPerPixel);
     if (px < x0 + 2 || px > x0 + w - 10) continue;
-    kartCanvas.drawFastVLine(px, y0 + h - 6, 6, ILI9341_WHITE);
-    kartCanvas.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
-    kartCanvas.setCursor(px - 3, y0 + 11);
-    kartCanvas.print(m.label);
+    screen.drawFastVLine(px, y0 + h - 6, 6, ILI9341_WHITE);
+    screen.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+    screen.setCursor(px - 3, y0 + 11);
+    screen.print(m.label);
   }
-  kartCanvas.fillTriangle(cx - 3, y0 + 1, cx + 3, y0 + 1, cx, y0 + 6, ILI9341_YELLOW);
+  screen.fillTriangle(cx - 3, y0 + 1, cx + 3, y0 + 1, cx, y0 + 6, ILI9341_YELLOW);
   char buf[5]; snprintf(buf, sizeof(buf), "%03d", (int)headingDeg);
-  kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK); kartCanvas.setCursor(cx - 9, y0 + h - 9); kartCanvas.print(buf);
+  screen.setTextColor(ILI9341_CYAN, ILI9341_BLACK); screen.setCursor(cx - 9, y0 + h - 9); screen.print(buf);
+}
+// The plane's instrument cluster: throttle/speed, altitude, a small attitude
+// indicator, the compass tape, and (if enabled) the fuel bar - previously
+// part of the external panel's bottom strip, now here so the main flight
+// view gets the full external screen. Throttled well below the flight
+// engine's own frame rate - gauges don't need 3D-scene smoothness, and this
+// is a full-screen SPI redraw of a second display every time it runs.
+void drawSkyPilotSmallHud() {
+  static uint32_t lastMs = 0;
+  uint32_t now = millis();
+  if (now - lastMs < 100) return;
+  lastMs = now;
+
+  auto& screen = M5Cardputer.Display;
+  int w = screen.width(), h = screen.height();
+  screen.fillScreen(ILI9341_BLACK);
+  screen.setTextSize(1);
+  float clearance = skyPlane.pos.y - skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
+  char buf[16];
+
+  screen.setTextColor(ILI9341_ORANGE, ILI9341_BLACK);
+  screen.setCursor(4, 2);
+  screen.print(skySpectating ? skyPlaneModels[skyPlaneModelIndex].name : skyThrottleNames[skyThrottleLevel]);
+  screen.setTextColor(clearance < 8.0f ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
+  snprintf(buf, sizeof(buf), "%3d", (int)skyPlane.speed);
+  screen.setTextSize(2); screen.setCursor(4, 14); screen.print(buf);
+  screen.setTextSize(1); screen.setTextColor(ILI9341_DARKGREY, ILI9341_BLACK);
+  screen.setCursor(4, 34); screen.print("SPD");
+
+  screen.setTextColor(clearance < 8.0f ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
+  snprintf(buf, sizeof(buf), "%4d", (int)skyPlane.pos.y);
+  screen.setTextSize(2);
+  int altTextW = (int)strlen(buf) * 12;  // size-2 GFX glyphs are 12px wide
+  screen.setCursor(w - 6 - altTextW, 14); screen.print(buf);
+  screen.setTextSize(1); screen.setTextColor(ILI9341_DARKGREY, ILI9341_BLACK);
+  screen.setCursor(w - 6 - 18, 34); screen.print("ALT");
+
+  skyDrawAttitudeIndicator(w / 2, 30, 26);
+
+  if (skyFuelEnabled) {
+    constexpr int BAR_H = 5;
+    int barY = 60, barW = w - 8;
+    screen.drawRect(4, barY, barW, BAR_H, ILI9341_LIGHTGREY);
+    int fillW = (int)((barW - 2) * (skyFuel / 100.0f));
+    uint16_t fuelCol = skyFuel <= 15.0f ? ILI9341_RED : (skyFuel <= 40.0f ? ILI9341_ORANGE : ILI9341_GREEN);
+    if (fillW > 0) screen.fillRect(5, barY + 1, fillW, BAR_H - 2, fuelCol);
+  }
+
+  int compassH = 30;
+  skyDrawCompass(0, h - compassH, w, compassH);
 }
 // A fixed-scale, heading-up radar: the plane always sits at the center
 // facing "up" on screen (rotating with it, like a real moving-map display)
@@ -4629,7 +4688,6 @@ void skyDrawMinimap(int x0, int y0, int size) {
 // one size so they can't drift out of sync with it again.
 constexpr int SKY_MINIMAP_SIZE = 72, SKY_MINIMAP_X0 = -SKY_MINIMAP_SIZE - 2;
 void skyRenderHud(bool stalling, bool pullUp) {
-  int hudY = kartCanvas.height() - SKY_HUD_H;
   kartCanvas.fillRect(0, 0, kartCanvas.width() + SKY_MINIMAP_X0 - 4, 22, ILI9341_BLACK);
   kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
   char buf[48];
@@ -4670,13 +4728,13 @@ void skyRenderHud(bool stalling, bool pullUp) {
     kartCanvas.setTextColor(skyIsNight() ? 0x841F /*dim blue*/ : ILI9341_YELLOW, ILI9341_BLACK);
     kartCanvas.setCursor(kartCanvas.width() - 4 - 6 * strlen(clockBuf), clockY + 1); kartCanvas.print(clockBuf);
   }
-  // ATC subtitle - a single centered line just above the instrument strip,
+  // ATC subtitle - a single centered line near the bottom of the view,
   // shown only while skyAtcUntil hasn't passed (skyShowAtc() is the only
   // writer, called from fuel/weather/achievement triggers).
   if (millis() < skyAtcUntil) {
     kartCanvas.setTextSize(1);
     int textW = (int)skyAtcMessage.length() * 6;
-    int tx = kartCanvas.width() / 2 - textW / 2, ty = hudY - 12;
+    int tx = kartCanvas.width() / 2 - textW / 2, ty = kartCanvas.height() - 46;
     kartCanvas.fillRect(tx - 3, ty - 2, textW + 6, 11, ILI9341_BLACK);
     kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
     kartCanvas.setCursor(tx, ty); kartCanvas.print(skyAtcMessage);
@@ -4690,33 +4748,10 @@ void skyRenderHud(bool stalling, bool pullUp) {
     kartCanvas.print("PULL UP");
     kartCanvas.setTextSize(1);
   }
-  kartCanvas.fillRect(0, hudY, kartCanvas.width(), SKY_HUD_H, ILI9341_BLACK);
-  kartCanvas.drawFastHLine(0, hudY, kartCanvas.width(), ILI9341_DARKGREY);
-
-  float clearance = skyPlane.pos.y - skyTerrainHeight(skyPlane.pos.x, skyPlane.pos.z);
-  kartCanvas.setTextColor(ILI9341_ORANGE, ILI9341_BLACK);
-  kartCanvas.setCursor(4, hudY + 3);
-  kartCanvas.print(skySpectating ? skyPlaneModels[skyPlaneModelIndex].name : skyThrottleNames[skyThrottleLevel]);
-  kartCanvas.setTextColor(clearance < 8.0f ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
-  snprintf(buf, sizeof(buf), "%3d", (int)skyPlane.speed); kartCanvas.setCursor(4, hudY + 15); kartCanvas.print(buf);
-
-  // Fuel gauge - a small bar in the strip's third row (only used when the
-  // option is on), red under the same 15% threshold that triggers the
-  // FUEL LOW ATC call so the visual and the warning agree.
-  if (skyFuelEnabled) {
-    constexpr int BAR_X = 4, BAR_Y_OFF = 27, BAR_W = 55, BAR_H = 5;
-    kartCanvas.drawRect(BAR_X, hudY + BAR_Y_OFF, BAR_W, BAR_H, ILI9341_LIGHTGREY);
-    int fillW = (int)((BAR_W - 2) * (skyFuel / 100.0f));
-    uint16_t fuelCol = skyFuel <= 15.0f ? ILI9341_RED : (skyFuel <= 40.0f ? ILI9341_ORANGE : ILI9341_GREEN);
-    if (fillW > 0) kartCanvas.fillRect(BAR_X + 1, hudY + BAR_Y_OFF + 1, fillW, BAR_H - 2, fuelCol);
-  }
-
-  skyDrawAttitudeIndicator(95, hudY + SKY_HUD_H / 2, 15);
-  skyDrawCompass(140, hudY + 2, 100, SKY_HUD_H - 4);
-
-  kartCanvas.setTextColor(clearance < 8.0f ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
-  kartCanvas.setCursor(268, hudY + 3); kartCanvas.print("ALT");
-  snprintf(buf, sizeof(buf), "%4d", (int)skyPlane.pos.y); kartCanvas.setCursor(268, hudY + 15); kartCanvas.print(buf);
+  // Throttle/speed/altitude/attitude/compass/fuel all live on the built-in
+  // screen now (drawSkyPilotSmallHud()) - the external panel keeps the full
+  // canvas height for the 3D view instead of reserving a bottom strip for them.
+  drawSkyPilotSmallHud();
 }
 // The Blackbird's sonic boom: a real visual punch instead of a text banner
 // - a brief full-white flash for the shock itself, then an expanding ring
@@ -5463,6 +5498,12 @@ void skyPlayStageTransition(int direction) {
 void drawSkyPilotHub() {
   lastDrawnGameMode = gameMode;
   skyLoadBest();
+  // Flight just ended (or we're just entering the hub) - drawSkyPilotSmallHud()
+  // owns the built-in screen during SKY_FLYING and the normal 250ms
+  // updateBuiltinDisplay() poll otherwise no-ops here (GAMEHUB's signature
+  // doesn't change while the page itself stays the same), so without this the
+  // last flight's instrument readout would be left stuck on-screen.
+  updateBuiltinDisplay(true);
   if (skyState == SKY_RESULTS) {
     tft.fillScreen(ui.bg); header("GAMES / SKY PILOT");
     bool win = skyMode == SKY_MODE_AIRPORT && skyMissionSuccess;
@@ -10452,13 +10493,23 @@ void setup() {
   // RECOVERY MODE: checked immediately, before any boot animation, splash, or
   // external-panel init - keyboard and the built-in display are both ready
   // right after begin(). Holding ` at power-on (or a manual reset) is the
-  // trigger; a plain isKeyPressed() check needs a fresh scan first, hence the
-  // explicit update(). runRecoveryMode() never actually returns in practice -
-  // REBOOT and a completed FACTORY RESET both ESP.restart(), and HW TEST
-  // loops back into the recovery menu rather than exiting - so everything
-  // below this point only ever runs for a normal boot.
-  M5Cardputer.update();
-  if (M5Cardputer.Keyboard.isKeyPressed('`')) runRecoveryMode();
+  // trigger. The ADV's keyboard is an interrupt-driven I2C matrix (TCA8418):
+  // a key already held across power-on only gets caught once the chip's own
+  // first internal scan completes and fires that interrupt, which doesn't
+  // happen instantly - a single isKeyPressed() right after begin() can miss
+  // it. Poll for a short, fixed window instead of a delay(), so a key that
+  // lands mid-window is still caught without waiting the full window every
+  // boot. runRecoveryMode() never actually returns in practice - REBOOT and a
+  // completed FACTORY RESET both ESP.restart(), and HW TEST loops back into
+  // the recovery menu rather than exiting - so everything below this point
+  // only ever runs for a normal boot.
+  bool wantsRecovery = false;
+  for (int i = 0; i < 15 && !wantsRecovery; ++i) {
+    M5Cardputer.update();
+    wantsRecovery = M5Cardputer.Keyboard.isKeyPressed('`');
+    if (!wantsRecovery) delay(20);
+  }
+  if (wantsRecovery) runRecoveryMode();
   pinMode(BTNA_PIN, INPUT_PULLUP);
   pinMode(HAPTIC_IN_PIN, OUTPUT);
   digitalWrite(HAPTIC_IN_PIN, LOW); // Keep the motor module off by default.
