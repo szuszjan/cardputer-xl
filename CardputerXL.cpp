@@ -86,6 +86,10 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include <AudioFileSourceICYStream.h>
+#include <AudioFileSourceBuffer.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioOutputI2S.h>
 #include <Preferences.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
@@ -132,7 +136,7 @@ struct Theme { uint16_t bg, panel, accent, text, dim, selected; };
 // numeric (Page - 1) indices into appNames[], so slotting a new page into
 // the middle would silently renumber every app after it. Appending at the
 // end only ever adds a new index, never reassigns an existing one.
-enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, TRIKISCOPE, MINICAM, BLECOMPANION, BAMBUMONITOR, WIFISETUP, LOCKSCREEN, SCREENSAVER };
+enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, TRIKISCOPE, MINICAM, BLECOMPANION, BAMBUMONITOR, RADIO, WIFISETUP, LOCKSCREEN, SCREENSAVER };
 
 struct CVar { String name; long value; };
 
@@ -432,6 +436,7 @@ void drawLauncher(); void drawSystem(); const char* enc(wifi_auth_mode_t e); voi
 void drawTextTools(); void drawFavourites(); void drawWifiMonitor(); void drawFileBrowser(); void drawWebCompanion(); void drawHomeEditor(); void startWebCompanion(); void applyWebInput(); void applyWebAction(const String& action);
 void drawBleCompanion(); void startBleCompanion(); void applyBleInput();
 void drawBambuMonitor(); void startBambuMonitor(); void applyBambuInput();
+void drawRadio(); void startRadio(); void stopRadio(); void applyRadioInput();
 void drawCalc(); void updateClockValue(); void updateCalcPanel(); void updateNotesLine(); void updateSettingsRow(int index);
 void drawCLab(); void drawCLabQR(); void drawCardCRepl(); void drawQRText(); void drawQRTextField(); void drawQRModules(); void drawCLabEditor(); void drawCLabCodeLine(int lineIndex); void drawCLabExamples(); void loadCLabExample(int example); void drawCLabExplorer(); void drawCLabSaveDialog(); void drawCLabSlotDialog(); void drawCLabNameDialog(); void openNewCLabFile(); void saveCLabFile(); void openCLabUserApp(int slot, bool runNow); void captureCLabUserApp();
 void runCLab(); void runCardCRepl(); void loadCLabDemo(); String settingValue(int i); void drawSettings(); void draw(); void startScan(); void checkScan(); void calcResult();
@@ -603,15 +608,15 @@ Page previousPage = LAUNCHER;
 Page screensaverReturnPage = LAUNCHER;
 unsigned long screensaverStartedAt = 0;
 unsigned long screensaverLastFrameAt = 0;
-const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES", "TRIKI SCOPE", "MINI CAM", "BLE COMPANION", "BAMBU MONITOR"};
-const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt", "Zabka Triki motion controller over BLE", "MiniCam network camera preview and shutter", "Android companion app: remote control, notes and C LAB over BLE", "Bambu Lab printer status over local LAN mode"};
-constexpr int APP_COUNT = 33;
+const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES", "TRIKI SCOPE", "MINI CAM", "BLE COMPANION", "BAMBU MONITOR", "RADIO"};
+const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt", "Zabka Triki motion controller over BLE", "MiniCam network camera preview and shutter", "Android companion app: remote control, notes and C LAB over BLE", "Bambu Lab printer status over local LAN mode", "Nightwave Plaza 24/7 vaporwave internet radio"};
+constexpr int APP_COUNT = 34;
 constexpr int APP_VISIBLE = 5;
 // Abstract two-character glyphs for the APPS grid (see drawLauncherTileColored()
 // below), same punctuation-icon style as Home's homeTileIcons[] - the default
 // GFX font is ASCII-only, so these are stand-ins rather than literal pictograms.
 // Indexed identically to appNames[]/appInfo[] (i.e. by Page - 1).
-const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><", "^y", "(o", "B)", "3d"};
+const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><", "^y", "(o", "B)", "3d", "fm"};
 // appNames[] is indexed by (Page - 1) and only covers pages up to GAMEHUB -
 // WIFISETUP/LOCKSCREEN/SCREENSAVER aren't "apps" and have no entry, so a raw
 // appNames[(int)p - 1] lookup on an arbitrary Page is not always safe. This
@@ -629,8 +634,8 @@ constexpr int HOME_TILE_COUNT = 6;
 int homeAppIndices[5] = {5, 2, 6, 4, 8}; // C LAB, Notes, REPL, Calc, Settings
 const char* homeTileIcons[HOME_TILE_COUNT] = {"{}", "[]", ">_", "+-", "*", "::"};
 // Entry 0 is a navigation action; the remaining entries open secondary apps.
-const int secondaryAppIndices[28] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
-constexpr int SECONDARY_APP_COUNT = 29;
+const int secondaryAppIndices[29] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33};
+constexpr int SECONDARY_APP_COUNT = 30;
 bool launcherHome = true;
 int homeSelected = 0;
 int appSelected = 0, appScroll = 0;
@@ -709,6 +714,29 @@ unsigned long bambuLastPushAt = 0;
 float bambuNozzleTemp = 0, bambuNozzleTarget = 0, bambuBedTemp = 0, bambuBedTarget = 0;
 int bambuProgress = 0, bambuRemainingMin = 0;
 String bambuGcodeState = "-", bambuTaskName = "";
+// ---- RADIO: streams Nightwave Plaza (plaza.one), a 24/7 vaporwave
+// internet radio station, decoded live via ESP8266Audio's MP3 decoder.
+// There's no station directory to browse - plaza.one is one continuous
+// stream - so this app is just play/stop plus a now-playing readout from
+// the stream's own ICY metadata.
+//
+// M5Unified's Speaker_Class owns I2S_NUM_1 (pins 41/43/42 on both the
+// Cardputer and the ADV) for every other sound this file makes, but its
+// own playRaw() only plays a complete pre-loaded buffer, not an open-
+// ended incremental feed - no good for a live stream. ESP8266Audio's
+// AudioOutputI2S needs to install its OWN driver on that exact same
+// peripheral to stream continuously, so Speaker_Class's begin()/end() -
+// exposed for exactly this kind of handoff - are used to release the
+// peripheral before playback starts and reclaim it once playback stops.
+// No other sound in this file works while the radio is playing.
+const char* RADIO_STREAM_URL = "http://radio.plaza.one/mp3_low";  // 96kbps MP3 - see radio.plaza.one for other bitrates/codecs
+bool radioPlaying = false;
+String radioStatusMsg = "ENTER to play";
+String radioNowPlaying = "";
+AudioFileSourceICYStream* radioFile = nullptr;
+AudioFileSourceBuffer* radioBuf = nullptr;
+AudioOutputI2S* radioOut = nullptr;
+AudioGeneratorMP3* radioMp3 = nullptr;
 // Wi-Fi setup uses a scanned SSID and a RAM-only password entry field. The
 // chosen credentials are persisted only after the user presses ENTER to connect.
 int wifiSetupSelected = 0;
@@ -8859,6 +8887,98 @@ void drawBambuMonitor() {
   footer(bambuConnected ? "ENTER DISCONNECT     TAB EDIT     FN BACK" : "ENTER CONNECT     TAB EDIT     FN BACK");
 }
 
+// ---- RADIO ------------------------------------------------------------
+// ESP8266Audio's ICY stream reader already strips the surrounding quotes
+// and trailing semicolon from StreamTitle before calling this, so str is
+// already just the clean "Artist - Track" text.
+void radioMetadataCallback(void* cbData, const char* type, bool isUnicode, const char* str) {
+  if (str && String(type) == "StreamTitle") {
+    String title = str;
+    if (title.length() > 46) title = title.substring(0, 46);
+    radioNowPlaying = title;
+    if (page == RADIO) redrawNeeded = true;
+  }
+}
+void stopRadio() {
+  if (radioMp3) { radioMp3->stop(); delete radioMp3; radioMp3 = nullptr; }
+  if (radioOut) { delete radioOut; radioOut = nullptr; }
+  if (radioBuf) { delete radioBuf; radioBuf = nullptr; }
+  if (radioFile) { delete radioFile; radioFile = nullptr; }
+  if (radioPlaying) M5Cardputer.Speaker.begin();  // reclaim I2S_NUM_1 for normal OS sounds
+  radioPlaying = false;
+  radioNowPlaying = "";
+}
+void startRadio() {
+  if (radioPlaying) { stopRadio(); radioStatusMsg = "Stopped"; redrawNeeded = true; return; }
+  if (WiFi.status() != WL_CONNECTED) {
+    radioStatusMsg = "Connect Wi-Fi first (Web Companion or Wi-Fi Setup)";
+    redrawNeeded = true;
+    return;
+  }
+  // Same defensive check BLE Companion/Bambu Monitor's own heap guards
+  // use - MP3 decode + network buffering is much lighter than either of
+  // those (tens of KB, not ~55-65KB), but this device has no PSRAM and no
+  // margin to spare, so check first rather than find out mid-stream.
+  uint32_t freeHeap = ESP.getFreeHeap();
+  Serial.printf("[RADIO] free heap before stream start: %u bytes\n", freeHeap);
+  if (freeHeap < 50000) {
+    radioStatusMsg = "Not enough free memory (" + String(freeHeap / 1024) + "KB free) to stream";
+    redrawNeeded = true;
+    return;
+  }
+  radioStatusMsg = "Connecting...";
+  redrawNeeded = true;
+  M5Cardputer.Speaker.end();  // release I2S_NUM_1 so AudioOutputI2S can install its own driver on it
+  radioFile = new AudioFileSourceICYStream(RADIO_STREAM_URL);
+  radioFile->RegisterMetadataCB(radioMetadataCallback, nullptr);
+  radioBuf = new AudioFileSourceBuffer(radioFile, 4096);
+  radioOut = new AudioOutputI2S(1, AudioOutputI2S::EXTERNAL_I2S);
+  radioOut->SetPinout(41, 43, 42);
+  radioOut->SetGain(constrain(volumeLevel / 10.0f, 0.0f, 1.0f));
+  radioMp3 = new AudioGeneratorMP3();
+  if (radioMp3->begin(radioBuf, radioOut)) {
+    radioPlaying = true;
+    radioStatusMsg = "Playing - Nightwave Plaza";
+  } else {
+    radioStatusMsg = "Failed to start stream - check Wi-Fi/URL";
+    stopRadio();
+  }
+  redrawNeeded = true;
+}
+// Polled unconditionally near loop()'s other continuous features (not
+// gated behind the usual once-per-keypress redrawNeeded machinery) -
+// AudioGeneratorMP3::loop() needs to run often to keep decoding ahead of
+// playback without audible gaps. This file's single-loop() architecture
+// means anything else that blocks for a while will still cause a glitch;
+// unlike the other companion features, this one has real, ongoing timing
+// sensitivity that a slow frame elsewhere in loop() can audibly disrupt.
+void applyRadioInput() {
+  if (!radioPlaying || !radioMp3) return;
+  if (radioMp3->isRunning()) {
+    if (!radioMp3->loop()) { radioStatusMsg = "Stream error"; stopRadio(); if (page == RADIO) redrawNeeded = true; }
+  } else {
+    radioStatusMsg = "Stream stopped";
+    stopRadio();
+    if (page == RADIO) redrawNeeded = true;
+  }
+}
+void drawRadio() {
+  tft.fillScreen(ui.bg); header("RADIO"); tft.setTextSize(1);
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 4); tft.print("NIGHTWAVE PLAZA");
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 18); tft.print("24/7 vaporwave internet radio (plaza.one)");
+  tft.setTextColor(radioPlaying ? ILI9341_GREEN : ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 42);
+  tft.print(radioPlaying ? "PLAYING" : "STOPPED");
+  tft.setTextColor(ui.text, ui.bg); tft.setCursor(12, CONTENT_Y + 58); tft.print(radioStatusMsg);
+  if (radioPlaying && !radioNowPlaying.isEmpty()) {
+    tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 82); tft.print("NOW PLAYING");
+    tft.setTextColor(ILI9341_YELLOW, ui.bg); tft.setCursor(12, CONTENT_Y + 96); tft.print(radioNowPlaying);
+  }
+  tft.setTextColor(ui.dim, ui.bg);
+  tft.setCursor(12, CONTENT_Y + 128); tft.print("Uses this device's only speaker output -");
+  tft.setCursor(12, CONTENT_Y + 141); tft.print("other sounds are silent while playing.");
+  footer(radioPlaying ? "ENTER STOP     FN BACK" : "ENTER PLAY     FN BACK");
+}
+
 void startWebCompanion() {
   if (webRunning) {
     webServer.stop();
@@ -9114,7 +9234,7 @@ void draw() {
   // itself (Home/Apps aren't "an app" to splash into) - see
   // playAppIntroAnimation()'s own comment for what this actually plays.
   if (realAppTransition && page != LAUNCHER) playAppIntroAnimation(page);
-  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) { ensureBleReady(); drawBleKeyboard(); } else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else if (page == MINICAM) { miniCamJoinNetwork(); drawMiniCam(); } else if (page == BLECOMPANION) drawBleCompanion(); else if (page == BAMBUMONITOR) drawBambuMonitor(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
+  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) { ensureBleReady(); drawBleKeyboard(); } else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else if (page == MINICAM) { miniCamJoinNetwork(); drawMiniCam(); } else if (page == BLECOMPANION) drawBleCompanion(); else if (page == BAMBUMONITOR) drawBambuMonitor(); else if (page == RADIO) drawRadio(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
 
 // Repaint only a changed application's content. Headers and footers are kept
 // intact; full draw() remains reserved for entering a different scene, modal
@@ -9194,6 +9314,7 @@ void refreshLocalPage() {
     case WEBCOMPANION: drawWebCompanion(); break;
     case BLECOMPANION: drawBleCompanion(); break;
     case BAMBUMONITOR: drawBambuMonitor(); break;
+    case RADIO: drawRadio(); break;
     case BLEKEYBOARD: drawBleKeyboard(); break;
     case CARDCREPL: drawCardCRepl(); break;
     case CLAB: drawCLab(); break;
@@ -9377,7 +9498,7 @@ void keyboard() {
                   : SkyHubStage::START;  // GAMECAT or INFO -> START
       skyPlayStageTransition(-1);
     }
-    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyMenuMusicStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
+    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyMenuMusicStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else if (page == RADIO && radioPlaying) { stopRadio(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
   // Opt cycles through three states from any page, any time - independent
@@ -10087,6 +10208,7 @@ void keyboard() {
     if (k.enter) startBambuMonitor();
     return;
   }
+  if (page == RADIO) { if (k.enter) startRadio(); return; }
   if (page == CLABEXAMPLES) {
     // Examples is entered from C LAB FILES, so use its robust key path too.
     bool up = wordContains(k.word, ';') || M5Cardputer.Keyboard.isKeyPressed(';');
@@ -10218,6 +10340,7 @@ void loop() {
   if (webRunning) { webServer.handleClient(); applyWebInput(); }
   if (bleCompanionEnabled) applyBleInput();
   if (bambuConnected) applyBambuInput();
+  applyRadioInput();  // needs to run every loop() iteration regardless, not just while some other flag is set - see its own comment on timing sensitivity
   keyboard();
   if (page == MIC && !sleeping) updateMicMonitor();
   auto keys = M5Cardputer.Keyboard.keysState();
