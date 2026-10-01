@@ -3,3 +3,6 @@ build/
 *.bin
 *.elf
 *.map
+
+# ...except the firmware image vendored for the browser web flasher
+!docs/firmware/*.bin
