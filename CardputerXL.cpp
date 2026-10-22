@@ -112,9 +112,14 @@
 #define TFT_MOSI 3
 #define TFT_SCK 6
 #define TFT_BL 39
-// Ready-made motor driver: GPIO1 controls only its IN input. The motor is
-// switched by the module itself, so this is digital ON/OFF, never PWM.
-#define HAPTIC_IN_PIN 1
+// The haptic motor driver that used to live on GPIO1 is gone - that pin now
+// drives the analog joystick's X axis instead (see JOY_PIN_A). vibrate() is
+// kept as a no-op so none of its many call sites across the apps needed to
+// change - same approach already proven in CXL Remote/LogicLab/Tracker/
+// Slideways, which share this exact wiring.
+#define JOY_PIN_A 1   // Grove G1 - was the vibration motor
+#define JOY_PIN_B 2   // Grove G2
+#define JOY_PWR_PIN 4 // EXT pin 3 (G4): steady power for the stick's potentiometers (no 3V3 on this header)
 // Cardputer ADV built-in RGB LED: GPIO38 supplies LED power and GPIO21 is
 // the addressable RGB data line. GPIO38 must be high before any LED update.
 #define RGB_LED_PIN 21
@@ -442,6 +447,7 @@ void drawCalc(); void updateClockValue(); void updateCalcPanel(); void updateNot
 void drawCLab(); void drawCLabQR(); void drawCardCRepl(); void drawQRText(); void drawQRTextField(); void drawQRModules(); void drawCLabEditor(); void drawCLabCodeLine(int lineIndex); void drawCLabExamples(); void loadCLabExample(int example); void drawCLabExplorer(); void drawCLabSaveDialog(); void drawCLabSlotDialog(); void drawCLabNameDialog(); void openNewCLabFile(); void saveCLabFile(); void openCLabUserApp(int slot, bool runNow); void captureCLabUserApp();
 void runCLab(); void runCardCRepl(); void loadCLabDemo(); String settingValue(int i); void drawSettings(); void draw(); void startScan(); void checkScan(); void calcResult();
 void changeSetting(int d); void keyboard(); void clabBackspace(); void playMenuSound(); void playTypingSound(); void playBackspaceSound();
+void runJoystickSetup(); void calibrateJoystick(); void joystickTest();
 
 Adafruit_ILI9341 tft(&SPI, TFT_DC, TFT_CS, TFT_RST);
 // BLE HID is advertised after boot. It only sends keys while the dedicated
@@ -518,6 +524,34 @@ bool screensaverDimmed = false;
 bool lockScreenBaseDrawn = false;
 uint8_t volumeLevel = 2;  // 0..10, persisted; 0 is silent. Default (and post-factory-reset) volume is 20%.
 uint8_t brightnessLevel = 10; // 1..10, persisted; PWM duty for the ILI backlight.
+// Analog joystick (PSP-style thumbstick on Grove G1/G2) - calibration state,
+// persisted in "cyberdeck" alongside the rest of the device settings. Off by
+// default: a floating/uncalibrated ADC pin would otherwise drift a cursor on
+// its own. joyRead() below is the one shared primitive every app (LOGIC LAB,
+// TRACKER, and this SETTINGS page's own calibration/test screens) reads from.
+bool joyEnabled = false;
+uint8_t joyXPin = JOY_PIN_A, joyYPin = JOY_PIN_B;
+int8_t joyXSign = 1, joyYSign = 1;
+int16_t joyCX = 2048, joyCY = 2048;
+int16_t joyRXp = 1000, joyRXn = 1000, joyRYp = 1000, joyRYn = 1000;  // right/left, down/up ranges - independent per direction since pots are rarely centred
+const float JOY_SPEEDS[] = {0.3f, 0.45f, 0.6f, 0.8f, 1.0f, 1.3f, 1.7f};
+constexpr uint8_t JOY_SPEED_COUNT = sizeof(JOY_SPEEDS) / sizeof(JOY_SPEEDS[0]);
+uint8_t joySpeed = 4;  // index into JOY_SPEEDS, 100%
+int joyAvg(uint8_t pin) { uint32_t sum = 0; for (int i = 0; i < 4; ++i) sum += analogRead(pin); return sum / 4; }
+// Deflection in -1..1 per axis after calibration; 0 inside the dead zone.
+void joyRead(float& x, float& y) {
+  if (!joyEnabled) { x = y = 0; return; }
+  auto axis = [](int raw, int c, int rPos, int rNeg, int sign) {
+    int d = (raw - c) * sign;  // + = right / down
+    float v = constrain(d / (float)(d >= 0 ? rPos : rNeg), -1.0f, 1.0f);
+    float a = fabsf(v);
+    if (a < 0.15f) return 0.0f;                   // dead zone
+    a = (a - 0.15f) / 0.85f;
+    return (v < 0 ? -1.0f : 1.0f) * powf(a, 1.6f); // fine control near the centre
+  };
+  x = axis(joyAvg(joyXPin), joyCX, joyRXp, joyRXn, joyXSign);
+  y = axis(joyAvg(joyYPin), joyCY, joyRYp, joyRYn, joyYSign);
+}
 // The PIN itself is never retained. Only its SHA-256 verification hash is
 // stored in Preferences. Default PIN for a fresh device: 1234.
 String lockPinHash = "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4";
@@ -976,11 +1010,10 @@ int replHistoryCount = 0;
 bool cardcReplRunning = false;
 
 int settingSelected = 0;
-const char* settingNames[] = {"Theme", "Rotation", "Backlight", "Brightness", "Screensaver", "Lock after saver", "Volume", "Lock PIN", "Wi-Fi setup", "BLE HID", "LED", "Lock on startup"};
-constexpr int SETTINGS_COUNT = 12;
-// Eleven compact rows fit above the fixed footer.
+const char* settingNames[] = {"Theme", "Rotation", "Backlight", "Brightness", "Screensaver", "Lock after saver", "Volume", "Lock PIN", "Wi-Fi setup", "BLE HID", "LED", "Lock on startup", "Joystick setup"};
+constexpr int SETTINGS_COUNT = 13;
 constexpr int SETTINGS_ROW_Y = CONTENT_Y + 6;
-constexpr int SETTINGS_ROW_STEP = 15;  // was 17; 12 rows no longer fit above the footer at that spacing
+constexpr int SETTINGS_ROW_STEP = 14;  // was 15 (17 before that); 13 rows no longer fit above the footer at wider spacing
 
 String uptime() { unsigned long s = millis() / 1000UL; char x[18]; snprintf(x, sizeof(x), "%02lu:%02lu:%02lu", s / 3600UL, (s % 3600UL) / 60UL, s % 60UL); return String(x); }
 int noteCharacterCount() { int total = 0; for (int i = 0; i < noteCount; ++i) total += notes[i].length(); return total; }
@@ -1105,6 +1138,18 @@ void loadPersistentState() {
   // Migrate the old Sound ON/OFF preference to a full-volume/default setting.
   if (preferences.isKey("volume")) volumeLevel = constrain(preferences.getUChar("volume", volumeLevel), 0, 10);
   else volumeLevel = preferences.getBool("sound", true) ? 2 : 0;
+  joyEnabled = preferences.getBool("joy_on", false);
+  joyXPin = preferences.getUChar("joy_xpin", JOY_PIN_A);
+  joyYPin = preferences.getUChar("joy_ypin", JOY_PIN_B);
+  joyXSign = preferences.getChar("joy_xs", 1);
+  joyYSign = preferences.getChar("joy_ys", 1);
+  joyCX = preferences.getShort("joy_cx", 2048);
+  joyCY = preferences.getShort("joy_cy", 2048);
+  joyRXp = max<int16_t>(preferences.getShort("joy_rxp", 1000), 100);
+  joyRXn = max<int16_t>(preferences.getShort("joy_rxn", 1000), 100);
+  joyRYp = max<int16_t>(preferences.getShort("joy_ryp", 1000), 100);
+  joyRYn = max<int16_t>(preferences.getShort("joy_ryn", 1000), 100);
+  joySpeed = min<uint8_t>(preferences.getUChar("joy_speed", 4), JOY_SPEED_COUNT - 1);
   String storedNotes = preferences.getString("notes", "");
   String storedCode = preferences.getString("code", "");
   cLabFileName = preferences.getString("clab_name", cLabFileName);
@@ -1169,6 +1214,7 @@ void savePersistentState() {
   String storedFavs; for (int i = 0; i < APP_COUNT; ++i) storedFavs += appFavourite[i] ? '1' : '0';
   String storedHome; for (int slot = 0; slot < 5; ++slot) { if (slot) storedHome += ','; storedHome += String(homeAppIndices[slot]); }
   preferences.putInt("sleep", sleepIndex); preferences.putInt("lock_after_ss", lockAfterScreensaverIndex); preferences.putUChar("volume", volumeLevel); preferences.putString("lockhash", lockPinHash); preferences.putString("notes", storedNotes); preferences.putString("code", storedCode); preferences.putString("clab_name", cLabFileName); preferences.putString("qrtext", qrText); preferences.putString("favs", storedFavs); preferences.putString("home", storedHome);
+  preferences.putBool("joy_on", joyEnabled); preferences.putUChar("joy_xpin", joyXPin); preferences.putUChar("joy_ypin", joyYPin); preferences.putChar("joy_xs", joyXSign); preferences.putChar("joy_ys", joyYSign); preferences.putShort("joy_cx", joyCX); preferences.putShort("joy_cy", joyCY); preferences.putShort("joy_rxp", joyRXp); preferences.putShort("joy_rxn", joyRXn); preferences.putShort("joy_ryp", joyRYp); preferences.putShort("joy_ryn", joyRYn); preferences.putUChar("joy_speed", joySpeed);
   preferences.putInt("capp_active", cLabActiveUserApp);
   for (int i = 0; i < C_USER_APP_COUNT; ++i) preferences.putString((String("capp") + i).c_str(), cUserApps[i]);
   for (int i = 0; i < 3; ++i) preferences.putString((String("file") + i).c_str(), localFiles[i]);
@@ -1181,20 +1227,11 @@ constexpr uint16_t EXIT_TONE_HZ = 720, CURSOR_TONE_HZ = 1220, FUNCTION_TONE_HZ =
 constexpr uint16_t MENU_TONE_MS = 24, TYPING_TONE_MS = 10, BACKSPACE_TONE_MS = 12;
 constexpr uint16_t EXIT_TONE_MS = 32, CURSOR_TONE_MS = 9, FUNCTION_TONE_MS = 14, ENTER_TONE_MS = 20, TAB_TONE_MS = 16;
 void applyVolume() { M5Cardputer.Speaker.setVolume((volumeLevel * 255U) / 10U); }
-// The motor-driver IN pin is binary: HIGH runs the motor and LOW stops it.
-// No LEDC/PWM channel is used for haptics.
-void vibrate(uint16_t durationMs) {
-  if (durationMs == 0) return;
-  // MINI CAM's whole point is powering the external camera unit off the
-  // Grove port's 5V rail - the haptic motor is a real current draw on that
-  // same rail, so rumble is disabled outright while this app is open rather
-  // than trying to guess which specific calls (low battery, screensaver,
-  // charging, etc.) might fire during a shoot.
-  if (page == MINICAM) return;
-  digitalWrite(HAPTIC_IN_PIN, HIGH);
-  delay(durationMs);
-  digitalWrite(HAPTIC_IN_PIN, LOW);
-}
+// No vibration motor any more - GPIO1 now drives the joystick's X axis (see
+// JOY_PIN_A). Kept as a no-op rather than removed: dozens of call sites
+// across Kart Racer/Sky Pilot/menu sounds/C LAB use it purely for UX timing
+// and it's cheaper to leave them alone than touch every one.
+void vibrate(uint16_t durationMs) { (void)durationMs; }
 void playMenuSound() { vibrate(38); if (volumeLevel) M5Cardputer.Speaker.tone(MENU_TONE_HZ, MENU_TONE_MS); }
 void playTypingSound() { if (volumeLevel) M5Cardputer.Speaker.tone(TYPING_TONE_HZ, TYPING_TONE_MS); }
 void playBackspaceSound() { if (volumeLevel) M5Cardputer.Speaker.tone(BACKSPACE_TONE_HZ, BACKSPACE_TONE_MS); }
@@ -8539,8 +8576,8 @@ void drawCLab() { if (cCanvasActive) return; if (cLabSaveDialogVisible) { drawCL
 // settingSelected < 7 are plain cyclable values (changeSetting() in
 // keyboard() handles ,/  left/right); 7-10 open their own sub-flow (PIN
 // change, Wi-Fi setup, or a straight on/off toggle) instead.
-void updateSettingsRow(int i) { int y = SETTINGS_ROW_Y + i * SETTINGS_ROW_STEP; bool sel = i == settingSelected; tft.fillRect(8, y - 3, 304, 18, ui.bg); uint16_t fill = sel ? ui.selected : ui.bg; if (sel) tft.fillRoundRect(8, y - 3, 304, 18, 4, fill); tft.setTextSize(1); tft.setTextColor(ui.text, fill); tft.setCursor(16, y); tft.print(sel ? "> " : "  "); tft.print(settingNames[i]); tft.setTextColor(sel ? ui.accent : ui.dim, fill); tft.setCursor(165, y); tft.print(settingValue(i)); }
-String settingValue(int i) { if (i == 0) return themeNames[themeIndex]; if (i == 1) return displayRotation == 3 ? "LANDSCAPE RIGHT" : "LANDSCAPE LEFT"; if (i == 2) return backlightOn ? "ON" : "OFF"; if (i == 3) return String(brightnessLevel * 10) + "%"; if (i == 4) return sleepValues[sleepIndex] == 0 ? "NEVER" : String(sleepValues[sleepIndex]) + " SEC"; if (i == 5) return lockAfterScreensaverValues[lockAfterScreensaverIndex] == 0 ? "NEVER" : String(lockAfterScreensaverValues[lockAfterScreensaverIndex]) + " SEC"; if (i == 6) return String(volumeLevel * 10) + "%"; if (i == 7) return "ENTER CHANGE"; if (i == 8) return WiFi.status() == WL_CONNECTED ? "CONNECTED" : "SCAN / CONNECT"; if (i == 9) return bleHidEnabled ? "ON" : "OFF"; if (i == 10) return statusLedEnabled ? "ON" : "OFF"; return lockOnStartupEnabled ? "ON" : "OFF"; }
+void updateSettingsRow(int i) { int y = SETTINGS_ROW_Y + i * SETTINGS_ROW_STEP; bool sel = i == settingSelected; tft.fillRect(8, y - 3, 304, SETTINGS_ROW_STEP, ui.bg); uint16_t fill = sel ? ui.selected : ui.bg; if (sel) tft.fillRoundRect(8, y - 3, 304, SETTINGS_ROW_STEP, 4, fill); tft.setTextSize(1); tft.setTextColor(ui.text, fill); tft.setCursor(16, y); tft.print(sel ? "> " : "  "); tft.print(settingNames[i]); tft.setTextColor(sel ? ui.accent : ui.dim, fill); tft.setCursor(165, y); tft.print(settingValue(i)); }
+String settingValue(int i) { if (i == 0) return themeNames[themeIndex]; if (i == 1) return displayRotation == 3 ? "LANDSCAPE RIGHT" : "LANDSCAPE LEFT"; if (i == 2) return backlightOn ? "ON" : "OFF"; if (i == 3) return String(brightnessLevel * 10) + "%"; if (i == 4) return sleepValues[sleepIndex] == 0 ? "NEVER" : String(sleepValues[sleepIndex]) + " SEC"; if (i == 5) return lockAfterScreensaverValues[lockAfterScreensaverIndex] == 0 ? "NEVER" : String(lockAfterScreensaverValues[lockAfterScreensaverIndex]) + " SEC"; if (i == 6) return String(volumeLevel * 10) + "%"; if (i == 7) return "ENTER CHANGE"; if (i == 8) return WiFi.status() == WL_CONNECTED ? "CONNECTED" : "SCAN / CONNECT"; if (i == 9) return bleHidEnabled ? "ON" : "OFF"; if (i == 10) return statusLedEnabled ? "ON" : "OFF"; if (i == 11) return lockOnStartupEnabled ? "ON" : "OFF"; return joyEnabled ? "ENTER (ON)" : "ENTER (OFF)"; }
 void drawSettings() {
   tft.fillScreen(ui.bg); header(pinChangeActive ? "SETTINGS / LOCK PIN" : "SETTINGS"); tft.setTextSize(1);
   if (pinChangeActive) {
@@ -9389,6 +9426,208 @@ void startScan() {
 void checkScan() { if (!scanRunning) return; int r = WiFi.scanComplete(); if (r >= 0) { networkCount = r; scanRunning = false; scanDone = true; redrawNeeded = true; } else if (millis() - scanStarted > 20000UL) { WiFi.scanDelete(); networkCount = 0; scanRunning = false; scanDone = true; redrawNeeded = true; } }
 void calcResult() { float v = calcInput.toFloat(); if (calcOp == 0) calcTotal = v; else if (calcOp == '+') calcTotal += v; else if (calcOp == '-') calcTotal -= v; else if (calcOp == '*') calcTotal *= v; else if (calcOp == '/') { if (v == 0) { calcStatus = "Error: division by zero"; calcInput = "0"; calcOp = 0; calcNew = true; updateCalcPanel(); return; } calcTotal /= v; } calcInput = String(calcTotal, 4); while (calcInput.endsWith("0")) calcInput.remove(calcInput.length() - 1); if (calcInput.endsWith(".")) calcInput.remove(calcInput.length() - 1); calcStatus = "Result"; calcOp = 0; calcNew = true; updateCalcPanel(); }
 void changeSetting(int d) { if (settingSelected == 0) { themeIndex = (themeIndex + d + THEME_COUNT) % THEME_COUNT; applyTheme(); } else if (settingSelected == 1) { displayRotation = displayRotation == 3 ? 1 : 3; tft.setRotation(displayRotation); } else if (settingSelected == 2) setBacklight(!backlightOn); else if (settingSelected == 3) { brightnessLevel = (brightnessLevel + d + 9) % 10 + 1; applyBacklight(); } else if (settingSelected == 4) sleepIndex = (sleepIndex + d + 5) % 5; else if (settingSelected == 5) lockAfterScreensaverIndex = (lockAfterScreensaverIndex + d + 5) % 5; else if (settingSelected == 6) { volumeLevel = (volumeLevel + d + 11) % 11; applyVolume(); } markStateDirty(); redrawNeeded = true; }
+
+// ---- JOYSTICK SETUP (SETTINGS > Joystick setup): a small modal menu over
+// enable, calibrate, test and speed - ported from CXL Remote's proven
+// algorithm (same wiring: PSP thumbstick on Grove G1/G2). Blocking loops like
+// Recovery Mode's, since this is a deliberate step-through wizard, not
+// something that needs to cooperate with the rest of the event loop.
+void drawJoystickSetupMenu(int sel) {
+  header("JOYSTICK SETUP");
+  static const char* items[4] = {"Joystick", "Calibrate...", "Test...", "Speed"};
+  int y = CONTENT_Y + 10;
+  for (int i = 0; i < 4; ++i) {
+    bool isSel = i == sel;
+    uint16_t fill = isSel ? ui.selected : ui.bg;
+    tft.fillRect(8, y - 3, 304, 20, fill);
+    tft.setTextSize(1);
+    tft.setTextColor(ui.text, fill);
+    tft.setCursor(16, y); tft.print(isSel ? "> " : "  "); tft.print(items[i]);
+    tft.setTextColor(isSel ? ui.accent : ui.dim, fill);
+    tft.setCursor(220, y);
+    if (i == 0) tft.print(joyEnabled ? "ON" : "OFF");
+    else if (i == 3) tft.print(String((int)(JOY_SPEEDS[joySpeed] * 100)) + "%");
+    y += 24;
+  }
+  footer(";/. SELECT  ,/. SPEED  ENTER CONFIRM  FN BACK");
+}
+void runJoystickSetup() {
+  int sel = 0;
+  drawJoystickSetupMenu(sel);
+  while (true) {
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isPressed()) {
+      auto k = M5Cardputer.Keyboard.keysState();
+      if (k.fn) { playExitSound(); return; }
+      bool changed = false;
+      for (char c : k.word) {
+        if (c == ';') { sel = (sel + 3) % 4; changed = true; }
+        else if (c == '.') { sel = (sel + 1) % 4; changed = true; }
+        else if (c == ',' && sel == 3 && joySpeed) { --joySpeed; markStateDirty(); changed = true; }
+        else if (c == '/' && sel == 3 && joySpeed + 1 < JOY_SPEED_COUNT) { ++joySpeed; markStateDirty(); changed = true; }
+      }
+      if (k.enter) {
+        playEnterSound();
+        if (sel == 0) { joyEnabled = !joyEnabled; markStateDirty(); }
+        else if (sel == 1) calibrateJoystick();
+        else if (sel == 2) joystickTest();
+        else { joySpeed = (joySpeed + 1) % JOY_SPEED_COUNT; markStateDirty(); }
+        changed = true;
+      }
+      if (changed) { drawJoystickSetupMenu(sel); delay(120); }
+    }
+    delay(20);
+  }
+}
+// Three steps (centre, full right, full up) find which pin is which axis,
+// its direction and centre; a fourth (circle the rim) finds each direction's
+// own independent range, since the pot is rarely centred in its housing.
+void calibrateJoystick() {
+  auto drawPrompt = [](const char* title, const char* what) {
+    header("JOYSTICK CALIBRATE");
+    tft.fillRect(8, CONTENT_Y + 4, 304, 180, ui.bg);
+    tft.setTextSize(1); tft.setTextColor(ui.accent, ui.bg); tft.setCursor(16, CONTENT_Y + 14); tft.print(title);
+    tft.setTextColor(ui.text, ui.bg); tft.setCursor(16, CONTENT_Y + 34); tft.print(what);
+  };
+  auto waitAnyKey = [] { delay(300); while (!M5Cardputer.Keyboard.isPressed()) { M5Cardputer.update(); delay(20); } };
+  auto step = [&](const char* title, const char* what, int& a, int& b) -> bool {
+    drawPrompt(title, what);
+    footer("ENTER sample   FN cancel");
+    while (true) {
+      M5Cardputer.update();
+      if (M5Cardputer.Keyboard.isPressed()) {
+        auto k = M5Cardputer.Keyboard.keysState();
+        if (k.fn) return false;
+        if (k.enter) break;
+      }
+      int ra = joyAvg(JOY_PIN_A), rb = joyAvg(JOY_PIN_B);
+      tft.fillRect(16, CONTENT_Y + 54, 280, 14, ui.bg);
+      tft.setTextColor(ui.dim, ui.bg); tft.setCursor(16, CONTENT_Y + 54);
+      tft.print("G1 " + String(ra) + "   G2 " + String(rb));
+      delay(60);
+    }
+    uint32_t sa = 0, sb = 0;
+    for (int i = 0; i < 16; ++i) { sa += joyAvg(JOY_PIN_A); sb += joyAvg(JOY_PIN_B); delay(5); }
+    a = sa / 16; b = sb / 16;
+    return true;
+  };
+  int ca, cb, ra, rb, ua, ub;
+  if (!step("1/4", "Leave the stick centred", ca, cb)) return;
+  if (!step("2/4", "Push it fully RIGHT, hold", ra, rb)) return;
+  if (!step("3/4", "Push it fully UP, hold", ua, ub)) return;
+  int dxa = ra - ca, dxb = rb - cb;
+  bool xIsA = abs(dxa) >= abs(dxb);
+  int dx = xIsA ? dxa : dxb, dy = xIsA ? ub - cb : ua - ca;
+  if (abs(dx) < 150 || abs(dy) < 150) {
+    drawPrompt("CALIBRATE FAILED", "Not enough movement - check G1/G2 wiring.");
+    footer("any key: back");
+    waitAnyKey();
+    return;
+  }
+  drawPrompt("4/4", "Circle the stick around the rim a few times");
+  footer("ENTER start   FN cancel");
+  while (true) {
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isPressed()) {
+      auto k = M5Cardputer.Keyboard.keysState();
+      if (k.fn) return;
+      if (k.enter) break;
+    }
+    delay(20);
+  }
+  int minA = 4095, maxA = 0, minB = 4095, maxB = 0;
+  for (uint32_t t0 = millis(); millis() - t0 < 4000;) {
+    int a = joyAvg(JOY_PIN_A), b = joyAvg(JOY_PIN_B);
+    minA = min(minA, a); maxA = max(maxA, a); minB = min(minB, b); maxB = max(maxB, b);
+    int left = (4000 - (millis() - t0)) / 1000 + 1;
+    tft.fillRect(16, CONTENT_Y + 54, 280, 14, ui.bg);
+    tft.setTextColor(ui.accent, ui.bg); tft.setCursor(16, CONTENT_Y + 54);
+    tft.print("Keep circling... " + String(left));
+    delay(10);
+  }
+  int sx = dx > 0 ? 1 : -1, sy = dy > 0 ? -1 : 1;  // up = towards screen y < 0
+  int cx = xIsA ? ca : cb, cy = xIsA ? cb : ca;
+  int lox = xIsA ? minA : minB, hix = xIsA ? maxA : maxB, loy = xIsA ? minB : minA, hiy = xIsA ? maxB : maxA;
+  // + = right / down after the sign; 92% so the full deflection surely reaches 1.0
+  int rxp = (sx > 0 ? hix - cx : cx - lox) * 92 / 100, rxn = (sx > 0 ? cx - lox : hix - cx) * 92 / 100;
+  int ryp = (sy > 0 ? hiy - cy : cy - loy) * 92 / 100, ryn = (sy > 0 ? cy - loy : hiy - cy) * 92 / 100;
+  if (min(min(rxp, rxn), min(ryp, ryn)) < 120) {
+    drawPrompt("CALIBRATE FAILED", "Not all directions reached - circle the whole rim.");
+    footer("any key: back");
+    waitAnyKey();
+    return;
+  }
+  joyXPin = xIsA ? JOY_PIN_A : JOY_PIN_B; joyYPin = xIsA ? JOY_PIN_B : JOY_PIN_A;
+  joyCX = cx; joyCY = cy; joyXSign = sx; joyYSign = sy;
+  joyRXp = rxp; joyRXn = rxn; joyRYp = ryp; joyRYn = ryn;
+  joyEnabled = true;
+  savePersistentState();
+  drawPrompt("CALIBRATED", ("X=G" + String(joyXPin) + " Y=G" + String(joyYPin) +
+             "  R/L " + String(joyRXp) + "/" + String(joyRXn) + "  D/U " + String(joyRYp) + "/" + String(joyRYn)).c_str());
+  footer("any key: back");
+  waitAnyKey();
+}
+// Offline cursor test (moves exactly like an app's pointer would) next to
+// live G1/G2 readings and the stick's position in a little box.
+void joystickTest() {
+  header("JOYSTICK TEST");
+  footer(",/. speed   ENTER centre   FN back");
+  const int boxX = 16, boxY = CONTENT_Y + 10, box = 70;
+  const int areaX = boxX + box + 16, areaY = CONTENT_Y + 10, areaW = W - areaX - 10, areaH = 150;
+  tft.drawRect(areaX - 1, areaY - 1, areaW + 2, areaH + 2, ui.dim);
+  float px = areaX + areaW / 2.0f, py = areaY + areaH / 2.0f;
+  int lastX = -1, lastY = -1;
+  uint32_t last = millis(), lastText = 0;
+  while (true) {
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isPressed()) {
+      auto k = M5Cardputer.Keyboard.keysState();
+      if (k.fn) return;
+      if (k.enter) { px = areaX + areaW / 2.0f; py = areaY + areaH / 2.0f; }
+      for (char c : k.word) {
+        if (c == ',' && joySpeed) { --joySpeed; markStateDirty(); }
+        else if (c == '.' && joySpeed + 1 < JOY_SPEED_COUNT) { ++joySpeed; markStateDirty(); }
+      }
+    }
+    uint32_t now = millis();
+    float dt = (now - last) / 1000.0f;
+    last = now;
+    float jx, jy;
+    joyRead(jx, jy);
+    float speed = 600.0f * JOY_SPEEDS[joySpeed];
+    px = constrain(px + jx * speed * dt, (float)areaX, (float)(areaX + areaW - 8));
+    py = constrain(py + jy * speed * dt, (float)areaY, (float)(areaY + areaH - 11));
+
+    tft.fillRect(boxX, boxY, box, box, ui.panel);
+    tft.drawRect(boxX, boxY, box, box, ui.dim);
+    tft.drawFastHLine(boxX, boxY + box / 2, box, ui.dim);
+    tft.drawFastVLine(boxX + box / 2, boxY, box, ui.dim);
+    tft.fillCircle(boxX + box / 2 + (int)(jx * (box / 2 - 4)), boxY + box / 2 + (int)(jy * (box / 2 - 4)), 3, (jx || jy) ? ui.accent : ui.dim);
+
+    int cx = (int)px, cy = (int)py;
+    if (cx != lastX || cy != lastY) {
+      if (lastX >= 0) tft.fillRect(lastX, lastY, 9, 12, ui.bg);
+      tft.fillTriangle(cx, cy, cx, cy + 10, cx + 7, cy + 7, ui.text);
+      lastX = cx; lastY = cy;
+    }
+
+    if (now - lastText > 150) {
+      lastText = now;
+      int ty = boxY + box + 6;
+      tft.fillRect(boxX, ty, box + 40, 50, ui.bg);
+      tft.setTextSize(1); tft.setTextColor(ui.dim, ui.bg);
+      tft.setCursor(boxX, ty); tft.print("G1 " + String(joyAvg(JOY_PIN_A)));
+      tft.setCursor(boxX, ty + 10); tft.print("G2 " + String(joyAvg(JOY_PIN_B)));
+      tft.setTextColor(ui.text, ui.bg);
+      char buf[24]; snprintf(buf, sizeof(buf), "%+.2f %+.2f", jx, jy);
+      tft.setCursor(boxX, ty + 20); tft.print(buf);
+      tft.setTextColor(ui.accent, ui.bg);
+      tft.setCursor(boxX, ty + 30); tft.print("speed " + String((int)(JOY_SPEEDS[joySpeed] * 100)) + "%");
+      if (!joyEnabled) { tft.setTextColor(ILI9341_RED, ui.bg); tft.setCursor(boxX, ty + 40); tft.print("OFF/uncal."); }
+    }
+    delay(15);
+  }
+}
 void clabBackspace() {
   bool changed = false, merged = false;
   if (cCursorColumn > 0) {
@@ -10312,6 +10551,7 @@ void keyboard() {
     if (k.enter && settingSelected == 9) { bleHidEnabled = !bleHidEnabled; if (bleHidEnabled) ensureBleReady(); playEnterSound(); markStateDirty(); redrawNeeded = true; return; }
     if (k.enter && settingSelected == 10) { statusLedEnabled = !statusLedEnabled; updateStatusLed(); playEnterSound(); markStateDirty(); redrawNeeded = true; return; }
     if (k.enter && settingSelected == 11) { lockOnStartupEnabled = !lockOnStartupEnabled; playEnterSound(); markStateDirty(); redrawNeeded = true; return; }
+    if (k.enter && settingSelected == 12) { playEnterSound(); runJoystickSetup(); redrawNeeded = true; return; }
     for (char c : k.word) { if (c == ';') { int old = settingSelected; settingSelected = (settingSelected + SETTINGS_COUNT - 1) % SETTINGS_COUNT; playMenuSound(); updateSettingsRow(old); updateSettingsRow(settingSelected); } else if (c == '.') { int old = settingSelected; settingSelected = (settingSelected + 1) % SETTINGS_COUNT; playMenuSound(); updateSettingsRow(old); updateSettingsRow(settingSelected); } else if (c == ',' && settingSelected < 7) { playMenuSound(); changeSetting(-1); } else if (c == '/' && settingSelected < 7) { playMenuSound(); changeSetting(1); } }
   }
 }
@@ -10511,8 +10751,10 @@ void setup() {
   }
   if (wantsRecovery) runRecoveryMode();
   pinMode(BTNA_PIN, INPUT_PULLUP);
-  pinMode(HAPTIC_IN_PIN, OUTPUT);
-  digitalWrite(HAPTIC_IN_PIN, LOW); // Keep the motor module off by default.
+  pinMode(JOY_PWR_PIN, OUTPUT);
+  digitalWrite(JOY_PWR_PIN, HIGH); // steady supply for the stick's potentiometers
+  analogSetPinAttenuation(JOY_PIN_A, ADC_11db);
+  analogSetPinAttenuation(JOY_PIN_B, ADC_11db);
   // The ADV LED is electrically gated; enable its supply before sending the
   // WS2812-style data signal on GPIO21.
   pinMode(RGB_LED_POWER_PIN, OUTPUT);
