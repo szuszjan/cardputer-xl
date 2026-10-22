@@ -54,7 +54,7 @@ The actual firmware lives in `CardputerXL.cpp`, compiled alongside the `.ino` as
 | SCK | 6 |
 | Backlight | 39 (PWM) |
 
-Plus a GPIO-driven haptic motor (GPIO1) and the Cardputer-ADV's addressable RGB LED (GPIO21 data, GPIO38 power gate).
+Plus an analog PSP-style joystick on Grove G1/G2 (ADC1, powered from EXT pin 3/G4 - see `HARDWARE.md`) and the Cardputer-ADV's addressable RGB LED (GPIO21 data, GPIO38 power gate). The GPIO1 haptic motor this unit used to carry is gone; GPIO1 is now the joystick's X axis.
 
 ## Architecture, for anyone editing this
 
