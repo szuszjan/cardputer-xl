@@ -3048,6 +3048,28 @@ static const int KART_TOTAL_LAPS = 3;
 static const unsigned long KART_COUNTDOWN_PHASE_MS = 800;
 static const unsigned long KART_COUNTDOWN_MS = KART_COUNTDOWN_PHASE_MS * 4;
 
+// ---- Heavy-resource registry: apps whose big buffers are malloc'd on
+// entry and freed on exit (never permanent globals) register themselves
+// here, so the TASK MANAGER app can list what's actually resident and let
+// the user free it. freeFn must be safe to call even when already freed
+// (kartCanvasFree() etc. are idempotent) - the registry calls it blindly.
+struct HeavyResource { const char* name; uint32_t approxBytes; void (*freeFn)(); };
+constexpr int MAX_HEAVY_RESOURCES = 8;
+HeavyResource heavyResources[MAX_HEAVY_RESOURCES];
+int heavyResourceCount = 0;
+void registerHeavyResource(const char* name, uint32_t approxBytes, void (*freeFn)()) {
+  for (int i = 0; i < heavyResourceCount; ++i) if (heavyResources[i].freeFn == freeFn) return;
+  if (heavyResourceCount < MAX_HEAVY_RESOURCES) heavyResources[heavyResourceCount++] = {name, approxBytes, freeFn};
+}
+void unregisterHeavyResource(void (*freeFn)()) {
+  for (int i = 0; i < heavyResourceCount; ++i) {
+    if (heavyResources[i].freeFn != freeFn) continue;
+    for (int j = i; j < heavyResourceCount - 1; ++j) heavyResources[j] = heavyResources[j + 1];
+    --heavyResourceCount;
+    return;
+  }
+}
+
 KartTrack kartTrack;
 KartCar kartCar;
 KartCam kartCam;
@@ -3057,7 +3079,32 @@ KartCam kartCam;
 // instead and blit it to tft in one shot - the same double-buffering the
 // standalone CardputerKart sketch used for this exact view on this exact
 // hardware.
-GFXcanvas16 kartCanvas(320, 240);
+//
+// Malloc'd on demand (not a permanent global) - see registerHeavyResource()
+// above: this ~150KB buffer is shared by Kart Racer AND Sky Pilot (their
+// hub previews too, not just live racing/flying), opened the moment either
+// is entered from the GAMEHUB list and freed the moment you back out to
+// that list. On a board with no PSRAM this was the single biggest reason
+// other heavy apps (BLE, LOGIC LAB, TRACKER) couldn't coexist with it.
+GFXcanvas16* kartCanvas = nullptr;
+void kartCanvasFree();
+// Returns false (and leaves kartCanvas untouched) if there isn't enough
+// free heap to safely allocate - callers must not proceed into gameMode
+// 3/8 in that case. Threshold has real margin above the ~150KB buffer
+// itself, since GFXcanvas16's own malloc needs one contiguous block.
+bool kartCanvasOpen() {
+  if (kartCanvas) { registerHeavyResource("KART/SKY PILOT", 153600, kartCanvasFree); return true; }
+  if (ESP.getFreeHeap() < 170000) return false;
+  kartCanvas = new GFXcanvas16(320, 240);
+  if (!kartCanvas->getBuffer()) { delete kartCanvas; kartCanvas = nullptr; return false; }
+  registerHeavyResource("KART/SKY PILOT", 153600, kartCanvasFree);
+  return true;
+}
+void kartCanvasFree() {
+  delete kartCanvas;
+  kartCanvas = nullptr;
+  unregisterHeavyResource(kartCanvasFree);
+}
 KartRaceState kartRaceState = KART_HOME;
 int kartSelectedLevel = 0, kartCurrentLevel = 0;
 bool kartFirstPerson = false;
@@ -3169,8 +3216,8 @@ static void kartDrawSeg(const KartCam& cam, const KVec3& a, const KVec3& b, uint
   if (za < NEAR_Z) pa = pa + (pb - pa) * constrain((NEAR_Z - za) / (zb - za), 0.0f, 1.0f);
   else if (zb < NEAR_Z) pb = pb + (pa - pb) * constrain((NEAR_Z - zb) / (za - zb), 0.0f, 1.0f);
   int ax, ay, bx, by;
-  if (!cam.project(pa, kartCanvas.width(), kartCanvas.height(), ax, ay)) return;
-  if (!cam.project(pb, kartCanvas.width(), kartCanvas.height(), bx, by)) return;
+  if (!cam.project(pa, kartCanvas->width(), kartCanvas->height(), ax, ay)) return;
+  if (!cam.project(pb, kartCanvas->width(), kartCanvas->height(), bx, by)) return;
   // A point sitting right at (or clipped to) the near plane can still
   // perspective-project to a huge screen coordinate if it has real lateral
   // offset from the view axis - f/cz blows up as cz->NEAR_Z for anything
@@ -3183,7 +3230,7 @@ static void kartDrawSeg(const KartCam& cam, const KVec3& a, const KVec3& b, uint
   // anyway.
   constexpr int SCREEN_MARGIN = 1000;
   if (abs(ax) > SCREEN_MARGIN || abs(ay) > SCREEN_MARGIN || abs(bx) > SCREEN_MARGIN || abs(by) > SCREEN_MARGIN) return;
-  kartCanvas.drawLine(ax, ay, bx, by, col);
+  kartCanvas->drawLine(ax, ay, bx, by, col);
 }
 // Clips a triangle against the near plane (Sutherland-Hodgman, one plane)
 // before filling it, instead of bailing on the WHOLE triangle the instant
@@ -3223,15 +3270,15 @@ static void kartClipFillTriangle(const KartCam& cam, const KVec3& a, const KVec3
   }
   if (outCount < 3) return;
   int x0, y0;
-  if (!cam.project(out[0], kartCanvas.width(), kartCanvas.height(), x0, y0)) return;
+  if (!cam.project(out[0], kartCanvas->width(), kartCanvas->height(), x0, y0)) return;
   constexpr int SCREEN_MARGIN = 1000;  // see kartDrawSeg's own comment on this
   if (abs(x0) > SCREEN_MARGIN || abs(y0) > SCREEN_MARGIN) return;
   for (int i = 1; i + 1 < outCount; ++i) {
     int x1, y1, x2, y2;
-    if (!cam.project(out[i], kartCanvas.width(), kartCanvas.height(), x1, y1)) continue;
-    if (!cam.project(out[i + 1], kartCanvas.width(), kartCanvas.height(), x2, y2)) continue;
+    if (!cam.project(out[i], kartCanvas->width(), kartCanvas->height(), x1, y1)) continue;
+    if (!cam.project(out[i + 1], kartCanvas->width(), kartCanvas->height(), x2, y2)) continue;
     if (abs(x1) > SCREEN_MARGIN || abs(y1) > SCREEN_MARGIN || abs(x2) > SCREEN_MARGIN || abs(y2) > SCREEN_MARGIN) continue;
-    kartCanvas.fillTriangle(x0, y0, x1, y1, x2, y2, col);
+    kartCanvas->fillTriangle(x0, y0, x1, y1, x2, y2, col);
   }
 }
 static void kartFillQuad(const KartCam& cam, const KVec3& a, const KVec3& b, const KVec3& c, const KVec3& d, uint16_t col) {
@@ -3276,19 +3323,19 @@ static void kartDrawKartBox(const KartCam& cam, const KartCar& car) {
   kartDrawSeg(cam, postL1, postR1, ILI9341_RED);
 }
 static void kartDrawDashboardOverlay() {
-  int w = kartCanvas.width(), h = kartCanvas.height();
+  int w = kartCanvas->width(), h = kartCanvas->height();
   const uint16_t DASH_COLOR = 0x2987, TRIM_COLOR = ILI9341_LIGHTGREY;
   int hoodTop = h - h / 4;
-  kartCanvas.fillTriangle(0, h - 1, w - 1, h - 1, w - w / 5, hoodTop, DASH_COLOR);
-  kartCanvas.fillTriangle(0, h - 1, w - w / 5, hoodTop, w / 5, hoodTop, DASH_COLOR);
+  kartCanvas->fillTriangle(0, h - 1, w - 1, h - 1, w - w / 5, hoodTop, DASH_COLOR);
+  kartCanvas->fillTriangle(0, h - 1, w - w / 5, hoodTop, w / 5, hoodTop, DASH_COLOR);
   int wheelCx = w / 2, wheelCy = h - 10, wheelR = h / 6;
-  kartCanvas.drawCircle(wheelCx, wheelCy, wheelR, TRIM_COLOR);
-  kartCanvas.drawLine(wheelCx, wheelCy, wheelCx, wheelCy - wheelR, TRIM_COLOR);
-  kartCanvas.drawLine(wheelCx, wheelCy, wheelCx - wheelR, wheelCy + wheelR / 2, TRIM_COLOR);
-  kartCanvas.drawLine(wheelCx, wheelCy, wheelCx + wheelR, wheelCy + wheelR / 2, TRIM_COLOR);
+  kartCanvas->drawCircle(wheelCx, wheelCy, wheelR, TRIM_COLOR);
+  kartCanvas->drawLine(wheelCx, wheelCy, wheelCx, wheelCy - wheelR, TRIM_COLOR);
+  kartCanvas->drawLine(wheelCx, wheelCy, wheelCx - wheelR, wheelCy + wheelR / 2, TRIM_COLOR);
+  kartCanvas->drawLine(wheelCx, wheelCy, wheelCx + wheelR, wheelCy + wheelR / 2, TRIM_COLOR);
   int mSize = w / 14;
-  kartCanvas.fillTriangle(4, 4, 4 + mSize, 4, 4, 4 + mSize / 2, DASH_COLOR);
-  kartCanvas.fillTriangle(w - 4, 4, w - 4 - mSize, 4, w - 4, 4 + mSize / 2, DASH_COLOR);
+  kartCanvas->fillTriangle(4, 4, 4 + mSize, 4, 4, 4 + mSize / 2, DASH_COLOR);
+  kartCanvas->fillTriangle(w - 4, 4, w - 4 - mSize, 4, w - 4, 4 + mSize / 2, DASH_COLOR);
 }
 static void kartDrawPylon(const KartCam& cam, const KVec3& base, uint16_t col) { kartDrawSeg(cam, base, base + KVec3{0, 1.2f, 0}, col); }
 static void kartDrawFinishGate(const KartCam& cam, const KartTrack& track) {
@@ -3308,7 +3355,7 @@ static uint16_t kartLerpColor565(uint16_t a, uint16_t b, float t) {
   return (r << 11) | (g << 5) | bl;
 }
 static void kartDrawSky(const KartCam& cam) {
-  int w = kartCanvas.width(), h = kartCanvas.height();
+  int w = kartCanvas->width(), h = kartCanvas->height();
   KVec3 farLevel = cam.position + cam.forward * 200.0f;
   farLevel.y = cam.position.y;
   int hx, horizonY = h / 2;
@@ -3319,7 +3366,7 @@ static void kartDrawSky(const KartCam& cam) {
   // skyTimeMode at all and always sees the original navy sky.
   float dayT = skyDayFraction();
   uint16_t skyCol = kartLerpColor565(0x0006, ILI9341_NAVY, dayT);
-  kartCanvas.fillRect(0, 0, w, horizonY, skyCol);
+  kartCanvas->fillRect(0, 0, w, horizonY, skyCol);
   if (dayT < 0.5f) {
     // Fixed screen-space star field (not world-space - the sky itself is
     // just a flat-filled band, so there's no "real" star position to
@@ -3333,7 +3380,7 @@ static void kartDrawSky(const KartCam& cam) {
       seed = seed * 1103515245u + 12345u;
       int sy = (seed >> 8) % max(1, horizonY);
       if (((seed >> 20) % 100) / 100.0f > starT) continue;
-      kartCanvas.drawPixel(sx, sy, ILI9341_WHITE);
+      kartCanvas->drawPixel(sx, sy, ILI9341_WHITE);
     }
   }
   const int NMTN = 12; const float MTN_RADIUS = 300.0f, MTN_SPREAD = 45.0f;
@@ -3348,11 +3395,11 @@ static void kartDrawSky(const KartCam& cam) {
     KVec3 peak = baseCenter + KVec3{0, peakHeight, 0};
     int x0, y0, x1, y1, x2, y2;
     if (cam.project(base1, w, h, x0, y0) && cam.project(base2, w, h, x1, y1) && cam.project(peak, w, h, x2, y2))
-      kartCanvas.fillTriangle(x0, y0, x1, y1, x2, y2, mtnCol);
+      kartCanvas->fillTriangle(x0, y0, x1, y1, x2, y2, mtnCol);
   }
 }
 void kartRenderScene() {
-  kartCanvas.fillScreen(ILI9341_BLACK);
+  kartCanvas->fillScreen(ILI9341_BLACK);
   kartDrawSky(kartCam);
   const float wallHeight = 0.6f; const int WINDOW = 28;
   int camIdx = kartTrack.nearestIndexFull(kartCam.position);
@@ -3379,19 +3426,19 @@ static void kartDrawMinimap(int x0, int y0, int size) {
   float scale = (size - 8) / max(spanX, spanZ);
   float cx = (kartMapMinX + kartMapMaxX) * 0.5f, cz = (kartMapMinZ + kartMapMaxZ) * 0.5f;
   auto toMap = [&](float wx, float wz, int& px, int& py) { px = x0 + size / 2 + (int)((wx - cx) * scale); py = y0 + size / 2 + (int)((wz - cz) * scale); };
-  kartCanvas.fillRect(x0, y0, size, size, ILI9341_BLACK);
-  kartCanvas.drawRect(x0, y0, size, size, ILI9341_DARKGREY);
+  kartCanvas->fillRect(x0, y0, size, size, ILI9341_BLACK);
+  kartCanvas->drawRect(x0, y0, size, size, ILI9341_DARKGREY);
   int px, py, qx, qy;
   for (int i = 0; i < KartTrack::N; ++i) {
     int j = (i + 1) % KartTrack::N;
     toMap(kartTrack.center[i].x, kartTrack.center[i].z, px, py);
     toMap(kartTrack.center[j].x, kartTrack.center[j].z, qx, qy);
-    kartCanvas.drawLine(px, py, qx, qy, ILI9341_CYAN);
+    kartCanvas->drawLine(px, py, qx, qy, ILI9341_CYAN);
   }
   toMap(kartTrack.center[0].x, kartTrack.center[0].z, px, py);
-  kartCanvas.fillCircle(px, py, 2, ILI9341_YELLOW);
+  kartCanvas->fillCircle(px, py, 2, ILI9341_YELLOW);
   toMap(kartCar.pos.x, kartCar.pos.z, px, py);
-  kartCanvas.fillCircle(px, py, 3, ILI9341_RED);
+  kartCanvas->fillCircle(px, py, 3, ILI9341_RED);
 }
 static void kartFormatTime(float seconds, char* buf, size_t n) {
   if (seconds < 0) { snprintf(buf, n, "--:--.--"); return; }
@@ -3399,13 +3446,13 @@ static void kartFormatTime(float seconds, char* buf, size_t n) {
   snprintf(buf, n, "%d:%05.2f", mm, ss);
 }
 void kartRenderHud(unsigned long now) {
-  int w = kartCanvas.width();
+  int w = kartCanvas->width();
   const int mapSize = 56;
-  kartCanvas.fillRect(0, 0, 150, 68, ILI9341_BLACK);
+  kartCanvas->fillRect(0, 0, 150, 68, ILI9341_BLACK);
   kartDrawMinimap(w - mapSize - 4, 4, mapSize);
-  kartCanvas.setTextSize(1);
+  kartCanvas->setTextSize(1);
   char buf[48], tbuf[16]; int y = 3;
-  auto line = [&](const char* s, uint16_t col) { kartCanvas.setTextColor(col, ILI9341_BLACK); kartCanvas.setCursor(3, y); kartCanvas.print(s); y += 11; };
+  auto line = [&](const char* s, uint16_t col) { kartCanvas->setTextColor(col, ILI9341_BLACK); kartCanvas->setCursor(3, y); kartCanvas->print(s); y += 11; };
   snprintf(buf, sizeof(buf), "%s LAP %d/%d", KartTrack::levelName(kartCurrentLevel), kartLapsCompleted + 1, KART_TOTAL_LAPS);
   line(buf, ILI9341_CYAN);
   kartFormatTime((now - kartLapStartMs) / 1000.0f, tbuf, sizeof(tbuf));
@@ -3419,12 +3466,12 @@ void kartRenderHud(unsigned long now) {
 static const char* kartCountdownText(int phase) { return (phase == 0) ? "3" : (phase == 1) ? "2" : (phase == 2) ? "1" : "GO!"; }
 static void kartDrawCountdownOverlay(int phase) {
   const char* txt = kartCountdownText(phase);
-  kartCanvas.setTextSize(6); kartCanvas.setTextColor(ILI9341_YELLOW);
+  kartCanvas->setTextSize(6); kartCanvas->setTextColor(ILI9341_YELLOW);
   int16_t x1, y1; uint16_t tw, th;
-  kartCanvas.getTextBounds(txt, 0, 0, &x1, &y1, &tw, &th);
-  int w = kartCanvas.width(), h = kartCanvas.height();
-  kartCanvas.setCursor(w / 2 - (int)tw / 2 - x1, h / 2 - (int)th / 2 - y1);
-  kartCanvas.print(txt);
+  kartCanvas->getTextBounds(txt, 0, 0, &x1, &y1, &tw, &th);
+  int w = kartCanvas->width(), h = kartCanvas->height();
+  kartCanvas->setCursor(w / 2 - (int)tw / 2 - x1, h / 2 - (int)th / 2 - y1);
+  kartCanvas->print(txt);
 }
 
 // ---- Engine gear/RPM state (cosmetic only, drives the engine tone; the old
@@ -3541,7 +3588,7 @@ void stepKartRace() {
     kartRenderScene();
     kartDrawCountdownOverlay(phase);
     kartRenderHud(now);
-    tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+    tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
     if (elapsed >= KART_COUNTDOWN_MS) {
       unsigned long t = millis();
       kartRaceStartMs = t; kartLapStartMs = t; kartRaceState = KART_RACING;
@@ -3618,7 +3665,7 @@ void stepKartRace() {
   kartCam.follow(kartCar, kartFirstPerson);
   kartRenderScene();
   kartRenderHud(now);
-  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
 }
 // ============================================================================
 
@@ -4353,26 +4400,26 @@ void skyDrawAirportBuilding(const KartCam& cam, const SkyAirport& a) {
 // pillars, and a glareshield with a couple of decorative gauge bezels and
 // switches along the bottom edge.
 void skyDrawCockpitOverlay() {
-  int w = kartCanvas.width(), h = kartCanvas.height();
+  int w = kartCanvas->width(), h = kartCanvas->height();
   const uint16_t DASH = 0x2987, TRIM = ILI9341_LIGHTGREY;
 
-  kartCanvas.fillRect(0, 0, w, 5, DASH);
-  kartCanvas.fillRect(w / 2 - 3, 0, 6, 46, DASH);
-  kartCanvas.drawFastVLine(w / 2 - 3, 0, 46, TRIM); kartCanvas.drawFastVLine(w / 2 + 3, 0, 46, TRIM);
-  kartCanvas.fillTriangle(0, 0, 24, 0, 0, 52, DASH);
-  kartCanvas.fillTriangle(w - 1, 0, w - 25, 0, w - 1, 52, DASH);
+  kartCanvas->fillRect(0, 0, w, 5, DASH);
+  kartCanvas->fillRect(w / 2 - 3, 0, 6, 46, DASH);
+  kartCanvas->drawFastVLine(w / 2 - 3, 0, 46, TRIM); kartCanvas->drawFastVLine(w / 2 + 3, 0, 46, TRIM);
+  kartCanvas->fillTriangle(0, 0, 24, 0, 0, 52, DASH);
+  kartCanvas->fillTriangle(w - 1, 0, w - 25, 0, w - 1, 52, DASH);
 
   // A slim decorative glareshield band - the real instruments it used to
   // sit directly above no longer render here (they moved to the built-in
   // screen; see drawSkyPilotSmallHud()), so this no longer needs to reserve
   // extra height to merge visually with a strip below it.
   int sillTop = h - 20;
-  kartCanvas.fillRoundRect(-6, sillTop, w + 12, 26, 12, DASH);
-  kartCanvas.drawFastHLine(0, sillTop, w, TRIM);
-  kartCanvas.drawCircle(26, sillTop + 10, 7, TRIM);
-  kartCanvas.drawCircle(w - 26, sillTop + 10, 7, TRIM);
-  kartCanvas.fillRect(w / 2 - 16, sillTop + 4, 6, 11, TRIM);
-  kartCanvas.fillRect(w / 2 + 10, sillTop + 4, 6, 11, TRIM);
+  kartCanvas->fillRoundRect(-6, sillTop, w + 12, 26, 12, DASH);
+  kartCanvas->drawFastHLine(0, sillTop, w, TRIM);
+  kartCanvas->drawCircle(26, sillTop + 10, 7, TRIM);
+  kartCanvas->drawCircle(w - 26, sillTop + 10, 7, TRIM);
+  kartCanvas->fillRect(w / 2 - 16, sillTop + 4, 6, 11, TRIM);
+  kartCanvas->fillRect(w / 2 + 10, sillTop + 4, 6, 11, TRIM);
 }
 // Airport name tags floating above each runway, world-space text projected
 // straight onto the canvas at the airport's screen position - only in
@@ -4388,13 +4435,13 @@ void skyDrawAirportLabels(const KartCam& cam) {
     KVec3 rel = labelPos - cam.position;
     if (sqrtf(kdot(rel, rel)) > skyRenderDistLabelCull[skyRenderDistLevel]) continue;  // too far to be legible - skip rather than clutter
     int sx, sy;
-    if (!cam.project(labelPos, kartCanvas.width(), kartCanvas.height(), sx, sy)) continue;
-    if (sx < -40 || sx > kartCanvas.width() + 40 || sy < -20 || sy > kartCanvas.height() + 20) continue;
+    if (!cam.project(labelPos, kartCanvas->width(), kartCanvas->height(), sx, sy)) continue;
+    if (sx < -40 || sx > kartCanvas->width() + 40 || sy < -20 || sy > kartCanvas->height() + 20) continue;
     uint16_t col = i == skyTargetAirport ? ILI9341_YELLOW : (i == skyStartAirport ? ILI9341_CYAN : ILI9341_LIGHTGREY);
     int textW = (int)strlen(skyAirports[i].name) * 6;
-    kartCanvas.fillRect(sx - textW / 2 - 2, sy - 9, textW + 4, 10, ILI9341_BLACK);
-    kartCanvas.setTextSize(1); kartCanvas.setTextColor(col, ILI9341_BLACK);
-    kartCanvas.setCursor(sx - textW / 2, sy - 8); kartCanvas.print(skyAirports[i].name);
+    kartCanvas->fillRect(sx - textW / 2 - 2, sy - 9, textW + 4, 10, ILI9341_BLACK);
+    kartCanvas->setTextSize(1); kartCanvas->setTextColor(col, ILI9341_BLACK);
+    kartCanvas->setCursor(sx - textW / 2, sy - 8); kartCanvas->print(skyAirports[i].name);
   }
 }
 // The AUTOPILOT toggle's guide trail: chevrons ">" spaced along the
@@ -4438,14 +4485,14 @@ void skyDrawWeatherCells(const KartCam& cam) {
     float dist = sqrtf(kdot(rel, rel));
     if (dist > skyRenderDistLabelCull[skyRenderDistLevel] * 1.5f) continue;
     int sx, sy;
-    if (!cam.project(center, kartCanvas.width(), kartCanvas.height(), sx, sy)) continue;
-    if (sx < -80 || sx > kartCanvas.width() + 80 || sy < -80 || sy > kartCanvas.height() + 80) continue;
+    if (!cam.project(center, kartCanvas->width(), kartCanvas->height(), sx, sy)) continue;
+    if (sx < -80 || sx > kartCanvas->width() + 80 || sy < -80 || sy > kartCanvas->height() + 80) continue;
     float scale = constrain(4500.0f / dist, 6.0f, 70.0f);
     uint16_t col = (inStormNow && stormIdx == i) ? 0x4A69 : 0x39C7;  // lighter/angrier when the player is actually inside this one
-    kartCanvas.fillCircle(sx - (int)(scale * 0.5f), sy, (int)(scale * 0.6f), col);
-    kartCanvas.fillCircle(sx + (int)(scale * 0.4f), sy - (int)(scale * 0.2f), (int)(scale * 0.55f), col);
-    kartCanvas.fillCircle(sx, sy - (int)(scale * 0.35f), (int)(scale * 0.7f), col);
-    kartCanvas.fillCircle(sx - (int)(scale * 0.2f), sy + (int)(scale * 0.3f), (int)(scale * 0.5f), col);
+    kartCanvas->fillCircle(sx - (int)(scale * 0.5f), sy, (int)(scale * 0.6f), col);
+    kartCanvas->fillCircle(sx + (int)(scale * 0.4f), sy - (int)(scale * 0.2f), (int)(scale * 0.55f), col);
+    kartCanvas->fillCircle(sx, sy - (int)(scale * 0.35f), (int)(scale * 0.7f), col);
+    kartCanvas->fillCircle(sx - (int)(scale * 0.2f), sy + (int)(scale * 0.3f), (int)(scale * 0.5f), col);
   }
 }
 void skyInitBots() {
@@ -4518,7 +4565,7 @@ void skyDrawBots(const KartCam& cam) {
   }
 }
 void skyRenderScene(const KartCam& cam, const KVec3& fwd, bool firstPerson) {
-  kartCanvas.fillScreen(ILI9341_BLACK);
+  kartCanvas->fillScreen(ILI9341_BLACK);
   kartDrawSky(cam);
   skyDrawWeatherCells(cam);
   skyDrawTerrain(cam, fwd);
@@ -4677,7 +4724,7 @@ void skyMinimapUnrotate(float right, float fwd, float& outDx, float& outDz) {
   outDz = -right * s + fwd * c;
 }
 void skyDrawMinimap(int x0, int y0, int size) {
-  kartCanvas.drawRect(x0, y0, size, size, ILI9341_DARKGREY);
+  kartCanvas->drawRect(x0, y0, size, size, ILI9341_DARKGREY);
   const float unitsPerPixel = 9.0f;
   int cx = x0 + size / 2, cy = y0 + size / 2;
   float maxR = size / 2.0f - 3.0f;
@@ -4695,7 +4742,7 @@ void skyDrawMinimap(int x0, int y0, int size) {
       uint16_t col = water ? 0x1B5F : (h > SKY_RUNWAY_ELEVATION + 15.0f ? 0x2AA0 : 0x1A05);
       if (skyWeatherEnabled && skyWeatherCellAt(wx, wz)) col = 0x630C;  // storm cell overlay, drawn over terrain/water alike
       int bw = min(SAMPLE_STEP, x0 + size - 1 - px), bh = min(SAMPLE_STEP, y0 + size - 1 - py);
-      kartCanvas.fillRect(px, py, bw, bh, col);
+      kartCanvas->fillRect(px, py, bw, bh, col);
     }
   }
   for (int i = 0; i < SKY_AIRPORT_COUNT; ++i) {
@@ -4704,7 +4751,7 @@ void skyDrawMinimap(int x0, int y0, int size) {
     if (dist > maxR && dist > 0.001f) { float s = maxR / dist; dx *= s; dz *= s; }
     float right, fwd; skyMinimapRotate(dx / unitsPerPixel, dz / unitsPerPixel, right, fwd);
     bool isTarget = skyMode == SKY_MODE_AIRPORT && i == skyTargetAirport;
-    kartCanvas.fillCircle(cx + (int)right, cy - (int)fwd, 2, isTarget ? ILI9341_YELLOW : ILI9341_CYAN);
+    kartCanvas->fillCircle(cx + (int)right, cy - (int)fwd, 2, isTarget ? ILI9341_YELLOW : ILI9341_CYAN);
   }
   if (skyRadarEnabled && skyAiBotsEnabled) {
     for (int i = 0; i < skyBotCount; ++i) {
@@ -4712,78 +4759,78 @@ void skyDrawMinimap(int x0, int y0, int size) {
       float dist = sqrtf(dx * dx + dz * dz) / unitsPerPixel;
       if (dist > maxR && dist > 0.001f) { float s = maxR / dist; dx *= s; dz *= s; }
       float right, fwd; skyMinimapRotate(dx / unitsPerPixel, dz / unitsPerPixel, right, fwd);
-      kartCanvas.fillCircle(cx + (int)right, cy - (int)fwd, 1, ILI9341_ORANGE);
+      kartCanvas->fillCircle(cx + (int)right, cy - (int)fwd, 1, ILI9341_ORANGE);
     }
   }
   // The plane's own indicator is now a fixed upward-pointing arrow (heading
   // is always "up" by construction), not something that itself needs to
   // rotate with heading the way the old north-up version's did.
-  kartCanvas.fillTriangle(cx, cy - 6, cx - 4, cy + 4, cx + 4, cy + 4, ILI9341_WHITE);
+  kartCanvas->fillTriangle(cx, cy - 6, cx - 4, cy + 4, cx + 4, cy + 4, ILI9341_WHITE);
 }
 // The minimap grew from 52 to 72px (see skyDrawMinimap()'s own comment on
 // why) - these two derive the rest of the top-right HUD layout from that
 // one size so they can't drift out of sync with it again.
 constexpr int SKY_MINIMAP_SIZE = 72, SKY_MINIMAP_X0 = -SKY_MINIMAP_SIZE - 2;
 void skyRenderHud(bool stalling, bool pullUp) {
-  kartCanvas.fillRect(0, 0, kartCanvas.width() + SKY_MINIMAP_X0 - 4, 22, ILI9341_BLACK);
-  kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK);
+  kartCanvas->fillRect(0, 0, kartCanvas->width() + SKY_MINIMAP_X0 - 4, 22, ILI9341_BLACK);
+  kartCanvas->setTextSize(1); kartCanvas->setTextColor(ILI9341_CYAN, ILI9341_BLACK);
   char buf[48];
   if (skySpectating) snprintf(buf, sizeof(buf), "SPECTATING");
   else snprintf(buf, sizeof(buf), "DIST %d  BEST %d", (int)skyScore, skyBestScore);
-  kartCanvas.setCursor(3, 2); kartCanvas.print(buf);
+  kartCanvas->setCursor(3, 2); kartCanvas->print(buf);
   if (skySpectating) {
-    kartCanvas.setTextColor(ILI9341_GREEN, ILI9341_BLACK);
+    kartCanvas->setTextColor(ILI9341_GREEN, ILI9341_BLACK);
     char watchBuf[24]; snprintf(watchBuf, sizeof(watchBuf), "WATCHING %d/%d", skyWatchIndex + 1, skyBotCount);
-    kartCanvas.setCursor(3, 12); kartCanvas.print(watchBuf);
+    kartCanvas->setCursor(3, 12); kartCanvas->print(watchBuf);
   } else {
-    kartCanvas.setTextColor(skyGearDown ? ILI9341_GREEN : ILI9341_ORANGE, ILI9341_BLACK);
-    kartCanvas.setCursor(3, 12); kartCanvas.print(skyGearDown ? "GEAR DOWN" : "GEAR UP");
+    kartCanvas->setTextColor(skyGearDown ? ILI9341_GREEN : ILI9341_ORANGE, ILI9341_BLACK);
+    kartCanvas->setCursor(3, 12); kartCanvas->print(skyGearDown ? "GEAR DOWN" : "GEAR UP");
   }
   if (skyMode == SKY_MODE_AIRPORT && skyTargetAirport >= 0) {
-    kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
-    kartCanvas.setCursor(72, 12); kartCanvas.print(String("-> ") + skyAirports[skyTargetAirport].name);
+    kartCanvas->setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+    kartCanvas->setCursor(72, 12); kartCanvas->print(String("-> ") + skyAirports[skyTargetAirport].name);
   }
   if (stalling) {
-    kartCanvas.setTextColor((millis() / 250) % 2 ? ILI9341_RED : ILI9341_YELLOW, ILI9341_BLACK);
-    kartCanvas.setCursor(kartCanvas.width() / 2 - 40, 2); kartCanvas.print("STALL");
+    kartCanvas->setTextColor((millis() / 250) % 2 ? ILI9341_RED : ILI9341_YELLOW, ILI9341_BLACK);
+    kartCanvas->setCursor(kartCanvas->width() / 2 - 40, 2); kartCanvas->print("STALL");
   }
-  skyDrawMinimap(kartCanvas.width() + SKY_MINIMAP_X0, 2, SKY_MINIMAP_SIZE);
+  skyDrawMinimap(kartCanvas->width() + SKY_MINIMAP_X0, 2, SKY_MINIMAP_SIZE);
   char fpsBuf[8]; snprintf(fpsBuf, sizeof(fpsBuf), "%dFPS", (int)(skyFpsSmoothed + 0.5f));
   int fpsY = 2 + SKY_MINIMAP_SIZE + 2;
-  kartCanvas.fillRect(kartCanvas.width() + SKY_MINIMAP_X0, fpsY, SKY_MINIMAP_SIZE, 10, ILI9341_BLACK);
-  kartCanvas.setTextColor(ILI9341_GREEN, ILI9341_BLACK);
-  kartCanvas.setCursor(kartCanvas.width() - 4 - 6 * strlen(fpsBuf), fpsY + 1); kartCanvas.print(fpsBuf);
+  kartCanvas->fillRect(kartCanvas->width() + SKY_MINIMAP_X0, fpsY, SKY_MINIMAP_SIZE, 10, ILI9341_BLACK);
+  kartCanvas->setTextColor(ILI9341_GREEN, ILI9341_BLACK);
+  kartCanvas->setCursor(kartCanvas->width() - 4 - 6 * strlen(fpsBuf), fpsY + 1); kartCanvas->print(fpsBuf);
   // Clock, formatted off the same skyTimeOfDay the day/night cycle already
   // tracks - shown under the FPS readout regardless of time mode, since it's
   // a harmless static "12:00" in ALWAYS DAY/NIGHT and only actually moves
   // once CYCLE is picked in Options.
   {
     int clockY = fpsY + 11;
-    kartCanvas.fillRect(kartCanvas.width() + SKY_MINIMAP_X0, clockY, SKY_MINIMAP_SIZE, 10, ILI9341_BLACK);
+    kartCanvas->fillRect(kartCanvas->width() + SKY_MINIMAP_X0, clockY, SKY_MINIMAP_SIZE, 10, ILI9341_BLACK);
     int hh = (int)skyTimeOfDay, mm = (int)((skyTimeOfDay - hh) * 60.0f);
     char clockBuf[8]; snprintf(clockBuf, sizeof(clockBuf), "%02d:%02d", hh, mm);
-    kartCanvas.setTextColor(skyIsNight() ? 0x841F /*dim blue*/ : ILI9341_YELLOW, ILI9341_BLACK);
-    kartCanvas.setCursor(kartCanvas.width() - 4 - 6 * strlen(clockBuf), clockY + 1); kartCanvas.print(clockBuf);
+    kartCanvas->setTextColor(skyIsNight() ? 0x841F /*dim blue*/ : ILI9341_YELLOW, ILI9341_BLACK);
+    kartCanvas->setCursor(kartCanvas->width() - 4 - 6 * strlen(clockBuf), clockY + 1); kartCanvas->print(clockBuf);
   }
   // ATC subtitle - a single centered line near the bottom of the view,
   // shown only while skyAtcUntil hasn't passed (skyShowAtc() is the only
   // writer, called from fuel/weather/achievement triggers).
   if (millis() < skyAtcUntil) {
-    kartCanvas.setTextSize(1);
+    kartCanvas->setTextSize(1);
     int textW = (int)skyAtcMessage.length() * 6;
-    int tx = kartCanvas.width() / 2 - textW / 2, ty = kartCanvas.height() - 46;
-    kartCanvas.fillRect(tx - 3, ty - 2, textW + 6, 11, ILI9341_BLACK);
-    kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
-    kartCanvas.setCursor(tx, ty); kartCanvas.print(skyAtcMessage);
+    int tx = kartCanvas->width() / 2 - textW / 2, ty = kartCanvas->height() - 46;
+    kartCanvas->fillRect(tx - 3, ty - 2, textW + 6, 11, ILI9341_BLACK);
+    kartCanvas->setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+    kartCanvas->setCursor(tx, ty); kartCanvas->print(skyAtcMessage);
   }
   // GPWS-style terrain warning - large and center-screen (not tucked into a
   // corner strip like STALL) since this one means impact is imminent.
   if (pullUp) {
-    kartCanvas.setTextSize(2);
-    kartCanvas.setTextColor((millis() / 200) % 2 ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
-    kartCanvas.setCursor(kartCanvas.width() / 2 - 62, kartCanvas.height() / 2 - 30);
-    kartCanvas.print("PULL UP");
-    kartCanvas.setTextSize(1);
+    kartCanvas->setTextSize(2);
+    kartCanvas->setTextColor((millis() / 200) % 2 ? ILI9341_RED : ILI9341_WHITE, ILI9341_BLACK);
+    kartCanvas->setCursor(kartCanvas->width() / 2 - 62, kartCanvas->height() / 2 - 30);
+    kartCanvas->print("PULL UP");
+    kartCanvas->setTextSize(1);
   }
   // Throttle/speed/altitude/attitude/compass/fuel all live on the built-in
   // screen now (drawSkyPilotSmallHud()) - the external panel keeps the full
@@ -4799,12 +4846,12 @@ void skyDrawSonicBoomEffect() {
   if (nowMs >= skyBoomFlashUntil) return;
   unsigned long elapsed = SKY_BOOM_EFFECT_MS - (skyBoomFlashUntil - nowMs);
   constexpr unsigned long FLASH_MS = 70;
-  if (elapsed < FLASH_MS) { kartCanvas.fillScreen(ILI9341_WHITE); return; }
+  if (elapsed < FLASH_MS) { kartCanvas->fillScreen(ILI9341_WHITE); return; }
   float t = (float)(elapsed - FLASH_MS) / (float)(SKY_BOOM_EFFECT_MS - FLASH_MS);
-  int cx = kartCanvas.width() / 2, cy = kartCanvas.height() / 2;
+  int cx = kartCanvas->width() / 2, cy = kartCanvas->height() / 2;
   int r1 = (int)(t * 240), r2 = max(0, r1 - 26);
-  kartCanvas.drawCircle(cx, cy, r1, ILI9341_WHITE);
-  kartCanvas.drawCircle(cx, cy, r2, ILI9341_LIGHTGREY);
+  kartCanvas->drawCircle(cx, cy, r1, ILI9341_WHITE);
+  kartCanvas->drawCircle(cx, cy, r2, ILI9341_LIGHTGREY);
 }
 
 // Gravity-referenced tilt angles from the ADV's built-in accelerometer -
@@ -4933,8 +4980,8 @@ void skyInitHubStars() {
 }
 void skyDrawHubStars(float dt) {
   if (!skyHubStarsReady) skyInitHubStars();
-  uint16_t* buf = kartCanvas.getBuffer();
-  int stride = kartCanvas.width(), canvasH = kartCanvas.height();
+  uint16_t* buf = kartCanvas->getBuffer();
+  int stride = kartCanvas->width(), canvasH = kartCanvas->height();
   for (int i = 0; i < SKY_HUB_STAR_COUNT; i++) {
     SkyHubStar& s = skyHubStars[i];
     s.x -= s.speed * dt;
@@ -4944,7 +4991,7 @@ void skyDrawHubStars(float dt) {
     // Mostly dim slate specks for depth, with the occasional bright twinkle
     // (every 5th star) - a nod to the little sparkle dots in a Mania-style
     // menu backdrop without needing per-star animation state of their own.
-    // Written straight into the buffer (not kartCanvas.drawPixel()) - see
+    // Written straight into the buffer (not kartCanvas->drawPixel()) - see
     // skyDrawManiaGradient()'s own comment on why this whole draw path
     // avoids Adafruit_GFX's virtual per-pixel calls.
     buf[(size_t)sy * stride + sx] = (i % 5 == 0) ? ILI9341_WHITE : 0x2965;
@@ -4961,7 +5008,7 @@ uint16_t skyManiaBgAt(int y) {
   return kartLerpColor565(0x0007 /*deep navy*/, 0x2812 /*deep violet*/, t);
 }
 // Writes straight into kartCanvas's own buffer instead of calling
-// kartCanvas.fillRect() - fillRect() isn't overridden by GFXcanvas16, so it
+// kartCanvas->fillRect() - fillRect() isn't overridden by GFXcanvas16, so it
 // falls back to Adafruit_GFX's generic implementation, which loops one
 // *virtual* drawFastVLine() call per column (320 of them per row-band,
 // each carrying its own clipping/rotation-check overhead meant for a real
@@ -4971,8 +5018,8 @@ uint16_t skyManiaBgAt(int y) {
 // skyDrawManiaPanel() below - was the actual, measurable source of the
 // reported scrolling lag, not just the fill's raw pixel count.
 void skyDrawManiaGradient() {
-  uint16_t* buf = kartCanvas.getBuffer();
-  int stride = kartCanvas.width();
+  uint16_t* buf = kartCanvas->getBuffer();
+  int stride = kartCanvas->width();
   for (int y = HEADER_H; y < H - FOOTER_H; ++y) {
     uint16_t col = skyManiaBgAt(y);
     uint16_t* row = buf + (size_t)y * stride;
@@ -4983,7 +5030,7 @@ void skyDrawManiaRainbowStripe(int y) {
   static const uint16_t rainbow[] = {ILI9341_BLUE, ILI9341_CYAN, ILI9341_GREEN, ILI9341_YELLOW, ILI9341_ORANGE, ILI9341_RED, ILI9341_MAGENTA};
   constexpr int N = sizeof(rainbow) / sizeof(rainbow[0]);
   int segW = (W + N - 1) / N;
-  for (int i = 0; i < N; ++i) kartCanvas.fillRect(i * segW, y, segW, 3, rainbow[i]);
+  for (int i = 0; i < N; ++i) kartCanvas->fillRect(i * segW, y, segW, 3, rainbow[i]);
 }
 // A right-leaning parallelogram instead of a plain rectangle - the
 // diagonal-cut panel behind every row is the single most recognizable
@@ -4997,8 +5044,8 @@ void skyDrawManiaRainbowStripe(int y) {
 // visible row, every animation tick. See skyDrawManiaGradient()'s comment
 // for the same reasoning applied to the background fill.
 void skyDrawManiaPanel(int x0, int y0, int w, int h, int skew, uint16_t color) {
-  uint16_t* buf = kartCanvas.getBuffer();
-  int stride = kartCanvas.width(), canvasH = kartCanvas.height();
+  uint16_t* buf = kartCanvas->getBuffer();
+  int stride = kartCanvas->width(), canvasH = kartCanvas->height();
   for (int row = 0; row < h; ++row) {
     int y = y0 + row;
     if (y < 0 || y >= canvasH) continue;
@@ -5039,17 +5086,17 @@ void skyListScrollUpdate(SkyListScroll& s, float dt) {
 // the model never appeared to spin relative to the screen at all.
 float skyPreviewSpin = 0.8f;
 void skyDrawPlanePreviewScene(float dt = 0) {
-  int w = kartCanvas.width(), h = kartCanvas.height();
+  int w = kartCanvas->width(), h = kartCanvas->height();
   int groundY = h * 2 / 3;
   // Same navy-to-violet gradient + starfield as MODE/OPTIONS, so the plane
   // spins on the same "space stage" backdrop instead of a flat navy fill -
   // stars are spawned/advanced across the whole content band so a few dots
   // land on the ground strip too, which reads as tiny runway lights rather
   // than looking wrong.
-  for (int y = 0; y < groundY; y += 6) kartCanvas.fillRect(0, y, w, min(6, groundY - y), kartLerpColor565(0x0007, 0x2812, (float)y / groundY));
+  for (int y = 0; y < groundY; y += 6) kartCanvas->fillRect(0, y, w, min(6, groundY - y), kartLerpColor565(0x0007, 0x2812, (float)y / groundY));
   skyDrawHubStars(dt);
-  kartCanvas.fillRect(0, groundY, w, h - groundY, 0x1082 /*deep plum stage floor*/);
-  kartCanvas.drawFastHLine(0, groundY, w, ILI9341_MAGENTA);
+  kartCanvas->fillRect(0, groundY, w, h - groundY, 0x1082 /*deep plum stage floor*/);
+  kartCanvas->drawFastHLine(0, groundY, w, ILI9341_MAGENTA);
   skyDrawManiaRainbowStripe(CONTENT_Y - 4);
 
   KVec3 showcasePos{0, 0, 0};
@@ -5077,11 +5124,11 @@ void skyDrawPlanePreviewScene(float dt = 0) {
   // flat rectangle, so the plane's ID card reads as part of the same
   // "Mania menu" rather than a leftover plain UI box.
   skyDrawManiaPanel(6, CONTENT_Y - 2, 210, 22, 14, ILI9341_BLACK);
-  kartCanvas.setTextSize(2); kartCanvas.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
-  kartCanvas.setCursor(10, CONTENT_Y + 6); kartCanvas.print(picked.name);
+  kartCanvas->setTextSize(2); kartCanvas->setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+  kartCanvas->setCursor(10, CONTENT_Y + 6); kartCanvas->print(picked.name);
   skyDrawManiaPanel(6, CONTENT_Y + 22, 170, 14, 10, ILI9341_BLACK);
-  kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
-  kartCanvas.setCursor(10, CONTENT_Y + 28); kartCanvas.print(picked.special);
+  kartCanvas->setTextSize(1); kartCanvas->setTextColor(ILI9341_YELLOW, ILI9341_BLACK);
+  kartCanvas->setCursor(10, CONTENT_Y + 28); kartCanvas->print(picked.special);
 }
 // The title screen - PLAY / EXIT / INFO - shown once on a fresh entry from
 // the GAMEHUB app list (see the gameMode==8 assignment in keyboard()'s
@@ -5094,9 +5141,9 @@ constexpr int SKY_START_ANCHOR_Y = CONTENT_Y + 76;
 // Center's own icons already use elsewhere in this file - so the title
 // screen reads as an actual mark, not just a line of text.
 void skyDrawLogoMark(int x, int y, uint16_t color) {
-  kartCanvas.fillTriangle(x, y, x, y + 16, x + 30, y + 8, color);
-  kartCanvas.fillRect(x - 16, y + 6, 12, 2, color);
-  kartCanvas.fillRect(x - 26, y + 10, 8, 2, color);
+  kartCanvas->fillTriangle(x, y, x, y + 16, x + 30, y + 8, color);
+  kartCanvas->fillRect(x - 16, y + 6, 12, 2, color);
+  kartCanvas->fillRect(x - 26, y + 10, 8, 2, color);
 }
 void skyDrawStartScene(float dt) {
   skyDrawManiaGradient();
@@ -5109,14 +5156,14 @@ void skyDrawStartScene(float dt) {
   // drawn first so a shadow sliver peeks out bottom-right of the bright
   // text on top - the cheapest way to fake a bold/outlined game-logo look
   // out of GFX's plain, unweighted default font.
-  kartCanvas.setTextSize(2);
+  kartCanvas->setTextSize(2);
   int tx = 112, ty = CONTENT_Y + 12;
-  kartCanvas.setTextColor(0x2965, ILI9341_BLACK); kartCanvas.setCursor(tx + 2, ty + 2); kartCanvas.print("SKY");
-  kartCanvas.setTextColor(ILI9341_CYAN, ILI9341_BLACK); kartCanvas.setCursor(tx, ty); kartCanvas.print("SKY");
+  kartCanvas->setTextColor(0x2965, ILI9341_BLACK); kartCanvas->setCursor(tx + 2, ty + 2); kartCanvas->print("SKY");
+  kartCanvas->setTextColor(ILI9341_CYAN, ILI9341_BLACK); kartCanvas->setCursor(tx, ty); kartCanvas->print("SKY");
   tx += 3 * 12 + 8;
-  kartCanvas.setTextColor(0x2965, ILI9341_BLACK); kartCanvas.setCursor(tx + 2, ty + 2); kartCanvas.print("PILOT");
-  kartCanvas.setTextColor(ILI9341_YELLOW, ILI9341_BLACK); kartCanvas.setCursor(tx, ty); kartCanvas.print("PILOT");
-  kartCanvas.setTextSize(1);
+  kartCanvas->setTextColor(0x2965, ILI9341_BLACK); kartCanvas->setCursor(tx + 2, ty + 2); kartCanvas->print("PILOT");
+  kartCanvas->setTextColor(ILI9341_YELLOW, ILI9341_BLACK); kartCanvas->setCursor(tx, ty); kartCanvas->print("PILOT");
+  kartCanvas->setTextSize(1);
   static const char* items[SKY_START_OPTION_COUNT] = {"PLAY", "EXIT", "INFO"};
   for (int i = 0; i < SKY_START_OPTION_COUNT; ++i) {
     int y = SKY_START_ANCHOR_Y + (int)(i * SKY_START_ROW_H - skyStartScroll.cur);
@@ -5124,18 +5171,18 @@ void skyDrawStartScene(float dt) {
     bool sel = i == skyStartSelected;
     uint16_t panelCol = sel ? lerpColor565(ILI9341_ORANGE, ILI9341_YELLOW, 0.5f + 0.5f * sinf(millis() / 180.0f)) : ILI9341_BLACK;
     skyDrawManiaPanel(90, y - 5, 140, 22, 14, panelCol);
-    if (sel) kartCanvas.fillTriangle(80, y - 2, 80, y + 9, 88, y + 3, ILI9341_YELLOW);
-    kartCanvas.setTextSize(2);
-    kartCanvas.setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol);
+    if (sel) kartCanvas->fillTriangle(80, y - 2, 80, y + 9, 88, y + 3, ILI9341_YELLOW);
+    kartCanvas->setTextSize(2);
+    kartCanvas->setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol);
     int textW = (int)strlen(items[i]) * 12;
-    kartCanvas.setCursor(90 + (140 - textW) / 2, y);
-    kartCanvas.print(items[i]);
+    kartCanvas->setCursor(90 + (140 - textW) / 2, y);
+    kartCanvas->print(items[i]);
   }
-  kartCanvas.setTextSize(1);
+  kartCanvas->setTextSize(1);
   int unlocked = 0; for (int a = 0; a < SKY_ACHIEVEMENT_COUNT; ++a) if (skyAchievements & (1 << a)) unlocked++;
   String stats = "BEST " + String(skyBestScore) + "   ACHIEVEMENTS " + String(unlocked) + "/" + String(SKY_ACHIEVEMENT_COUNT);
-  kartCanvas.setTextColor(0x8C71, skyManiaBgAt(H - FOOTER_H - 16));
-  kartCanvas.setCursor(12, H - FOOTER_H - 16); kartCanvas.print(stats);
+  kartCanvas->setTextColor(0x8C71, skyManiaBgAt(H - FOOTER_H - 16));
+  kartCanvas->setCursor(12, H - FOOTER_H - 16); kartCanvas->print(stats);
 }
 // Achievements (with unlock state for the current save slot) and a compact
 // flight control reference - a static, non-scrolling screen since all 8
@@ -5147,18 +5194,18 @@ void skyDrawInfoScene(float dt) {
   skyDrawManiaRainbowStripe(CONTENT_Y - 4);
   int y = CONTENT_Y + 4;
   int unlocked = 0; for (int a = 0; a < SKY_ACHIEVEMENT_COUNT; ++a) if (skyAchievements & (1 << a)) unlocked++;
-  kartCanvas.setTextColor(ILI9341_YELLOW, skyManiaBgAt(y)); kartCanvas.setCursor(12, y);
-  kartCanvas.print("ACHIEVEMENTS  " + String(unlocked) + "/" + String(SKY_ACHIEVEMENT_COUNT) + " (SIMULATION ONLY)");
+  kartCanvas->setTextColor(ILI9341_YELLOW, skyManiaBgAt(y)); kartCanvas->setCursor(12, y);
+  kartCanvas->print("ACHIEVEMENTS  " + String(unlocked) + "/" + String(SKY_ACHIEVEMENT_COUNT) + " (SIMULATION ONLY)");
   y += 12;
   for (int a = 0; a < SKY_ACHIEVEMENT_COUNT; ++a) {
     bool got = skyAchievements & (1 << a);
-    kartCanvas.setTextColor(got ? ILI9341_GREEN : 0x8C71, skyManiaBgAt(y));
-    kartCanvas.setCursor(12, y);
-    kartCanvas.print(String(got ? "[X] " : "[ ] ") + skyAchievementNames[a]);
+    kartCanvas->setTextColor(got ? ILI9341_GREEN : 0x8C71, skyManiaBgAt(y));
+    kartCanvas->setCursor(12, y);
+    kartCanvas->print(String(got ? "[X] " : "[ ] ") + skyAchievementNames[a]);
     y += 10;
   }
   y += 4;
-  kartCanvas.setTextColor(ILI9341_YELLOW, skyManiaBgAt(y)); kartCanvas.setCursor(12, y); kartCanvas.print("CONTROLS");
+  kartCanvas->setTextColor(ILI9341_YELLOW, skyManiaBgAt(y)); kartCanvas->setCursor(12, y); kartCanvas->print("CONTROLS");
   y += 12;
   static const char* controls[] = {
     "W / A     THROTTLE UP / DOWN",
@@ -5171,8 +5218,8 @@ void skyDrawInfoScene(float dt) {
     "H         EXIT TO HOME",
   };
   for (const char* c : controls) {
-    kartCanvas.setTextColor(ILI9341_WHITE, skyManiaBgAt(y));
-    kartCanvas.setCursor(12, y); kartCanvas.print(c);
+    kartCanvas->setTextColor(ILI9341_WHITE, skyManiaBgAt(y));
+    kartCanvas->setCursor(12, y); kartCanvas->print(c);
     y += 10;
   }
 }
@@ -5185,7 +5232,7 @@ void skyDrawGameCatScene(float dt) {
   skyDrawHubStars(dt);
   skyDrawManiaRainbowStripe(CONTENT_Y - 4);
   skyListScrollUpdate(skyGameCatScroll, dt);
-  kartCanvas.setTextColor(ILI9341_WHITE, skyManiaBgAt(CONTENT_Y + 6)); kartCanvas.setCursor(12, CONTENT_Y + 6); kartCanvas.print("HOW DO YOU WANT TO FLY?");
+  kartCanvas->setTextColor(ILI9341_WHITE, skyManiaBgAt(CONTENT_Y + 6)); kartCanvas->setCursor(12, CONTENT_Y + 6); kartCanvas->print("HOW DO YOU WANT TO FLY?");
   static const char* names[2] = {"ARCADE", "SIMULATION"};
   static const char* subs[2] = {"FREE ROAM - NO FUEL, NO ACHIEVEMENTS", "AIRPORT TO AIRPORT - FUEL, WEATHER, ACHIEVEMENTS"};
   for (int i = 0; i < 2; ++i) {
@@ -5194,9 +5241,9 @@ void skyDrawGameCatScene(float dt) {
     bool sel = i == (int)skyGameCategory;
     uint16_t panelCol = sel ? lerpColor565(ILI9341_ORANGE, ILI9341_YELLOW, 0.5f + 0.5f * sinf(millis() / 180.0f)) : ILI9341_BLACK;
     skyDrawManiaPanel(8, y - 4, 304, 19, 12, panelCol);
-    if (sel) kartCanvas.fillTriangle(2, y - 1, 2, y + 8, 9, y + 3, ILI9341_YELLOW);
-    kartCanvas.setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas.setCursor(15, y); kartCanvas.print(names[i]);
-    kartCanvas.setTextColor(0x8C71, skyManiaBgAt(y + 18)); kartCanvas.setCursor(15, y + 18); kartCanvas.print(subs[i]);
+    if (sel) kartCanvas->fillTriangle(2, y - 1, 2, y + 8, 9, y + 3, ILI9341_YELLOW);
+    kartCanvas->setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas->setCursor(15, y); kartCanvas->print(names[i]);
+    kartCanvas->setTextColor(0x8C71, skyManiaBgAt(y + 18)); kartCanvas->setCursor(15, y + 18); kartCanvas->print(subs[i]);
   }
 }
 // MODE/OPTIONS content, drawn onto kartCanvas (not tft directly) so the
@@ -5217,7 +5264,7 @@ void skyDrawModeScene(float dt) {
   skyDrawManiaRainbowStripe(CONTENT_Y - 4);
   skyListScrollUpdate(skyModeScroll, dt);
   static const char* modes[SKY_MODE_OPTION_COUNT] = {"FREE ROAM - RUNWAY START", "FREE ROAM - AIRBORNE START", "AIRPORT TO AIRPORT", "SPECTATE - WATCH BOTS"};
-  kartCanvas.setTextColor(ILI9341_WHITE, skyManiaBgAt(CONTENT_Y + 6)); kartCanvas.setCursor(12, CONTENT_Y + 6); kartCanvas.print("BEST DISTANCE  " + String(skyBestScore));
+  kartCanvas->setTextColor(ILI9341_WHITE, skyManiaBgAt(CONTENT_Y + 6)); kartCanvas->setCursor(12, CONTENT_Y + 6); kartCanvas->print("BEST DISTANCE  " + String(skyBestScore));
   for (int row = 0; row < SKY_MODE_ARCADE_ROWS; ++row) {
     int y = SKY_MODE_ANCHOR_Y + (int)(row * SKY_MODE_ROW_H - skyModeScroll.cur);
     if (y < CONTENT_Y - SKY_MODE_ROW_H || y > H - FOOTER_H) continue;
@@ -5225,10 +5272,10 @@ void skyDrawModeScene(float dt) {
     bool sel = value == skyModeSelected;
     uint16_t panelCol = sel ? lerpColor565(ILI9341_ORANGE, ILI9341_YELLOW, 0.5f + 0.5f * sinf(millis() / 180.0f)) : ILI9341_BLACK;
     skyDrawManiaPanel(8, y - 4, 304, 19, 12, panelCol);
-    if (sel) kartCanvas.fillTriangle(2, y - 1, 2, y + 8, 9, y + 3, ILI9341_YELLOW);
-    kartCanvas.setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas.setCursor(15, y); kartCanvas.print(modes[value]);
+    if (sel) kartCanvas->fillTriangle(2, y - 1, 2, y + 8, 9, y + 3, ILI9341_YELLOW);
+    kartCanvas->setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas->setCursor(15, y); kartCanvas->print(modes[value]);
   }
-  kartCanvas.setTextColor(0x8C71, skyManiaBgAt(CONTENT_Y + 130)); kartCanvas.setCursor(12, CONTENT_Y + 130); kartCanvas.print("How you start the flight.");
+  kartCanvas->setTextColor(0x8C71, skyManiaBgAt(CONTENT_Y + 130)); kartCanvas->setCursor(12, CONTENT_Y + 130); kartCanvas->print("How you start the flight.");
 }
 // Shared with skyPlayStageTransition() below, which needs to paint just the
 // chrome for the stage it's switching to without also blitting the content
@@ -5250,17 +5297,17 @@ void skyPaintHubChrome() {
 }
 void drawSkyPilotHubStart() {
   skyDrawStartScene(0);
-  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
   skyPaintHubChrome();
 }
 void drawSkyPilotHubGameCat() {
   skyDrawGameCatScene(0);
-  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
   skyPaintHubChrome();
 }
 void drawSkyPilotHubMode() {
   skyDrawModeScene(0);
-  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
   skyPaintHubChrome();
 }
 
@@ -5273,7 +5320,7 @@ void drawSkyPilotHubMode() {
 // every animation tick visibly flickered.
 void drawSkyPilotHubPlane() {
   skyDrawPlanePreviewScene();
-  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
   skyPaintHubChrome();
 }
 
@@ -5335,8 +5382,8 @@ void skyDrawOptionsScene(float dt) {
   skyListScrollUpdate(skyOptScroll, dt);
   int rowCount = skyOptRowCount();
   int viewTop = SKY_OPTIONS_ANCHOR_Y - (SKY_OPTIONS_VISIBLE / 2) * SKY_OPTIONS_ROW_H;
-  if (skyOptScroll.cur > 0.5f) { kartCanvas.setTextColor(0x8C71, skyManiaBgAt(viewTop - 12)); kartCanvas.setCursor(152, viewTop - 12); kartCanvas.print("^"); }
-  if (skyOptScroll.cur < (rowCount - 1) * SKY_OPTIONS_ROW_H - 0.5f) { kartCanvas.setTextColor(0x8C71, skyManiaBgAt(viewTop + SKY_OPTIONS_VISIBLE * SKY_OPTIONS_ROW_H + 2)); kartCanvas.setCursor(152, viewTop + SKY_OPTIONS_VISIBLE * SKY_OPTIONS_ROW_H + 2); kartCanvas.print("v"); }
+  if (skyOptScroll.cur > 0.5f) { kartCanvas->setTextColor(0x8C71, skyManiaBgAt(viewTop - 12)); kartCanvas->setCursor(152, viewTop - 12); kartCanvas->print("^"); }
+  if (skyOptScroll.cur < (rowCount - 1) * SKY_OPTIONS_ROW_H - 0.5f) { kartCanvas->setTextColor(0x8C71, skyManiaBgAt(viewTop + SKY_OPTIONS_VISIBLE * SKY_OPTIONS_ROW_H + 2)); kartCanvas->setCursor(152, viewTop + SKY_OPTIONS_VISIBLE * SKY_OPTIONS_ROW_H + 2); kartCanvas->print("v"); }
   for (int i = 0; i < rowCount; ++i) {
     int y = SKY_OPTIONS_ANCHOR_Y + (int)(i * SKY_OPTIONS_ROW_H - skyOptScroll.cur);
     if (y < CONTENT_Y - SKY_OPTIONS_ROW_H || y > H - FOOTER_H) continue;
@@ -5344,31 +5391,31 @@ void skyDrawOptionsScene(float dt) {
     bool sel = i == skyOptionsSelected;
     uint16_t panelCol = sel ? lerpColor565(ILI9341_ORANGE, ILI9341_YELLOW, 0.5f + 0.5f * sinf(millis() / 180.0f)) : ILI9341_BLACK;
     skyDrawManiaPanel(8, y - 4, 304, 18, 10, panelCol);
-    if (sel) kartCanvas.fillTriangle(2, y - 1, 2, y + 7, 9, y + 3, ILI9341_YELLOW);
+    if (sel) kartCanvas->fillTriangle(2, y - 1, 2, y + 7, 9, y + 3, ILI9341_YELLOW);
     uint16_t valueCol = sel ? ILI9341_BLACK : ILI9341_CYAN;
-    kartCanvas.setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas.setCursor(15, y);
+    kartCanvas->setTextColor(sel ? ILI9341_BLACK : ILI9341_WHITE, panelCol); kartCanvas->setCursor(15, y);
     if (row == OPT_START_FLIGHT) {
-      kartCanvas.setTextColor(sel ? 0x03E0 /*dark green on bright panel*/ : ILI9341_GREEN, panelCol); kartCanvas.print("START FLIGHT");
+      kartCanvas->setTextColor(sel ? 0x03E0 /*dark green on bright panel*/ : ILI9341_GREEN, panelCol); kartCanvas->print("START FLIGHT");
       continue;
     }
     if (row == OPT_ACHIEVEMENTS) {
-      kartCanvas.print("ACHIEVEMENTS");
+      kartCanvas->print("ACHIEVEMENTS");
       int count = 0; for (int a = 0; a < SKY_ACHIEVEMENT_COUNT; ++a) if (skyAchievements & (1 << a)) count++;
-      kartCanvas.setTextColor(valueCol, panelCol); kartCanvas.setCursor(240, y); kartCanvas.print(String(count) + "/" + String(SKY_ACHIEVEMENT_COUNT));
+      kartCanvas->setTextColor(valueCol, panelCol); kartCanvas->setCursor(240, y); kartCanvas->print(String(count) + "/" + String(SKY_ACHIEVEMENT_COUNT));
       continue;
     }
-    kartCanvas.print(skyOptRowName(row));
-    kartCanvas.setTextColor(valueCol, panelCol); kartCanvas.setCursor(240, y); kartCanvas.print(skyOptionValue(row));
+    kartCanvas->print(skyOptRowName(row));
+    kartCanvas->setTextColor(valueCol, panelCol); kartCanvas->setCursor(240, y); kartCanvas->print(skyOptionValue(row));
   }
 }
 void drawSkyPilotHubOptions() {
   skyDrawOptionsScene(0);
-  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
   skyPaintHubChrome();
 }
 void drawSkyPilotHubInfo() {
   skyDrawInfoScene(0);
-  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
   skyPaintHubChrome();
 }
 
@@ -5437,7 +5484,7 @@ void stepSkyPilotHub() {
     skyDrawStartScene(dt);
   }
   int bandH = H - HEADER_H - FOOTER_H;
-  tft.drawRGBBitmap(0, HEADER_H, kartCanvas.getBuffer() + (size_t)HEADER_H * kartCanvas.width(), kartCanvas.width(), bandH);
+  tft.drawRGBBitmap(0, HEADER_H, kartCanvas->getBuffer() + (size_t)HEADER_H * kartCanvas->width(), kartCanvas->width(), bandH);
 }
 // Same right-leaning parallelogram as skyDrawManiaPanel(), just drawn
 // straight onto tft instead of kartCanvas - used for the full-screen wipe
@@ -5496,7 +5543,7 @@ void skyDrawCanvasSlice(int x, int y, int w, int h) {
   tft.startWrite();
   tft.setAddrWindow(x, y, w, h);
   for (int row = 0; row < h; ++row) {
-    uint16_t* rowPtr = kartCanvas.getBuffer() + (size_t)(y + row) * kartCanvas.width() + x;
+    uint16_t* rowPtr = kartCanvas->getBuffer() + (size_t)(y + row) * kartCanvas->width() + x;
     tft.writePixels(rowPtr, w, true, false);
   }
   tft.endWrite();
@@ -5607,16 +5654,16 @@ void skyPlayEndSequence(const char* text, uint16_t color, bool win) {
     cam.fovY = 60.0f;
     KVec3 planeFwd{cosf(skyPlane.pitch) * sinf(skyPlane.heading), sinf(skyPlane.pitch), cosf(skyPlane.pitch) * cosf(skyPlane.heading)};
     skyRenderScene(cam, planeFwd, false);
-    kartCanvas.setTextSize(3);
-    kartCanvas.setTextColor(color, ILI9341_BLACK);
+    kartCanvas->setTextSize(3);
+    kartCanvas->setTextColor(color, ILI9341_BLACK);
     int16_t bx, by; uint16_t bw, bh;
-    kartCanvas.getTextBounds(text, 0, 0, &bx, &by, &bw, &bh);
+    kartCanvas->getTextBounds(text, 0, 0, &bx, &by, &bw, &bh);
     // Near the top rather than dead-center - the orbiting subject (the
     // plane) sits at screen-center by construction, so centered text
     // covered it for the entire sequence.
-    kartCanvas.setCursor(kartCanvas.width() / 2 - (int)bw / 2 - bx, (int)(kartCanvas.height() * 0.16f) - (int)bh / 2 - by);
-    kartCanvas.print(text);
-    tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+    kartCanvas->setCursor(kartCanvas->width() / 2 - (int)bw / 2 - bx, (int)(kartCanvas->height() * 0.16f) - (int)bh / 2 - by);
+    kartCanvas->print(text);
+    tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
     M5Cardputer.update();
     delay(28);
   }
@@ -5625,17 +5672,17 @@ void skyPlayEndSequence(const char* text, uint16_t color, bool win) {
   // which sets its own text size, having never needed to before this
   // function started changing it) - the whole menu would render at 3x
   // size after any landing or crash.
-  kartCanvas.setTextSize(1);
+  kartCanvas->setTextSize(1);
 }
 
 void skyDrawPausedOverlay() {
-  int w = kartCanvas.width(), h = kartCanvas.height();
-  kartCanvas.fillRect(w / 2 - 74, h / 2 - 24, 148, 48, ILI9341_BLACK);
-  kartCanvas.drawRect(w / 2 - 74, h / 2 - 24, 148, 48, ILI9341_WHITE);
-  kartCanvas.setTextSize(2); kartCanvas.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
-  kartCanvas.setCursor(w / 2 - 48, h / 2 - 18); kartCanvas.print("PAUSED");
-  kartCanvas.setTextSize(1); kartCanvas.setTextColor(ILI9341_LIGHTGREY, ILI9341_BLACK);
-  kartCanvas.setCursor(w / 2 - 60, h / 2 + 6); kartCanvas.print("` RESUME   H EXIT");
+  int w = kartCanvas->width(), h = kartCanvas->height();
+  kartCanvas->fillRect(w / 2 - 74, h / 2 - 24, 148, 48, ILI9341_BLACK);
+  kartCanvas->drawRect(w / 2 - 74, h / 2 - 24, 148, 48, ILI9341_WHITE);
+  kartCanvas->setTextSize(2); kartCanvas->setTextColor(ILI9341_WHITE, ILI9341_BLACK);
+  kartCanvas->setCursor(w / 2 - 48, h / 2 - 18); kartCanvas->print("PAUSED");
+  kartCanvas->setTextSize(1); kartCanvas->setTextColor(ILI9341_LIGHTGREY, ILI9341_BLACK);
+  kartCanvas->setCursor(w / 2 - 60, h / 2 + 6); kartCanvas->print("` RESUME   H EXIT");
 }
 
 // Continuous per-frame flight loop - called unconditionally every loop()
@@ -5675,7 +5722,7 @@ void stepSkyPilotFlight() {
     // canvas already holds from the last real frame, rather than
     // re-rendering the scene or advancing dt, so nothing moves at all.
     skyDrawPausedOverlay();
-    tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+    tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
     return;
   }
   if (skyTimeMode == 2) { skyTimeOfDay = fmodf(skyTimeOfDay + dt * (24.0f * 1000.0f / SKY_DAY_LENGTH_MS), 24.0f); }
@@ -5715,7 +5762,7 @@ void stepSkyPilotFlight() {
     cam.fovY = 68.0f;
     skyRenderScene(cam, rollFwd, false);
     skyRenderHud(false, false);
-    tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+    tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
     if (skyPlane.speed < 0.5f) {
       skyStopping = false;
       skyMissionSuccess = true;
@@ -5785,7 +5832,7 @@ void stepSkyPilotFlight() {
     }
     skyRenderScene(cam, fwd, skyFirstPerson);
     skyRenderHud(false, false);
-    tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+    tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
     return;
   }
 
@@ -6047,7 +6094,7 @@ void stepSkyPilotFlight() {
   skyRenderScene(cam, fwd, skyFirstPerson);
   skyRenderHud(stalling, pullUp);
   skyDrawSonicBoomEffect();
-  tft.drawRGBBitmap(0, 0, kartCanvas.getBuffer(), kartCanvas.width(), kartCanvas.height());
+  tft.drawRGBBitmap(0, 0, kartCanvas->getBuffer(), kartCanvas->width(), kartCanvas->height());
 }
 // ============================================================================
 
@@ -8757,7 +8804,8 @@ void startBleCompanion() {
   }
   // NimBLE's own init needs a real, roughly ~55KB contiguous heap block
   // (see ensureBleReady()'s own comment) that this device - no PSRAM, and
-  // kartCanvas alone permanently holds ~150KB - doesn't always have free.
+  // kartCanvas alone takes ~150KB whenever Kart Racer/Sky Pilot is open -
+  // doesn't always have free.
   // Confirmed by an actual crash report: "BLE_INIT: Malloc failed" logged
   // three times in a row from inside bleKeyboard.begin() itself, then heap
   // corruption once something wrote through a pointer from one of those
@@ -9001,8 +9049,8 @@ void startRadio() {
   // internal buffers/tables, historically only a handful of KB) - a real
   // requirement closer to 15-25KB, not the ~55-65KB BLE/TLS need. 30KB
   // keeps a genuine safety margin above that without failing needlessly
-  // on a device this heap-constrained (no PSRAM, kartCanvas alone holds
-  // ~150KB permanently).
+  // on a device this heap-constrained (no PSRAM, kartCanvas alone takes
+  // ~150KB whenever Kart Racer/Sky Pilot is open).
   uint32_t freeHeap = ESP.getFreeHeap();
   Serial.printf("[RADIO] free heap before stream start: %u bytes\n", freeHeap);
   if (freeHeap < 30000) {
@@ -9784,7 +9832,7 @@ void keyboard() {
                   : SkyHubStage::START;  // GAMECAT or INFO -> START
       skyPlayStageTransition(-1);
     }
-    else if (page == GAMEHUB && gameMode != 0) { gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyMenuMusicStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else if (page == RADIO && radioPlaying) { stopRadio(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
+    else if (page == GAMEHUB && gameMode != 0) { bool wasHeavy = gameMode == 3 || gameMode == 8; gameMode = 0; snakeRunning = false; kartRaceState = KART_HOME; kartMusicEngineStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::MODE; skyEngineToneStop(); skyMenuMusicStop(); skyPaused = false; if (skySpectating) { skyPlaneModelIndex = skyPreSpectateModelIndex; skySpectating = false; } if (wasHeavy) kartCanvasFree(); } else if (page == CLAB && cInputActive) { cInputActive = false; cInputValueCount = 0; cInputReadIndex = 0; cInputBuffer = ""; cLabExplorerVisible = true; } else if (page == CLAB && cCanvasActive) { cCanvasActive = false; } else if (page == CLAB && cLabGuideVisible) cLabGuideVisible = false; else if ((page == CLAB || page == CARDCREPL) && cLabQrActive) cLabQrActive = false; else if (page == CLAB) { if (cLabDirty) { cLabSaveDialogSelected = 0; cLabSaveDialogVisible = true; } else cLabExplorerVisible = true; } else if (page == MINICAM && miniCamUiMode != MiniCamUiMode::LIVE) { miniCamUiMode = MiniCamUiMode::LIVE; miniCamNeedsRedraw = true; } else if (page == MINICAM) { miniCamLeaveNetwork(); page = LAUNCHER; launcherHome = true; } else if (page == RADIO && radioPlaying) { stopRadio(); page = LAUNCHER; launcherHome = true; } else { page = LAUNCHER; launcherHome = true; } redrawNeeded = true; }
   }
   fnLast = fn;
   // Opt cycles through three states from any page, any time - independent
@@ -10093,15 +10141,23 @@ void keyboard() {
     if (gameMode == 0) {
       for (char c : k.word) { if (c == ';') { gameMenuSelected = (gameMenuSelected + GAME_COUNT - 1) % GAME_COUNT; redrawNeeded = true; } else if (c == '.') { gameMenuSelected = (gameMenuSelected + 1) % GAME_COUNT; redrawNeeded = true; } }
       if (k.enter) {
+        // Kart Racer and Sky Pilot share the one malloc'd-on-demand kartCanvas
+        // (see its own comment) - entering either needs it opened first, and
+        // on a heap-constrained boot (no PSRAM) that can fail, so these two
+        // get their own guarded branch instead of the plain gameMode set the
+        // other games use.
+        bool heavyBlocked = false;
         if (gameMenuSelected == 0) { gameMode = 1; startSnakeGame(); }
         else if (gameMenuSelected == 1) { gameMode = 2; huntCursor = random(0, 9); huntTarget = random(0, 9); if (huntTarget == huntCursor) huntTarget = (huntTarget + 1) % 9; huntScore = 0; }
-        else if (gameMenuSelected == 2) { gameMode = 3; kartRaceState = KART_HOME; }
+        else if (gameMenuSelected == 2) { if (kartCanvasOpen()) { gameMode = 3; kartRaceState = KART_HOME; } else heavyBlocked = true; }
         else if (gameMenuSelected == 3) { gameMode = 4; startG2048Game(); }
         else if (gameMenuSelected == 4) { gameMode = 5; startMinesweeperGame(); }
         else if (gameMenuSelected == 5) { gameMode = 6; startBreakoutGame(); }
         else if (gameMenuSelected == 6) { gameMode = 7; startTetrisGame(); }
-        else { gameMode = 8; skyState = SKY_HOME; skyHubStage = SkyHubStage::START; }
-        playEnterSound(); redrawNeeded = true;
+        else if (kartCanvasOpen()) { gameMode = 8; skyState = SKY_HOME; skyHubStage = SkyHubStage::START; }
+        else heavyBlocked = true;
+        if (heavyBlocked) playBlockedSound(); else playEnterSound();
+        redrawNeeded = true;
       }
       return;
     }
@@ -10208,7 +10264,7 @@ void keyboard() {
             else if (skyStartSelected == 1) {
               // EXIT - leave Sky Pilot back to the GAMEHUB app list, the
               // same cleanup the global Fn-exit handler does elsewhere.
-              gameMode = 0; skyMenuMusicStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::START; skyPaused = false;
+              gameMode = 0; skyMenuMusicStop(); skyState = SKY_HOME; skyHubStage = SkyHubStage::START; skyPaused = false; kartCanvasFree();
             } else { skyHubStage = SkyHubStage::INFO; skyPlayStageTransition(1); }
             redrawNeeded = true;
           }
