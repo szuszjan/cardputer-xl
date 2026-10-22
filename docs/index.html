@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CardputerXL</title>
-<meta name="description" content="Browser ports of games from the CardputerXL firmware — a single-file 'OS' built for the M5Stack Cardputer.">
+<meta name="description" content="CardputerXL: a single-file firmware OS for the M5Stack Cardputer-ADV with ~30 built-in apps, a CardC scripting IDE, and a 3D kart racer. Flash it straight from your browser.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.85em%22 font-size=%2290%22>▦</text></svg>">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Titillium+Web:wght@400;600;700;900&family=IBM+Plex+Mono:wght@500;600&display=swap">
 <style>
@@ -13,7 +13,7 @@ html,body{margin:0}
 img{max-width:100%}
 :root{
   --bg:#0b0d0f; --panel:#131619; --panel-2:#181c1f; --line:#262b2f;
-  --accent:#5ad1e6; --accent-dim:#215a63; --amber:#f5a623; --red:#ff3b3b; --green:#34d17c;
+  --accent:#5ad1e6; --accent-dim:#215a63; --amber:#f5a623; --red:#ff3b3b; --green:#34d17c; --purple:#b388ff;
   --text:#e9edee; --dim:#8a9296; --dim-2:#4d5457;
   --font-display:'Titillium Web',system-ui,sans-serif;
   --font-body:'Titillium Web',system-ui,sans-serif;
@@ -28,7 +28,13 @@ body{
   color:var(--text); font-family:var(--font-body);
   padding:16px; padding-block:32px;
 }
-.wrap{ max-width:900px; margin:0 auto; display:flex; flex-direction:column; gap:28px; }
+a{ color:var(--accent); }
+.wrap{ max-width:900px; margin:0 auto; display:flex; flex-direction:column; gap:48px; }
+
+nav{ display:flex; flex-wrap:wrap; gap:4px 18px; font-family:var(--font-mono); font-size:12px; }
+nav a{ color:var(--dim); text-decoration:none; }
+nav a:hover{ color:var(--accent); }
+
 header.hero{ display:flex; flex-direction:column; gap:10px; }
 .eyebrow{ font-family:var(--font-mono); font-size:11px; letter-spacing:.18em; color:var(--accent); text-transform:uppercase; }
 h1{
@@ -36,9 +42,39 @@ h1{
   letter-spacing:.01em; text-wrap:balance;
 }
 h1 .xl{ color:var(--accent) }
-.lede{ color:var(--dim); font-size:15px; max-width:62ch; line-height:1.55; margin:0; }
+.lede{ color:var(--dim); font-size:15px; max-width:64ch; line-height:1.55; margin:0; }
 .lede code{ font-family:var(--font-mono); background:var(--panel-2); border:1px solid var(--line); border-radius:4px; padding:1px 6px; color:var(--text); font-size:.9em; }
 
+.btn-row{ display:flex; gap:10px; flex-wrap:wrap; margin-top:4px; }
+.btn{
+  font-family:var(--font-mono); font-size:12.5px; font-weight:600; letter-spacing:.03em;
+  padding:11px 18px; border-radius:8px; text-decoration:none; cursor:pointer;
+  border:1px solid var(--line); background:var(--panel); color:var(--text);
+  transition:transform .15s ease, border-color .15s ease, background .15s ease;
+  display:inline-flex; align-items:center; gap:8px;
+}
+.btn:hover{ transform:translateY(-2px); border-color:var(--accent-dim); background:var(--panel-2); }
+.btn-accent{ background:var(--accent); border-color:var(--accent); color:#06262b; }
+.btn-accent:hover{ background:#7adcee; border-color:#7adcee; }
+
+section{ display:flex; flex-direction:column; gap:16px; scroll-margin-top:20px; }
+section h2{ font-family:var(--font-display); font-weight:700; font-size:22px; margin:0; }
+section > p.sub{ color:var(--dim); font-size:13.5px; margin:-8px 0 0; max-width:62ch; }
+
+/* ---- flash section ---- */
+.flash-box{
+  background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:26px;
+  display:flex; flex-direction:column; gap:16px; align-items:flex-start;
+}
+.flash-box .version-pill{
+  font-family:var(--font-mono); font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--accent); border:1px solid var(--accent-dim); border-radius:100px; padding:3px 10px;
+}
+.flash-note{ font-size:12.5px; color:var(--dim); line-height:1.6; }
+.flash-note b{ color:var(--text); }
+esp-web-install-button{ display:inline-block; }
+
+/* ---- feature grid ---- */
 .grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:14px; }
 .card{
   position:relative; background:var(--panel); border:1px solid var(--line); border-radius:10px;
@@ -49,7 +85,7 @@ h1 .xl{ color:var(--accent) }
 .card:hover, .card:focus-visible{ transform:translateY(-2px); border-color:var(--card-accent,var(--accent-dim)); background:var(--panel-2); outline:none; }
 .card:focus-visible{ box-shadow:0 0 0 2px var(--card-accent,var(--accent)); }
 .card .icon{ font-size:26px; line-height:1; }
-.card h2{ font-family:var(--font-display); font-weight:700; font-size:17px; margin:0; letter-spacing:.01em; }
+.card h3{ font-family:var(--font-display); font-weight:700; font-size:16px; margin:0; letter-spacing:.01em; }
 .card p{ margin:0; color:var(--dim); font-size:12.5px; line-height:1.5; flex:1; }
 .card .tag{
   align-self:flex-start; font-family:var(--font-mono); font-size:9.5px; letter-spacing:.1em; text-transform:uppercase;
@@ -58,6 +94,18 @@ h1 .xl{ color:var(--accent) }
 .card.disabled{ opacity:.45; cursor:not-allowed; }
 .card.disabled:hover{ transform:none; border-color:var(--line); background:var(--panel); }
 .card.disabled .tag{ color:var(--dim); border-color:var(--line); }
+
+/* ---- controls table ---- */
+table.keys{ border-collapse:collapse; font-size:13px; }
+table.keys td, table.keys th{ padding:7px 16px 7px 0; text-align:left; border-bottom:1px solid var(--line); }
+table.keys th{ color:var(--dim); font-weight:600; font-size:11px; letter-spacing:.08em; text-transform:uppercase; }
+table.keys kbd{ font-family:var(--font-mono); background:var(--panel-2); border:1px solid var(--line); border-radius:4px; padding:2px 7px; }
+
+/* ---- build section ---- */
+pre.code{
+  background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px;
+  font-family:var(--font-mono); font-size:12px; color:var(--accent); overflow-x:auto; margin:0;
+}
 
 footer{ display:flex; flex-direction:column; gap:8px; padding-top:8px; border-top:1px solid var(--line); }
 footer p{ margin:0; color:var(--dim-2); font-size:11.5px; font-family:var(--font-mono); line-height:1.6; }
@@ -68,48 +116,193 @@ footer a{ color:var(--dim); }
 </head>
 <body>
 <div class="wrap">
+
+  <nav>
+    <a href="#flash">Flash</a>
+    <a href="#apps">Apps</a>
+    <a href="#demos">Browser demos</a>
+    <a href="#controls">Controls</a>
+    <a href="#build">Build from source</a>
+    <a href="https://github.com/szuszjan/cardputer-xl">GitHub ↗</a>
+  </nav>
+
   <header class="hero">
-    <div class="eyebrow">Browser Ports</div>
+    <div class="eyebrow">M5Stack Cardputer-ADV Firmware</div>
     <h1>CARDPUTER<span class="xl">XL</span></h1>
     <p class="lede">
-      CardputerXL is a single-file firmware — one giant <code>.cpp</code> — that turns an
-      M5Stack Cardputer into a pocket "OS": launcher, games, tools, all on a 320×240 screen.
-      This page collects the parts of it that translate to a keyboard and a browser tab.
-      The rest — a full C interpreter, BLE keyboard emulation, Wi-Fi scanning, a camera
-      link — stays on the actual hardware.
+      A single-file "OS"/app launcher for the Cardputer-ADV — one big firmware image instead of
+      a collection of separate apps. Around 30 built-in apps: system tools, a <code>CardC</code>
+      scripting IDE, a full 3D kart racer and a vector flight sim, Wi-Fi and BLE tools, an
+      encrypted code vault, and a floating quick-launch menu that pops up over anything.
     </p>
+    <div class="btn-row">
+      <a class="btn btn-accent" href="#flash">⚡ Flash it now</a>
+      <a class="btn" href="#demos">▶ Play in browser</a>
+      <a class="btn" href="https://github.com/szuszjan/cardputer-xl">Source on GitHub</a>
+    </div>
   </header>
 
-  <div class="grid" id="grid">
-    <a class="card" style="--card-accent:#f5a623" href="skypilot/">
-      <span class="icon">✈️</span>
-      <h2>Sky Pilot</h2>
-      <p>Cross-country vector flight sim. Six planes, five airports, mountains and lakes you should not attempt to land on.</p>
-      <span class="tag">Flight Sim</span>
-    </a>
-    <a class="card" style="--card-accent:#ff3b3b" href="kartracer/">
-      <span class="icon">🏁</span>
-      <h2>Kart Racer</h2>
-      <p>Solo time trial across three procedural circuits. Beat your own best lap, saved locally per track.</p>
-      <span class="tag">Racing</span>
-    </a>
-    <div class="card disabled" style="--card-accent:#34d17c" aria-disabled="true">
-      <span class="icon">🐍</span>
-      <h2>Snake</h2>
-      <p>Coming next — the classic, plus 2048, Minesweeper, Breakout and Tetris from the device's GAMEHUB.</p>
-      <span class="tag">In Progress</span>
+  <section id="flash">
+    <h2>Flash it from your browser</h2>
+    <p class="sub">No Arduino IDE, no drivers — Web Serial flashes the merged firmware image straight from this page.</p>
+    <div class="flash-box">
+      <span class="version-pill">v1.2.0 · ESP32-S3 · 4&nbsp;MB image</span>
+      <esp-web-install-button manifest="firmware/manifest.json">
+        <button slot="activate" class="btn btn-accent">⚡ Connect &amp; Flash CardputerXL</button>
+        <span slot="unsupported" class="flash-note">
+          Your browser doesn't support Web Serial. Open this page in <b>Chrome</b> or <b>Edge</b>
+          on a desktop (not available on iOS, and not yet in Firefox/Safari).
+        </span>
+        <span slot="not-allowed" class="flash-note">
+          Web Serial needs HTTPS — you're fine on this page, but a local copy over
+          plain <code>http://</code> won't work.
+        </span>
+      </esp-web-install-button>
+      <p class="flash-note">
+        Plug the Cardputer-ADV in over USB-C, click the button above, and pick its serial port
+        when Chrome/Edge asks. This writes the full <b>v1.2.0 merged image</b> (bootloader +
+        partitions + app in one file) starting at offset 0 — it replaces whatever firmware is
+        currently on the device. Hold <kbd>`</kbd> at power-on afterwards if you ever need
+        Recovery Mode (reboot / factory reset / hardware self-test).
+      </p>
     </div>
-    <div class="card disabled" style="--card-accent:#8a9296" aria-disabled="true">
-      <span class="icon">C</span>
-      <h2>C Lab</h2>
-      <p>A full C interpreter with its own file explorer, live on the actual hardware. Not planned for the browser.</p>
-      <span class="tag">Hardware Only</span>
+  </section>
+
+  <section id="apps">
+    <h2>~30 apps, one firmware</h2>
+    <p class="sub">Reachable from the Home screen, the full app list, or the floating quick-launch menu (<kbd>Opt</kbd> from anywhere).</p>
+    <div class="grid">
+      <div class="card" style="--card-accent:var(--accent)">
+        <span class="icon">🛠️</span>
+        <h3>System tools</h3>
+        <p>Device info, file browser, favourites, text tools (case/base64), calculator, notes, clock.</p>
+        <span class="tag">Utilities</span>
+      </div>
+      <div class="card" style="--card-accent:var(--accent)">
+        <span class="icon">📶</span>
+        <h3>Wi-Fi &amp; network</h3>
+        <p>Wi-Fi scanner/monitor, Wi-Fi setup, a local web companion server, an internet radio player.</p>
+        <span class="tag">Connectivity</span>
+      </div>
+      <div class="card" style="--card-accent:var(--purple)">
+        <span class="icon">C</span>
+        <h3>C LAB</h3>
+        <p>An on-device IDE for CardC — a tiny, safe, local-only C-style scripting language this firmware interprets itself — plus a one-line REPL and example programs.</p>
+        <span class="tag">Scripting</span>
+      </div>
+      <div class="card" style="--card-accent:var(--red)">
+        <span class="icon">🏁</span>
+        <h3>Kart Racer</h3>
+        <p>Full 3D wireframe/solid go-kart time trial: 5 procedural tracks, drift boost, wall collision, best-lap saving, haptic + audio feedback.</p>
+        <span class="tag">Game</span>
+      </div>
+      <div class="card" style="--card-accent:var(--amber)">
+        <span class="icon">✈️</span>
+        <h3>Sky Pilot</h3>
+        <p>Cross-country vector flight sim — six planes, five airports, mountains and lakes you should not attempt to land on.</p>
+        <span class="tag">Game</span>
+      </div>
+      <div class="card" style="--card-accent:var(--green)">
+        <span class="icon">🐍</span>
+        <h3>Snake &amp; Grid Hunt</h3>
+        <p>Two more built-in games alongside Kart Racer and Sky Pilot.</p>
+        <span class="tag">Game</span>
+      </div>
+      <div class="card" style="--card-accent:var(--accent)">
+        <span class="icon">🎨</span>
+        <h3>Mini Paint</h3>
+        <p>A 16×12 pixel canvas editor, built for a 320×240 screen.</p>
+        <span class="tag">Creative</span>
+      </div>
+      <div class="card" style="--card-accent:var(--accent)">
+        <span class="icon">🎵</span>
+        <h3>Music Lab</h3>
+        <p>A 4-track, 16-step drum sequencer, plus QR code tools, a device self-test, and dice/random.</p>
+        <span class="tag">Creative</span>
+      </div>
+      <div class="card" style="--card-accent:var(--red)">
+        <span class="icon">🔒</span>
+        <h3>Lock &amp; vault</h3>
+        <p>A PIN lock screen and an encrypted TOTP/loyalty-code vault, saved to flash.</p>
+        <span class="tag">Security</span>
+      </div>
+      <div class="card" style="--card-accent:var(--red)">
+        <span class="icon">⌨️</span>
+        <h3>BLE keyboard mode</h3>
+        <p>Turns the Cardputer into a Bluetooth HID keyboard.</p>
+        <span class="tag">Security</span>
+      </div>
+      <div class="card" style="--card-accent:var(--purple)">
+        <span class="icon">📱</span>
+        <h3>BLE companion app</h3>
+        <p>A matching Android app (see <code>android-companion/</code> in the repo) for remote control over BLE.</p>
+        <span class="tag">Companion</span>
+      </div>
+      <div class="card" style="--card-accent:var(--purple)">
+        <span class="icon">🖨️</span>
+        <h3>Bambu printer monitor</h3>
+        <p>Keep an eye on a Bambu Lab 3D printer's status without leaving your desk.</p>
+        <span class="tag">Connectivity</span>
+      </div>
     </div>
-  </div>
+  </section>
+
+  <section id="demos">
+    <h2>Play it in the browser</h2>
+    <p class="sub">The parts of CardputerXL that translate to a keyboard and a browser tab. The rest — the C interpreter, BLE, Wi-Fi, the camera link — stays on the actual hardware.</p>
+    <div class="grid">
+      <a class="card" style="--card-accent:#f5a623" href="skypilot/">
+        <span class="icon">✈️</span>
+        <h3>Sky Pilot</h3>
+        <p>Cross-country vector flight sim. Six planes, five airports, mountains and lakes you should not attempt to land on.</p>
+        <span class="tag">Flight Sim</span>
+      </a>
+      <a class="card" style="--card-accent:#ff3b3b" href="kartracer/">
+        <span class="icon">🏁</span>
+        <h3>Kart Racer</h3>
+        <p>Solo time trial across three procedural circuits. Beat your own best lap, saved locally per track.</p>
+        <span class="tag">Racing</span>
+      </a>
+      <div class="card disabled" style="--card-accent:#34d17c" aria-disabled="true">
+        <span class="icon">🐍</span>
+        <h3>Snake</h3>
+        <p>Coming next — the classic, plus 2048, Minesweeper, Breakout and Tetris from the device's GAMEHUB.</p>
+        <span class="tag">In Progress</span>
+      </div>
+      <div class="card disabled" style="--card-accent:#8a9296" aria-disabled="true">
+        <span class="icon">C</span>
+        <h3>C Lab</h3>
+        <p>A full C interpreter with its own file explorer, live on the actual hardware. Not planned for the browser.</p>
+        <span class="tag">Hardware Only</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="controls">
+    <h2>Controls</h2>
+    <p class="sub">The Cardputer's <kbd>;</kbd> <kbd>,</kbd> <kbd>.</kbd> <kbd>/</kbd> keys double as printed directional arrows (up/left/down/right). A few keys work globally, from any app:</p>
+    <table class="keys">
+      <tr><th>Key</th><th>Action</th></tr>
+      <tr><td><kbd>Fn</kbd></td><td>Back / cancel — closes dialogs, returns to Home</td></tr>
+      <tr><td><kbd>Opt</kbd></td><td>Toggle the floating quick-launch menu</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Favourite / unfavourite the current app</td></tr>
+      <tr><td><kbd>`</kbd> at power-on</td><td>Recovery Mode — reboot, factory reset, hardware self-test</td></tr>
+    </table>
+  </section>
+
+  <section id="build">
+    <h2>Build it yourself</h2>
+    <p class="sub">The firmware is one Arduino sketch. Board: <code>esp32:esp32:m5stack_cardputer</code> (arduino-esp32 core 3.x) — it needs the <b>"Huge APP (3MB No OTA/1MB SPIFFS)"</b> partition scheme, since it doesn't fit in the default 1.2&nbsp;MB app partition.</p>
+    <pre class="code">arduino-cli compile --upload -p &lt;PORT&gt; \
+  --fqbn esp32:esp32:m5stack_cardputer:PartitionScheme=huge_app CardputerXL</pre>
+    <p class="sub">Full library list, wiring table, and the rendering/architecture notes are in the <a href="https://github.com/szuszjan/cardputer-xl#readme">README</a>.</p>
+  </section>
 
   <footer>
-    <p>Source: <a href="https://github.com/szuszjan/cardputer-xl">github.com/szuszjan/cardputer-xl</a> — the firmware itself lives at the repo root; everything on this page is served from <code>/docs</code>.</p>
+    <p>Source: <a href="https://github.com/szuszjan/cardputer-xl">github.com/szuszjan/cardputer-xl</a> — the firmware lives at the repo root; this whole page is served from <code>/docs</code>. Flashing uses <a href="https://esphome.github.io/esp-web-tools/">ESP Web Tools</a>.</p>
   </footer>
 </div>
+
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 </body>
 </html>

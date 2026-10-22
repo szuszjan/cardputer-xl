@@ -1,0 +1,12 @@
+{
+  "name": "CardputerXL",
+  "version": "1.2.0",
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "CardputerXL-v1.2.0-merged.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

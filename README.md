@@ -59,3 +59,7 @@ Plus a GPIO-driven haptic motor (GPIO1) and the Cardputer-ADV's addressable RGB 
 ## Architecture, for anyone editing this
 
 See the large comment block at the very top of `CardputerXL.cpp` — it covers the rendering model (single unbuffered panel + a `redrawNeeded`/`draw()`/`refreshLocalPage()` dirty-flag dispatch, with one exception: Kart Racer's live 3D view uses an off-screen canvas), the input dispatch (`keyboard()`), and how state is persisted (ESP32 `Preferences`/NVS, not a filesystem).
+
+## Todo
+
+- PC Remote
