@@ -142,7 +142,7 @@ struct Theme { uint16_t bg, panel, accent, text, dim, selected; };
 // numeric (Page - 1) indices into appNames[], so slotting a new page into
 // the middle would silently renumber every app after it. Appending at the
 // end only ever adds a new index, never reassigns an existing one.
-enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, TRIKISCOPE, MINICAM, BLECOMPANION, BAMBUMONITOR, RADIO, WIFISETUP, LOCKSCREEN, SCREENSAVER };
+enum Page { LAUNCHER, SYSTEM, WIFI, NOTES, CLOCK, CALC, CLAB, CARDCREPL, QRTEXT, SETTINGS, TEXTTOOLS, FAVOURITES, WIFIMONITOR, FILEBROWSER, WEBCOMPANION, HOMEEDITOR, CLABEXAMPLES, DASHBOARD, DICERANDOM, DEVICECHECK, QRTOOLSPLUS, MINIPAINT, LAUNCHERSEARCH, TEXTBROWSER, INPOSTTRACK, ZABKATOTP, MUSICLAB, MIC, BLEKEYBOARD, GAMEHUB, TRIKISCOPE, MINICAM, BLECOMPANION, BAMBUMONITOR, RADIO, TASKMANAGER, WIFISETUP, LOCKSCREEN, SCREENSAVER };
 
 struct CVar { String name; long value; };
 
@@ -443,6 +443,7 @@ void drawTextTools(); void drawFavourites(); void drawWifiMonitor(); void drawFi
 void drawBleCompanion(); void startBleCompanion(); void applyBleInput();
 void drawBambuMonitor(); void startBambuMonitor(); void applyBambuInput();
 void drawRadio(); void startRadio(); void stopRadio(); void applyRadioInput();
+void drawTaskManager();
 void drawCalc(); void updateClockValue(); void updateCalcPanel(); void updateNotesLine(); void updateSettingsRow(int index);
 void drawCLab(); void drawCLabQR(); void drawCardCRepl(); void drawQRText(); void drawQRTextField(); void drawQRModules(); void drawCLabEditor(); void drawCLabCodeLine(int lineIndex); void drawCLabExamples(); void loadCLabExample(int example); void drawCLabExplorer(); void drawCLabSaveDialog(); void drawCLabSlotDialog(); void drawCLabNameDialog(); void openNewCLabFile(); void saveCLabFile(); void openCLabUserApp(int slot, bool runNow); void captureCLabUserApp();
 void runCLab(); void runCardCRepl(); void loadCLabDemo(); String settingValue(int i); void drawSettings(); void draw(); void startScan(); void checkScan(); void calcResult();
@@ -643,15 +644,15 @@ Page previousPage = LAUNCHER;
 Page screensaverReturnPage = LAUNCHER;
 unsigned long screensaverStartedAt = 0;
 unsigned long screensaverLastFrameAt = 0;
-const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES", "TRIKI SCOPE", "MINI CAM", "BLE COMPANION", "BAMBU MONITOR", "RADIO"};
-const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt", "Zabka Triki motion controller over BLE", "MiniCam network camera preview and shutter", "Android companion app: remote control, notes and C LAB over BLE", "Bambu Lab printer status over local LAN mode", "Nightwave Plaza 24/7 vaporwave internet radio"};
-constexpr int APP_COUNT = 34;
+const char* appNames[] = {"SYSTEM", "WI-FI SCAN", "NOTES", "CLOCK", "CALCULATOR", "C LAB", "CARDC REPL", "QR TEXT", "SETTINGS", "TEXT TOOLS", "FAVOURITES", "WI-FI MONITOR", "FILE BROWSER", "WEB COMPANION", "HOME MENU", "C LAB EXAMPLES", "DASHBOARD", "DICE & RANDOM", "DEVICE CHECK", "QR TOOLS +", "MINI PAINT", "LAUNCHER SEARCH", "TEXT BROWSER", "INPOST TRACK", "ZABKA TOTP", "MUSIC LAB", "MIC", "BLE KEYBOARD", "GAMES", "TRIKI SCOPE", "MINI CAM", "BLE COMPANION", "BAMBU MONITOR", "RADIO", "TASK MANAGER"};
+const char* appInfo[] = {"battery, memory, uptime", "nearby networks", "quick text scratchpad", "local uptime clock", "basic arithmetic", "tiny C-style interpreter", "one-line CardC console", "encode text as a QR", "theme and display options", "text counters and transforms", "pinned launcher apps", "signal and channel summary", "saved local note documents", "phone control and C LAB input", "add, move or remove home tiles", "load ready-to-run CardC projects", "live device overview", "dice, coin and number picker", "screen, speaker and key checks", "QR presets and local link", "16 by 12 pixel sketchpad", "find an app by name", "simple HTTP text reader", "track a parcel by number", "SRLN loyalty QR with 6-digit code", "16-step drum sequencer", "live microphone level and waveform", "pair and type to a Bluetooth host", "Snake and Grid Hunt", "Zabka Triki motion controller over BLE", "MiniCam network camera preview and shutter", "Android companion app: remote control, notes and C LAB over BLE", "Bambu Lab printer status over local LAN mode", "Nightwave Plaza 24/7 vaporwave internet radio", "free heap and running apps' memory - end one to reclaim it"};
+constexpr int APP_COUNT = 35;
 constexpr int APP_VISIBLE = 5;
 // Abstract two-character glyphs for the APPS grid (see drawLauncherTileColored()
 // below), same punctuation-icon style as Home's homeTileIcons[] - the default
 // GFX font is ASCII-only, so these are stand-ins rather than literal pictograms.
 // Indexed identically to appNames[]/appInfo[] (i.e. by Page - 1).
-const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><", "^y", "(o", "B)", "3d", "fm"};
+const char* appIcons[] = {"i)", "((", "==", "()", "%=", "{}", ">_", "##", "*/", "Tt", "<3", "~|", "[]", "@_", "^^", ".{", "|_", "?6", "ok", "#+", "/\\", "o?", "<>", "->", "%%", "][", ".)", "bt", "><", "^y", "(o", "B)", "3d", "fm", "ta"};
 // appNames[] is indexed by (Page - 1) and only covers pages up to GAMEHUB -
 // WIFISETUP/LOCKSCREEN/SCREENSAVER aren't "apps" and have no entry, so a raw
 // appNames[(int)p - 1] lookup on an arbitrary Page is not always safe. This
@@ -669,8 +670,8 @@ constexpr int HOME_TILE_COUNT = 6;
 int homeAppIndices[5] = {5, 2, 6, 4, 8}; // C LAB, Notes, REPL, Calc, Settings
 const char* homeTileIcons[HOME_TILE_COUNT] = {"{}", "[]", ">_", "+-", "*", "::"};
 // Entry 0 is a navigation action; the remaining entries open secondary apps.
-const int secondaryAppIndices[29] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33};
-constexpr int SECONDARY_APP_COUNT = 30;
+const int secondaryAppIndices[30] = {0, 1, 3, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34};
+constexpr int SECONDARY_APP_COUNT = 31;
 bool launcherHome = true;
 int homeSelected = 0;
 int appSelected = 0, appScroll = 0;
@@ -9111,6 +9112,44 @@ void drawRadio() {
   footer(radioPlaying ? "ENTER STOP     FN BACK" : "ENTER PLAY     FN BACK");
 }
 
+// ---- TASK MANAGER: free heap + whatever's actually resident right now
+// (registerHeavyResource()'s list - see kartCanvas's own comment). Most of
+// the time that list is empty by design: every heavy app here frees its own
+// buffer the moment you back out of it, same as Android keeps nothing
+// genuinely alive once a task is swiped away - there's no backgrounding in
+// a single-screen, one-app-at-a-time firmware like this one. END TASK is
+// the manual safety net for whatever IS listed.
+int taskManagerSelected = 0;
+void drawTaskManager() {
+  tft.fillScreen(ui.bg); header("TASK MANAGER"); tft.setTextSize(1);
+  tft.setTextColor(ui.accent, ui.bg); tft.setCursor(12, CONTENT_Y + 4);
+  tft.print("FREE HEAP  " + String(ESP.getFreeHeap() / 1024) + " KB");
+  tft.setTextColor(ui.dim, ui.bg); tft.setCursor(12, CONTENT_Y + 18);
+  tft.print("LARGEST BLOCK  " + String(ESP.getMaxAllocHeap() / 1024) + " KB");
+  tft.drawFastHLine(8, CONTENT_Y + 32, W - 16, ui.dim);
+  int y = CONTENT_Y + 44;
+  if (heavyResourceCount == 0) {
+    tft.setTextColor(ui.dim, ui.bg);
+    tft.setCursor(12, y); tft.print("Nothing resident right now.");
+    tft.setCursor(12, y + 14); tft.print("Kart Racer, Sky Pilot and other heavy");
+    tft.setCursor(12, y + 28); tft.print("apps free their own memory on exit.");
+  } else {
+    if (taskManagerSelected >= heavyResourceCount) taskManagerSelected = heavyResourceCount - 1;
+    for (int i = 0; i < heavyResourceCount; ++i) {
+      bool sel = i == taskManagerSelected;
+      uint16_t fill = sel ? ui.selected : ui.bg;
+      tft.fillRect(8, y - 3, W - 16, 20, fill);
+      tft.setTextColor(ui.text, fill);
+      tft.setCursor(16, y); tft.print(sel ? "> " : "  "); tft.print(heavyResources[i].name);
+      String kb = String(heavyResources[i].approxBytes / 1024) + " KB";
+      tft.setTextColor(sel ? ui.accent : ui.dim, fill);
+      tft.setCursor(W - 20 - 6 * (int)kb.length(), y); tft.print(kb);
+      y += 24;
+    }
+  }
+  footer(heavyResourceCount ? ";/. SELECT   ENTER END TASK   FN BACK" : "FN BACK");
+}
+
 void startWebCompanion() {
   if (webRunning) {
     webServer.stop();
@@ -9366,7 +9405,7 @@ void draw() {
   // itself (Home/Apps aren't "an app" to splash into) - see
   // playAppIntroAnimation()'s own comment for what this actually plays.
   if (realAppTransition && page != LAUNCHER) playAppIntroAnimation(page);
-  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) { ensureBleReady(); drawBleKeyboard(); } else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else if (page == MINICAM) { miniCamJoinNetwork(); drawMiniCam(); } else if (page == BLECOMPANION) drawBleCompanion(); else if (page == BAMBUMONITOR) drawBambuMonitor(); else if (page == RADIO) drawRadio(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
+  if (page == LOCKSCREEN) drawLockScreen(); else if (page == WIFISETUP) drawWifiSetup(); else if (page == LAUNCHER) drawLauncher(); else if (page == SYSTEM) drawSystem(); else if (page == WIFI) drawWifi(); else if (page == NOTES) drawNotes(); else if (page == CLOCK) drawClock(); else if (page == CALC) drawCalc(); else if (page == CLAB) drawCLab(); else if (page == CARDCREPL) { if (cLabQrActive) drawCLabQR(); else drawCardCRepl(); } else if (page == QRTEXT) drawQRText(); else if (page == SETTINGS) drawSettings(); else if (page == TEXTTOOLS) drawTextTools(); else if (page == FAVOURITES) drawFavourites(); else if (page == WIFIMONITOR) drawWifiMonitor(); else if (page == FILEBROWSER) drawFileBrowser(); else if (page == HOMEEDITOR) drawHomeEditor(); else if (page == CLABEXAMPLES) drawCLabExamples(); else if (page == DASHBOARD) drawDashboard(); else if (page == DICERANDOM) drawDiceRandom(); else if (page == GAMEHUB) drawGameHub(); else if (page == DEVICECHECK) drawDeviceCheck(); else if (page == QRTOOLSPLUS) drawQRToolsPlus(); else if (page == MINIPAINT) drawMiniPaint(); else if (page == LAUNCHERSEARCH) drawLauncherSearch(); else if (page == TEXTBROWSER) drawTextBrowser(); else if (page == INPOSTTRACK) drawInPostTrack(); else if (page == ZABKATOTP) drawZabkaTotp(); else if (page == MUSICLAB) drawMusicLab(); else if (page == MIC) drawMic(); else if (page == BLEKEYBOARD) { ensureBleReady(); drawBleKeyboard(); } else if (page == SCREENSAVER) drawScreensaver(); else if (page == TRIKISCOPE) drawTrikiScope(); else if (page == MINICAM) { miniCamJoinNetwork(); drawMiniCam(); } else if (page == BLECOMPANION) drawBleCompanion(); else if (page == BAMBUMONITOR) drawBambuMonitor(); else if (page == RADIO) drawRadio(); else if (page == TASKMANAGER) drawTaskManager(); else drawWebCompanion(); lastDrawnPage = page; redrawNeeded = false; updateBuiltinDisplay(true); }
 
 // Repaint only a changed application's content. Headers and footers are kept
 // intact; full draw() remains reserved for entering a different scene, modal
@@ -10551,6 +10590,20 @@ void keyboard() {
     return;
   }
   if (page == RADIO) { if (k.enter) startRadio(); return; }
+  if (page == TASKMANAGER) {
+    if (heavyResourceCount > 0) {
+      for (char c : k.word) {
+        if (c == ';') { taskManagerSelected = (taskManagerSelected + heavyResourceCount - 1) % heavyResourceCount; playMenuSound(); redrawNeeded = true; }
+        else if (c == '.') { taskManagerSelected = (taskManagerSelected + 1) % heavyResourceCount; playMenuSound(); redrawNeeded = true; }
+      }
+      if (k.enter && taskManagerSelected < heavyResourceCount) {
+        heavyResources[taskManagerSelected].freeFn();
+        playExitSound();
+        redrawNeeded = true;
+      }
+    }
+    return;
+  }
   if (page == CLABEXAMPLES) {
     // Examples is entered from C LAB FILES, so use its robust key path too.
     bool up = wordContains(k.word, ';') || M5Cardputer.Keyboard.isKeyPressed(';');
